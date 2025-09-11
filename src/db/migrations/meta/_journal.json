@@ -1,0 +1,20 @@
+{
+  "version": "5",
+  "dialect": "pg",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1757070861461,
+      "tag": "0000_rare_mercury",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1757147957007,
+      "tag": "0001_remarkable_ikaris",
+      "breakpoints": true
+    }
+  ]
+}

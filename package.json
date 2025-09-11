@@ -1,0 +1,30 @@
+{
+  "name": "@stupid-meter/api",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^8.0.0",
+    "@fastify/env": "^5.0.2",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node-cron": "^3.0.11",
+    "@types/uuid": "^10.0.0",
+    "better-sqlite3": "^12.2.0",
+    "dotenv": "^16.0.0",
+    "drizzle-orm": "^0.28.6",
+    "fastify": "^4.0.0",
+    "node-cron": "^4.2.1",
+    "node-fetch": "^3.3.2",
+    "postgres": "^3.0.0",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "drizzle-kit": "^0.19.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

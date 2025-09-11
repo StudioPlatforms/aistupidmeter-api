@@ -1,0 +1,63 @@
+# Node / managers
+node_modules/
+.pnpm-store/
+.yarn/*
+!.yarn/patches
+!.yarn/releases
+!.yarn/plugins
+!.yarn/sdks
+!.yarn/versions
+
+# Builds & caches
+dist/
+build/
+.out/
+.next/
+.next-cache/
+.vercel/
+.turbo/
+coverage/
+.vite/
+tmp/
+temp/
+*.log
+logs/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# Databases / data
+*.sqlite
+*.db
+data/
+**/*.db
+**/*.sqlite
+database.sqlite
+data.db
+
+# Backups / archives
+*.tar.gz
+*.zip
+*.tgz
+apps_stability_fix_*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Test and debug scripts that might contain sensitive data
+debug-*.js
+test-*.js
+check-*.js
+trigger-*.js
+production-init.js
+run-seed.js
