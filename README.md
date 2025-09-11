@@ -136,6 +136,11 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📧 Contact
 
-StudioPlatforms - [GitHub](https://github.com/StudioPlatforms)
+**Built by:** Laurent @ StudioPlatforms
+
+- **X/Twitter:** [@goatgamedev](https://x.com/goatgamedev)
+- **Email:** laurent@studio-blockchain.com
+- **GitHub:** [StudioPlatforms](https://github.com/StudioPlatforms)
+- **Subreddit:** [r/AIStupidlevel](https://www.reddit.com/r/AIStupidlevel)
 
 Project Link: [https://github.com/StudioPlatforms/aistupidmeter-api](https://github.com/StudioPlatforms/aistupidmeter-api)
