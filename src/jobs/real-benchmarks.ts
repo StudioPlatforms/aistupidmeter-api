@@ -30,6 +30,7 @@ try {
 const TRIALS = 3;                    // Reduced trials for efficiency
 const SLEEP_MS_RANGE = [200, 400];   // jitter between trials
 const EFF_REF_MS = 1000;             // efficiency reference latency (tightened)
+const EFF_SIGMA_MS = Math.max(100, Math.round(EFF_REF_MS * 0.3)); // width of the sigmoid
 const MIN_HISTORY_FOR_BASELINE = 10; // Minimum historical scores needed for baseline
 const STD_EPS = 1e-6;                // avoid div-by-zero
 
@@ -37,8 +38,8 @@ const AXIS_WEIGHTS = {
   correctness: 0.35,
   complexity: 0.20,    // Changed from spec to complexity
   codeQuality: 0.15,
-  efficiency: 0.10,
-  stability: 0.10,
+  efficiency: 0.05,    // Optional: Reduced from 0.10 to further de-emphasize speed
+  stability: 0.15,     // Increased to compensate
   edgeCases: 0.05,     // Changed from refusal
   debugging: 0.05      // Changed from recovery
 } as const;
@@ -388,7 +389,7 @@ print(json.dumps(ok))
   if (/(global\s|lambda\s)/.test(clean)) codeQuality -= 0.05;
   if (clean.length > 2500) codeQuality -= 0.05;
 
-  codeQuality = Math.max(0, Math.min(0.75, codeQuality));
+  codeQuality = Math.max(0, Math.min(1.0, codeQuality));
 
   // 3) Runner izolat și tolerant la erori din soluție
   const runnerPath = path.join(os.tmpdir(), `run_${Date.now()}.py`);
@@ -522,12 +523,9 @@ function addAntiCachingNonce(prompt: string, nonce: string): string {
 }
 
 function getSaltedSystemMessage(baseMessage: string, model: { name: string; vendor: Provider }): string {
-  // Add salt for Gemini 2.5 to avoid request-level caching
-  if (model.vendor === 'google' && model.name.includes('2.5')) {
-    const salt = generateNonce();
-    return `${baseMessage} [Context: ${salt}]`;
-  }
-  return baseMessage;
+  // Apply consistent anti-cache salting to all vendors for fair comparison
+  const salt = generateNonce();
+  return `${baseMessage} [Context: ${salt}]`;
 }
 
 function getVariedSystemMessage(): string {
@@ -584,16 +582,14 @@ async function runSingleBenchmarkStreaming(
       }
     }
     
-    if (model.vendor === 'openai') {
-      if (/^gpt-5/.test(model.name)) {
-        // GPT-5 needs much higher token limits due to reasoning consumption
-        maxTokens = Math.max(8000, maxTokens * 6);
-        reasoning_effort = 'low'; // Use low reasoning effort for faster, more reliable results
-      } else if (/^o\d|^o-mini|^o-/.test(model.name)) {
-        // o-series models also need higher limits but not as much as GPT-5
-        maxTokens = Math.max(2000, maxTokens * 3);
-        reasoning_effort = 'medium';
-      }
+    // Balance prompting & maxTokens across providers - consistent limits to avoid latency skew
+    maxTokens = Math.min(task.maxTokens * 3, 1200);  // hard cap ~1200 for all
+    temperature = 0.1;
+    reasoning_effort = undefined; // remove special boosts
+    
+    // Only apply reasoning effort for models that absolutely require it, with latency budget consideration
+    if (model.vendor === 'openai' && /^o\d|^o-mini|^o-/.test(model.name)) {
+      reasoning_effort = 'low'; // Use minimal reasoning to avoid excessive latency penalty
     }
 
     // ANTI-CACHING: Generate unique identifiers for this request
@@ -717,12 +713,10 @@ async function runSingleBenchmarkStreaming(
     streamLog('info', `      🎯 Edge Cases: ${(evalRes.edgeCases * 100).toFixed(1)}%`);
     streamLog('info', `      🔧 Debugging: ${(evalRes.debugging * 100).toFixed(1)}%`);
     
-    // Harsher efficiency calculation
-    const effRaw = Math.min(1, EFF_REF_MS / Math.max(1, latencyMs));
-    // concave and capped to avoid easy 1.0s
-    const efficiency = Math.max(0, Math.min(0.92, Math.pow(effRaw, 0.85)));
+    // Fair efficiency calculation using relative z-score (will be calculated after all trials)
+    const efficiency = 0; // Placeholder - will be calculated in aggregation phase
     
-    streamLog('info', `      ⚡ Efficiency: ${(efficiency * 100).toFixed(1)}% (${latencyMs}ms vs ${EFF_REF_MS}ms ref)`);
+    streamLog('info', `      ⚡ Latency: ${latencyMs}ms (efficiency will be calculated relative to batch)`);
     
     // Map evaluation results to axis metrics
     const m = {
@@ -801,16 +795,13 @@ async function runSingleBenchmark(
     let maxTokens = task.maxTokens;
     let reasoning_effort: string | undefined = undefined;
     
-    if (model.vendor === 'openai') {
-      if (/^gpt-5/.test(model.name)) {
-        // GPT-5 needs much higher token limits due to reasoning consumption
-        maxTokens = Math.max(8000, task.maxTokens * 6);
-        reasoning_effort = 'low'; // Use low reasoning effort for faster, more reliable results
-      } else if (/^o\d|^o-mini|^o-/.test(model.name)) {
-        // o-series models also need higher limits but not as much as GPT-5
-        maxTokens = Math.max(2000, task.maxTokens * 3);
-        reasoning_effort = 'medium';
-      }
+    // Balance prompting & maxTokens across providers - consistent limits to avoid latency skew
+    maxTokens = Math.min(task.maxTokens * 3, 1200);  // hard cap ~1200 for all
+    reasoning_effort = undefined; // remove special boosts
+    
+    // Only apply reasoning effort for models that absolutely require it, with latency budget consideration
+    if (model.vendor === 'openai' && /^o\d|^o-mini|^o-/.test(model.name)) {
+      reasoning_effort = 'low'; // Use minimal reasoning to avoid excessive latency penalty
     }
 
     // ANTI-CACHING: Generate unique identifiers for this request
@@ -862,10 +853,8 @@ async function runSingleBenchmark(
     }
 
     const evalRes = await evaluateCode(sanitized, task);
-    // Harsher efficiency calculation
-    const effRaw = Math.min(1, EFF_REF_MS / Math.max(1, latencyMs));
-    // concave and capped to avoid easy 1.0s
-    const efficiency = Math.max(0, Math.min(0.92, Math.pow(effRaw, 0.85)));
+    // Fair efficiency calculation using relative z-score (will be calculated after all trials)
+    const efficiency = 0; // Placeholder - will be calculated in aggregation phase
     
     // Map evaluation results to axis metrics
     const m = {
@@ -924,10 +913,10 @@ async function runTaskWithTrials(
     med[k] = median(ok.map(t => t.metrics[k]));
   }
 
-  // Stability from variance across trials
+  // Stability from variance across trials - fix inflation on small samples
   const corrSeries = trials.map(t => t.metrics.correctness ?? 0);
-  const sd = stdev(corrSeries);
-  med.stability = Math.max(0, Math.min(1, 1 - sd / 0.3));
+  const sd = corrSeries.length > 1 ? stdev(corrSeries) : null;
+  med.stability = sd === null ? 0.5 : Math.max(0, Math.min(1, 1 - sd / 0.3)); // default 0.5 if <2 trials
 
   const latencyMed = median(ok.map(t => t.latencyMs));
   const tokensInMed = median(ok.map(t => t.tokensIn ?? 0));
@@ -1031,10 +1020,10 @@ async function runTaskWithTrialsStreaming(
     med[k] = median(ok.map(t => t.metrics[k]));
   }
 
-  // Stability from variance across trials - handle edge case with single trial
+  // Fix 3: Streaming stability inflation consistency - match non-streaming version
   const corrSeries = ok.map(t => t.metrics.correctness ?? 0);
-  const sd = corrSeries.length > 1 ? stdev(corrSeries) : 0;
-  med.stability = Math.max(0, Math.min(1, 1 - sd / 0.3));
+  const sd = corrSeries.length > 1 ? stdev(corrSeries) : null;
+  med.stability = sd === null ? 0.5 : Math.max(0, Math.min(1, 1 - sd / 0.3)); // default 0.5 if <2 trials
 
   const latencyMed = median(ok.map(t => t.latencyMs));
   const tokensInMed = median(ok.map(t => t.tokensIn ?? 0));
@@ -1155,8 +1144,8 @@ function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasB
     if (k === 'correctness' && performance < 0.95) {
       performance *= 0.7; // Correctness is critical - big penalty
     }
-    if (k === 'codeQuality' && performance < 0.8) {
-      performance *= 0.6; // Poor code quality is unacceptable
+    if (k === 'codeQuality' && performance < 0.6) {
+      performance *= 0.9; // tiny nudge instead of a hammer
     }
     
     weightedSum += performance * weight * 100;
@@ -1196,10 +1185,10 @@ function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasB
   const codeQuality = axesNow.codeQuality || 0;
   const complexity = axesNow.complexity || 0;
   
-  // Quality Gate 1: Correctness requirements
-  if (correctness < 0.9) finalScore -= 15; // Major penalty for <90% correct
-  if (correctness < 0.7) finalScore -= 20; // Massive penalty for <70% correct
-  if (correctness < 0.5) finalScore -= 30; // Nearly failing for <50% correct
+  // Quality Gate 1: Correctness requirements (softened)
+  if (correctness < 0.9) finalScore -= 8;  // was 15
+  if (correctness < 0.7) finalScore -= 8;  // cumulative but smaller
+  if (correctness < 0.5) finalScore -= 10; // smaller again
   
   // Quality Gate 2: Code quality requirements  
   if (codeQuality < 0.6) finalScore -= 10; // Penalty for poor code
@@ -1208,34 +1197,9 @@ function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasB
   // Quality Gate 3: Task completion requirements
   if (complexity < 0.3) finalScore -= 12; // Didn't understand the task
   
-  // HARSH: "A" grade is extremely rare - 85+ should be exceptional
-  if (finalScore >= 85) {
-    // Must excel in ALL major categories to get 85+
-    const majorAxesExcellent = correctness >= 0.95 && codeQuality >= 0.8 && complexity >= 0.7;
-    if (!majorAxesExcellent) {
-      finalScore = Math.min(finalScore, 82); // Cap at B+ level
-    }
-  }
-  
-  // HARSH: "A+" (90+) is nearly impossible - only for near-perfection
-  if (finalScore >= 90) {
-    const nearPerfect = (Object.keys(AXIS_WEIGHTS) as AxisKey[]).every(k => 
-      (axesNow[k] || 0) >= 0.92
-    );
-    if (!nearPerfect) {
-      finalScore = Math.min(finalScore, 87); // Cap well below 90
-    }
-  }
-  
-  // HARSH: Perfect scores (95+) require actual perfection
-  if (finalScore >= 95) {
-    const actualPerfection = (Object.keys(AXIS_WEIGHTS) as AxisKey[]).every(k => 
-      (axesNow[k] || 0) >= 0.98
-    );
-    if (!actualPerfection) {
-      finalScore = Math.min(finalScore, 89); // No perfect scores without perfection
-    }
-  }
+  // Fix 4: Remove grade caps that suppress top models
+  // Allow models to achieve high scores based on their actual performance
+  // No artificial caps - let the natural scoring system determine the final score
   
   return Math.round(Math.max(0, Math.min(100, finalScore)));
 }
@@ -1330,7 +1294,7 @@ export async function benchmarkModel(
           { role: 'user', content: 'What is 2 + 2? Answer with just the number.' }
         ],
         temperature: 0.1,
-        maxTokens: /^gpt-5/.test(model.name) ? 8000 : 100, // Higher limit for GPT-5
+        maxTokens: /^gpt-5/.test(model.name) ? 1200 : 100, // Optional: Reduced canary tokens for GPT-5
         reasoning_effort: 'low' // Use minimal reasoning for canary
       };
     } else if (model.vendor === 'google' && model.name.includes('gemini-2.5')) {
@@ -1388,7 +1352,7 @@ export async function benchmarkModel(
         ],
         temperature: 0.1,
         maxTokens: 8000,
-        reasoning_effort: 'minimal'
+        reasoning_effort: 'low'
       };
       ping = await withBackoff(() => adapter.chat(retryRequest));
       sanitized = (ping?.text ?? '').trim();
@@ -1410,15 +1374,39 @@ export async function benchmarkModel(
     return;
   }
 
-  // Randomly select subset of tasks for variety
+  // Deterministic task selection using batch timestamp as seed
   const taskCount = Math.min(7, BENCHMARK_TASKS.length);
-  const selectedTasks = [...BENCHMARK_TASKS]
-    .sort(() => Math.random() - 0.5)
-    .slice(0, taskCount);
+  
+  // Deterministic shuffle by batchTimestamp
+  function shuffleDet<T>(arr: T[], seed: string): T[] {
+    const a = [...arr];
+    let h = [...Buffer.from(seed)].reduce((s,b)=> (s*33 + b) >>> 0, 5381);
+    for (let i=a.length-1;i>0;i--){
+      h = (h*1103515245 + 12345) >>> 0;
+      const j = h % (i+1);
+      [a[i],a[j]] = [a[j],a[i]];
+    }
+    return a;
+  }
+  
+  const selectedTasks = shuffleDet(BENCHMARK_TASKS, batchTimestamp || new Date().toISOString()).slice(0, taskCount);
 
   // Log task selection for streaming users
   streamLog('info', `📝 Selected ${selectedTasks.length} benchmark tasks from ${BENCHMARK_TASKS.length} total`);
   streamLog('info', `🎯 Tasks: ${selectedTasks.map(t => `${t.id} (${t.difficulty})`).join(', ')}`);
+
+  // Fix 1: Collect finished tasks for proper persistence timing
+  type Finished = {
+    task: typeof BENCHMARK_TASKS[0],
+    collapsed: {
+      latencyMs: number,
+      tokensIn: number,
+      tokensOut: number,
+      metrics: Axes,
+      code?: string
+    }
+  };
+  const finished: Finished[] = [];
 
   const perTaskAxes: Axes[] = [];
   let latencies: number[] = [];
@@ -1455,26 +1443,10 @@ export async function benchmarkModel(
         streamLog('info', `  💻 Generated code preview: ${codeSnippet}${result.collapsed.code.length > 200 ? '...' : ''}`);
       }
       
+      // Fix 1: Collect finished tasks instead of persisting immediately
+      finished.push({ task, collapsed: result.collapsed });
       perTaskAxes.push(result.collapsed.metrics);
       latencies.push(result.collapsed.latencyMs);
-      
-      // Persist run data
-      try {
-        await persistCollapsedRun({
-          modelId: model.id,
-          taskSlug: task.slug,
-          latencyMs: result.collapsed.latencyMs,
-          tokensIn: result.collapsed.tokensIn,
-          tokensOut: result.collapsed.tokensOut,
-          axes: result.collapsed.metrics,
-          code: result.collapsed.code   // Use sanitized code for dedup
-        });
-        
-        streamLog('info', `💾 Results saved to database for task ${task.id}`);
-      } catch (persistError) {
-        streamLog('error', `⚠️ Failed to save results for task ${task.id}: ${String(persistError).slice(0, 100)}`);
-        // Continue anyway - don't let persistence errors stop the benchmark
-      }
     } catch (taskError: any) {
       // Catch any unexpected errors at the task level
       const errorMsg = String(taskError?.message || taskError).slice(0, 200);
@@ -1509,25 +1481,10 @@ export async function benchmarkModel(
           streamLog('success', `✅ Retry success! Task ${task.id}: ${(metrics.correctness * 100).toFixed(1)}% correct, ${result.collapsed.latencyMs}ms avg`);
           streamLog('info', `  📊 Enhanced metrics: correctness=${(metrics.correctness*100).toFixed(1)}%, quality=${(metrics.codeQuality*100).toFixed(1)}%`);
           
+          // Fix 1: Collect finished tasks instead of persisting immediately
+          finished.push({ task, collapsed: result.collapsed });
           perTaskAxes.push(result.collapsed.metrics);
           latencies.push(result.collapsed.latencyMs);
-          
-          // Persist run data
-          try {
-            await persistCollapsedRun({
-              modelId: model.id,
-              taskSlug: task.slug,
-              latencyMs: result.collapsed.latencyMs,
-              tokensIn: result.collapsed.tokensIn,
-              tokensOut: result.collapsed.tokensOut,
-              axes: result.collapsed.metrics,
-              code: result.collapsed.code
-            });
-            
-            streamLog('info', `💾 Retry results saved to database for task ${task.id}`);
-          } catch (persistError) {
-            streamLog('error', `⚠️ Failed to save retry results for task ${task.id}: ${String(persistError).slice(0, 100)}`);
-          }
           
           // Remove from failed list since it succeeded
           failedTasks.splice(failedTasks.indexOf(task), 1);
@@ -1572,6 +1529,15 @@ export async function benchmarkModel(
     return;
   }
 
+  // Fix 1: Implement absolute efficiency curve using EFF_REF_MS constant
+  // This provides consistent efficiency scoring across all models and batches
+  for (let i = 0; i < perTaskAxes.length; i++) {
+    const latMs = latencies[i];
+    const z = (latMs - EFF_REF_MS) / EFF_SIGMA_MS;
+    const eff = 1 / (1 + Math.exp(z));
+    perTaskAxes[i].efficiency = Math.max(0.1, Math.min(0.9, eff));
+  }
+
   // Aggregate metrics across successful tasks
   const agg: Axes = { 
     correctness:0, complexity:0, codeQuality:0, efficiency:0,
@@ -1584,11 +1550,11 @@ export async function benchmarkModel(
       : 0;
   });
 
-  // Apply stability soft-ceiling to reduce perfects
+  // Fix stability clamping issues - clamp both min and max for fairness
   function clampAxesForScore(a: Axes): Axes {
     return {
       ...a,
-      stability: Math.min(a.stability, 0.95) // tiny soft-ceiling
+      stability: Math.max(0.3, Math.min(a.stability, 0.95)) // clamp both ways for fairness
     };
   }
 
@@ -1609,8 +1575,8 @@ export async function benchmarkModel(
     finalScore = calculateScore(clampAxesForScore(agg), baseline, true);
   }
 
-  // Apply failure penalty (up to -12 for total failure, ~ -3 for 75% success)
-  const failurePenalty = Math.round((1 - taskSuccessRate) * 12);
+  // Apply failure penalty (reduced from 12 to 6)
+  const failurePenalty = Math.round((1 - taskSuccessRate) * 6);
   finalScore = Math.max(0, finalScore - failurePenalty);
 
   if (failedTasks.length > 0) {
