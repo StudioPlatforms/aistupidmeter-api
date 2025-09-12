@@ -9,11 +9,11 @@ export function startBenchmarkScheduler() {
   console.log(`🚀 Starting benchmark scheduler at ${new Date().toISOString()}`);
   
   // Validate cron is working by testing the expression
-  const isValidCron = cron.validate('0,20,40 * * * *');
+  const isValidCron = cron.validate('0 * * * *');
   console.log(`📋 Cron expression validation: ${isValidCron ? '✅ Valid' : '❌ Invalid'}`);
 
-  // Run benchmarks every 20 minutes at :00, :20, and :40
-  scheduledTask = cron.schedule('0,20,40 * * * *', async () => {
+  // Run benchmarks every hour at the top of the hour (:00)
+  scheduledTask = cron.schedule('0 * * * *', async () => {
     const now = new Date();
     console.log(`🔔 Cron triggered at ${now.toISOString()}`);
     
@@ -41,22 +41,18 @@ export function startBenchmarkScheduler() {
     timezone: 'Europe/Berlin' // Explicitly set timezone
   });
 
-  console.log('📅 Benchmark scheduler started - runs every 20 minutes at :00, :20, and :40');
+  console.log('📅 Benchmark scheduler started - runs every hour at the top of the hour (:00)');
   console.log(`🌍 Scheduler timezone: Europe/Berlin`);
   console.log(`⚡ Scheduler is active: ${scheduledTask ? scheduledTask.getStatus() : 'Unknown'}`);
   
   // Log next scheduled times
   const now = new Date();
   const minutes = now.getMinutes();
-  let nextMinute: number;
+  let nextMinute = 0;
   let nextHour = now.getHours();
   
-  if (minutes < 20) {
-    nextMinute = 20;
-  } else if (minutes < 40) {
-    nextMinute = 40;
-  } else {
-    nextMinute = 0;
+  // If we're past the top of the hour, schedule for next hour
+  if (minutes > 0) {
     nextHour = (nextHour + 1) % 24;
   }
   
@@ -73,15 +69,11 @@ export function startBenchmarkScheduler() {
     console.log(`   - Scheduler active: ${scheduledTask ? scheduledTask.getStatus() : 'Unknown'}`);
     
     const mins = currentTime.getMinutes();
-    let nextMin: number;
+    let nextMin = 0;
     let nextHr = currentTime.getHours();
     
-    if (mins < 20) {
-      nextMin = 20;
-    } else if (mins < 40) {
-      nextMin = 40;
-    } else {
-      nextMin = 0;
+    // If we're past the top of the hour, schedule for next hour
+    if (mins > 0) {
       nextHr = (nextHr + 1) % 24;
     }
     
@@ -112,18 +104,18 @@ export function getBenchmarkStatus() {
   const minutes = now.getMinutes();
   let nextRun: Date;
   
-  // Benchmarks run every 20 minutes at :00, :20, and :40
-  if (minutes < 20) {
-    nextRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), 20, 0, 0);
-  } else if (minutes < 40) {
-    nextRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), 40, 0, 0);
+  // Benchmarks run every hour at the top of the hour (:00)
+  if (minutes === 0) {
+    // If it's exactly the top of the hour, next run is in 1 hour
+    nextRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0, 0);
   } else {
+    // If we're past the top of the hour, next run is at the next hour's :00
     nextRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0, 0);
   }
   
   return {
     isRunning,
-    nextScheduledRun: nextRun, // When benchmark actually runs (every 20 min at :00/:20/:40)
+    nextScheduledRun: nextRun, // When benchmark actually runs (every hour at :00)
     nextActualRun: nextRun,    // Same time - no confusion
     minutesUntilNext: Math.ceil((nextRun.getTime() - now.getTime()) / 60000)
   };

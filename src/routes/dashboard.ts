@@ -143,7 +143,7 @@ async function getModelScoresFromDB() {
             gte(scores.ts, twentyFourHoursAgo.toISOString())
           ))
           .orderBy(desc(scores.ts))
-          .limit(48); // 24 hours worth of data at 30-minute intervals
+          .limit(24); // 24 hours worth of data at hourly intervals
         
         const validStabilityScores = last24HoursScores.filter(s => 
           s.stupidScore !== null && s.stupidScore !== -777 && s.stupidScore !== -888 && s.stupidScore !== -999 && s.stupidScore >= 0
@@ -294,7 +294,7 @@ async function getHistoricalModelScores(period: string) {
     switch (period) {
       case '24h':
         timeThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        dataPoints = 48; // 30-minute intervals
+        dataPoints = 24; // hourly intervals
         break;
       case '7d':
         timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -919,7 +919,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
         .from(scores)
         .where(eq(scores.modelId, parseInt(modelId)))
         .orderBy(desc(scores.ts))
-        .limit(336); // 7 days of 30-minute interval data (48 entries per day * 7 days)
+        .limit(168); // 7 days of hourly interval data (24 entries per day * 7 days)
 
       const formattedHistory = history.map(score => ({
         timestamp: new Date(score.ts || new Date().toISOString()),
@@ -944,19 +944,8 @@ export default async function (fastify: FastifyInstance, opts: any) {
   fastify.get('/status', async () => {
     try {
       const now = new Date();
-      // Calculate next 20-minute interval (:00, :20, :40)
-      const minutes = now.getMinutes();
-      let nextRun;
-      if (minutes < 20) {
-        // Next run is at :20 of current hour
-        nextRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), 20, 0, 0);
-      } else if (minutes < 40) {
-        // Next run is at :40 of current hour
-        nextRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), 40, 0, 0);
-      } else {
-        // Next run is at :00 of next hour
-        nextRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0, 0);
-      }
+      // Calculate next hourly interval (:00)
+      const nextRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0, 0);
       
       // Get current model data to provide accurate status
       let totalModels = 0;

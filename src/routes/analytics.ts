@@ -705,14 +705,9 @@ export default async function (fastify: FastifyInstance, opts: any) {
       const dataScore = Math.min(100, (totalDataPoints / 100) * 100); // 100 data points = 100% confidence
       metrics.confidence = Math.round((freshnessScore * 0.4 + coverageScore * 0.3 + dataScore * 0.3));
       
-      // Calculate next test time (30-minute intervals)
+      // Calculate next test time (hourly intervals)
       const now = new Date();
-      const minutes = now.getMinutes();
-      if (minutes < 30) {
-        metrics.nextTest = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), 30, 0, 0);
-      } else {
-        metrics.nextTest = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0, 0);
-      }
+      metrics.nextTest = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0, 0);
       
       return {
         success: true,
