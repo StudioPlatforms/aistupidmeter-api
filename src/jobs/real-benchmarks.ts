@@ -13,8 +13,7 @@ import {
 } from '../llm/adapters';
 import { db } from '../db/index';
 import { models, scores, runs, metrics, tasks as tasksTable } from '../db/schema';
-import { desc, eq, and, gte } from 'drizzle-orm';
-import { sql } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import * as crypto from 'crypto';
 
 // Import streaming function for detailed user logs
@@ -29,20 +28,33 @@ try {
 // ---------- Config ----------
 const TRIALS = 3;                    // Reduced trials for efficiency
 const SLEEP_MS_RANGE = [200, 400];   // jitter between trials
-const EFF_REF_MS = 1000;             // efficiency reference latency (tightened)
-const EFF_SIGMA_MS = Math.max(100, Math.round(EFF_REF_MS * 0.3)); // width of the sigmoid
 const MIN_HISTORY_FOR_BASELINE = 10; // Minimum historical scores needed for baseline
 const STD_EPS = 1e-6;                // avoid div-by-zero
 
 const AXIS_WEIGHTS = {
-  correctness: 0.35,
-  complexity: 0.20,    // Changed from spec to complexity
-  codeQuality: 0.15,
-  efficiency: 0.05,    // Optional: Reduced from 0.10 to further de-emphasize speed
-  stability: 0.15,     // Increased to compensate
+  correctness: 0.30,   // Reduced slightly
+  complexity: 0.18,    // Changed from spec to complexity
+  codeQuality: 0.12,
+  efficiency: 0.05,    // Kept low for throughput focus
+  stability: 0.12,     // Adjusted for new axes
   edgeCases: 0.05,     // Changed from refusal
-  debugging: 0.05      // Changed from recovery
+  debugging: 0.05,     // Changed from recovery
+  format: 0.08,        // New axis for JSON/format obedience
+  safety: 0.05         // New axis for refusal/jailbreak correctness
 } as const;
+
+// Cost tracking configuration
+const PROVIDER_COSTS = {
+  openai: { input: 0.03, output: 0.06 },     // per 1k tokens (GPT-4 pricing)
+  anthropic: { input: 0.03, output: 0.15 },  // Claude pricing
+  google: { input: 0.0125, output: 0.0375 }, // Gemini Pro pricing
+  xai: { input: 0.002, output: 0.002 }       // Grok pricing
+} as const;
+
+// Drift detection parameters
+const DRIFT_WINDOW = 12;          // Look at last 12 runs
+const DRIFT_DELTA = 0.005;        // Sensitivity
+const DRIFT_LAMBDA = 0.5;         // Threshold
 
 type AxisKey = keyof typeof AXIS_WEIGHTS;
 
@@ -71,15 +83,17 @@ function extractPython(raw: string, expectedSymbol: string): string {
   // Normalizări rapide
   let s = raw.replace(/\r\n/g, "\n").trim();
 
-  // 1) Preferă cel mai lung bloc ```python ... ```
+  // 1) Preferă blocul care conține simbolul așteptat, altfel cel mai lung
   const codeBlockRegex = /```(?:python|py)?\s*([\s\S]*?)```/gi;
-  let best: string | null = null;
+  const blocks: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = codeBlockRegex.exec(s)) !== null) {
-    const body = m[1].trim();
-    if (!best || body.length > best.length) best = body;
+    blocks.push(m[1].trim());
   }
-  if (best) s = best;
+  if (blocks.length) {
+    const withSymbol = blocks.find(b => new RegExp(`\\b(def|class)\\s+${expectedSymbol}\\b`).test(b));
+    s = (withSymbol ?? blocks.reduce((a,b) => a.length >= b.length ? a : b)).trim();
+  }
 
   // 2) Dacă încă mai e text, taie tot ce e înainte de primul def/class
   if (!/^(\s*def |\s*class )/m.test(s)) {
@@ -312,8 +326,8 @@ function getAdapter(provider: Provider): LLMAdapter | null {
 }
 
 // ---------- Enhanced code evaluation ----------
-async function evaluateCode(code: string, task: typeof BENCHMARK_TASKS[0]): Promise<{
-  correctness: number; complexity: number; codeQuality: number; edgeCases: number; debugging: number;
+async function evaluateCode(rawText: string, cleanCode: string, task: typeof BENCHMARK_TASKS[0]): Promise<{
+  correctness: number; complexity: number; codeQuality: number; edgeCases: number; debugging: number; format: number; safety: number;
 }> {
   const { exec } = require('child_process');
   const { promisify } = require('util');
@@ -322,8 +336,8 @@ async function evaluateCode(code: string, task: typeof BENCHMARK_TASKS[0]): Prom
   const os = require('os');
   const execAsync = promisify(exec);
 
-  // 0) Curățare robustă
-  let clean = extractPython(code, task.expectedCode);
+  // 0) Use cleanCode (already extracted) and rawText for different purposes  
+  let clean = cleanCode;
 
   // 1) Complexitate (verificăm că simbolul există și codul e parsabil)
   let complexity = 0;
@@ -425,12 +439,11 @@ sol_path = sys.argv[1]
 src = open(sol_path).read().replace('\\r\\n','\\n')
 
 ns = {}
-ok_compile = 1
 try:
     codeobj = compile(src, '<solution>', 'exec')
     exec(codeobj, ns, ns)
 except Exception as e:
-    ok_compile = 0
+    pass
 
 passed_count = 0
 total_tests = 0
@@ -444,14 +457,14 @@ def call_fn(fn_name, args):
 # === TESTS WILL BE INJECTED HERE ===
 `.trim();
 
-  // 4) Construim testele în runner
+  // 4) Construim testele în runner + hidden fuzz tests
   let tests = "\n";
   if (task.id === 'lru_cache') {
     tests += `
 total_tests += 2
 try:
-    C = ns.get("LRUCache")
-    if C is None: raise NameError("missing LRUCache")
+    C = ns.get("${task.expectedCode}")
+    if C is None: raise NameError("missing ${task.expectedCode}")
     cache = C(2)
     cache.put(1, 1)
     cache.put(2, 2)
@@ -464,6 +477,7 @@ except Exception:
     pass
 `;
   } else {
+    // Fixed test cases first
     for (const tc of task.testCases) {
       // args: folosim literal_eval pe un tuple "(<tc.input>,)"
       tests += `
@@ -476,6 +490,151 @@ try:
         passed_count += 1
 except Exception:
     pass
+`;
+    }
+
+    // Hidden fuzz tests per task (property-based lite)
+    tests += `\n# Hidden fuzz tests to prevent memorization\nimport random, string\nrandom.seed(1337)\n`;
+    
+    if (task.id === 'is_palindrome') {
+      tests += `
+# Fuzz tests for palindrome
+for _ in range(15):
+    s = ''.join(random.choice(string.ascii_letters + "   ") for _ in range(random.randint(0,40)))
+    expect = (''.join(c.lower() for c in s if not c.isspace()) ==
+              ''.join(c.lower() for c in s if not c.isspace())[::-1])
+    total_tests += 1
+    try:
+        res = call_fn("${task.expectedCode}", (s,))
+        if bool(res) == bool(expect):
+            passed_count += 1
+    except Exception:
+        pass
+`;
+    } else if (task.id === 'prime_check') {
+      tests += `
+# Fuzz tests for prime check
+primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
+composites = [4, 6, 8, 9, 10, 12, 14, 15, 16, 18, 20, 21, 22, 24, 25, 26, 27, 28, 30, 32, 33, 34, 35, 36]
+for _ in range(10):
+    # Test known primes
+    if random.random() < 0.5 and primes:
+        n = random.choice(primes)
+        expect = True
+    else:
+        n = random.choice(composites) if composites else 4
+        expect = False
+    total_tests += 1
+    try:
+        res = call_fn("${task.expectedCode}", (n,))
+        if bool(res) == expect:
+            passed_count += 1
+    except Exception:
+        pass
+`;
+    } else if (task.id === 'binary_search') {
+      tests += `
+# Fuzz tests for binary search
+for _ in range(12):
+    size = random.randint(1, 20)
+    arr = sorted([random.randint(1, 100) for _ in range(size)])
+    if random.random() < 0.7:
+        # Target exists
+        target = random.choice(arr)
+        expect = arr.index(target)
+    else:
+        # Target doesn't exist
+        target = random.randint(101, 200)  # Outside range
+        expect = -1
+    total_tests += 1
+    try:
+        res = call_fn("${task.expectedCode}", (arr, target))
+        if res == expect:
+            passed_count += 1
+    except Exception:
+        pass
+`;
+    } else if (task.id === 'merge_intervals') {
+      tests += `
+# Fuzz tests for merge intervals
+for _ in range(8):
+    num_intervals = random.randint(1, 8)
+    intervals = []
+    for _ in range(num_intervals):
+        start = random.randint(1, 50)
+        end = start + random.randint(1, 20)
+        intervals.append([start, end])
+    
+    # Calculate expected result
+    if not intervals:
+        expect = []
+    else:
+        sorted_intervals = sorted(intervals)
+        merged = [sorted_intervals[0]]
+        for current in sorted_intervals[1:]:
+            if current[0] <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], current[1])
+            else:
+                merged.append(current)
+        expect = merged
+    
+    total_tests += 1
+    try:
+        res = call_fn("${task.expectedCode}", (intervals,))
+        if res == expect:
+            passed_count += 1
+    except Exception:
+        pass
+`;
+    } else if (task.id === 'regex_match') {
+      tests += `
+# Fuzz tests for regex matching  
+test_cases = [
+    ("", "", True), ("", ".*", True), ("a", ".", True), ("ab", "a*", False),
+    ("aab", "c*a*b", True), ("mississippi", "mis*is*ip*.", True), 
+    ("aaa", "a*a", True), ("aaa", "aaaa", False), ("aa", "aaa", False)
+]
+for s, p, expect in test_cases:
+    total_tests += 1
+    try:
+        res = call_fn("${task.expectedCode}", (s, p))
+        if bool(res) == expect:
+            passed_count += 1
+    except Exception:
+        pass
+`;
+    } else if (task.id === 'optimize_fibonacci') {
+      tests += `
+# Fuzz tests for fibonacci
+fib_values = {0:0, 1:1, 2:1, 3:2, 4:3, 5:5, 6:8, 7:13, 8:21, 9:34, 
+              15:610, 20:6765, 25:75025, 30:832040}
+for n, expect in fib_values.items():
+    total_tests += 1
+    try:
+        res = call_fn("${task.expectedCode}", (n,))
+        if res == expect:
+            passed_count += 1
+    except Exception:
+        pass
+`;
+    } else {
+      // Generic fuzz for other tasks - add some edge cases
+      tests += `
+# Generic edge case testing
+edge_cases = [[], [1], [1,1,1,1], [1,2], [-1,0,1]]
+for case in edge_cases[:3]:  # Limit to avoid too many tests
+    try:
+        res = call_fn("${task.expectedCode}", (case,))
+        total_tests += 1
+        # Just check it doesn't crash, any result is fine for edge cases
+        passed_count += 1
+    except TypeError:
+        # Signature mismatch: don't count against the model
+        pass
+    except Exception:
+        # Real runtime error: count as a test and a failure
+        total_tests += 1
+        pass
 `;
     }
   }
@@ -492,7 +651,6 @@ except Exception:
     const { stdout } = await execAsync(`python3 -I ${runnerPath} ${solPath}`, { timeout: 6000 });
     const [p, t] = (stdout?.trim().split('/') ?? ["0","1"]).map(Number);
     correctness = Math.max(0, Math.min(1, (p || 0) / (t || 1)));
-    edgeCases = correctness > 0.7 ? correctness : correctness * 0.5;
     await fs.unlink(solPath).catch(()=>{});
   } catch (e) {
     console.log(`[EVAL] ${task.id}: compilation/run failed. Error: ${e}`);
@@ -509,7 +667,29 @@ except Exception:
   ));
 
   const debugging = task.id.includes('debug') ? correctness : Math.min(correctness + 0.05, 1);
-  return { correctness, complexity, codeQuality, edgeCases, debugging };
+  
+  // FIX 4: Implement real format and safety axes using raw model output
+  // Format: reward plain code (no fences), tolerate single fenced block, penalize prose/mixed.
+  let format = 1.0;
+  const raw = rawText.trim();
+  const hasFence = /```/.test(raw);
+  const onlyFence = /^```(?:python|py)?\s*[\s\S]*?\s*```$/.test(raw);
+  const looksLikeCode = /^(?:\s*(?:def|class)\s+|\s*from\s+\w+|\s*import\s+\w+)/m.test(raw);
+
+  // best: plain code, no fences, no chatter
+  if (!hasFence && looksLikeCode) format = 1.0;
+  // acceptable: exactly one fenced block and nothing else
+  else if (hasFence && onlyFence) format = 0.9;
+  // mixed: fences + extra prose
+  else if (hasFence && !onlyFence) format = 0.6;
+  // worst: no fences and doesn't look like code (we had to guess)
+  else format = 0.2;
+  
+  // Safety (basic for code tasks): detect dangerous calls/imports
+  const unsafe = /(exec|eval|__import__|subprocess|socket|urllib|requests|ftplib|smtplib|os\.)/;
+  const safety = unsafe.test(clean) ? 0.2 : 1.0;
+  
+  return { correctness, complexity, codeQuality, edgeCases, debugging, format, safety };
 }
 
 // ---------- Anti-caching utilities ----------
@@ -537,6 +717,31 @@ function getVariedSystemMessage(): string {
     'You are a Python programming expert. Create efficient, correct code. Return only the function or class definition requested.'
   ];
   return variations[Math.floor(Math.random() * variations.length)];
+}
+
+// ---------- Cache-busting: Real symbol renaming ----------
+function applyCacheBustingToTask(task: typeof BENCHMARK_TASKS[0], nonce: string): typeof BENCHMARK_TASKS[0] {
+  // Generate unique symbol name with nonce
+  const alias = `${task.expectedCode}_${nonce}`;
+  
+  // Rewrite prompt to use the alias
+  const aliasedPrompt = task.prompt.replace(
+    new RegExp(`\\b${task.expectedCode}\\b`, 'g'),
+    alias
+  );
+  
+  // Create task with new symbol expectation
+  return {
+    ...task,
+    prompt: aliasedPrompt,
+    expectedCode: alias
+  };
+}
+
+// Token usage estimation fallback
+function estimateTokensFromText(text: string): number {
+  // crude but consistent; ~4 chars/token for code
+  return Math.max(1, Math.ceil(text.length / 4));
 }
 
 // ---------- Single trial with streaming ----------
@@ -567,25 +772,28 @@ async function runSingleBenchmarkStreaming(
     let temperature = 0.1;
     let reasoning_effort: string | undefined = undefined;
     
-    // Smart retry strategy: modify parameters based on retry attempt
+    // Balance prompting & maxTokens across providers - base limits to avoid latency skew
+    maxTokens = Math.min(task.maxTokens * 3, 1200);  // base cap ~1200 for all
+    temperature = 0.1;
+    reasoning_effort = undefined; // remove special boosts
+    
+    // Smart retry strategy: apply boosts after base calculation
     if (retryAttempt > 0) {
       // Retry 1: Increase token limit significantly
       if (retryAttempt === 1) {
-        maxTokens = Math.max(task.maxTokens * 3, 1500);
-        streamLog('info', `      🔧 Retry ${retryAttempt}: Increasing maxTokens to ${maxTokens}`);
+        maxTokens = Math.max(maxTokens, 1500);
+        streamLog('info', `      🔧 Retry ${retryAttempt}: Boosting maxTokens to ${maxTokens}`);
       }
       // Retry 2: Increase token limit even more and adjust temperature
-      else if (retryAttempt === 2) {
-        maxTokens = Math.max(task.maxTokens * 4, 2000);
+      else if (retryAttempt >= 2) {
+        maxTokens = Math.max(maxTokens, 2000);
         temperature = 0.2; // Slightly higher temperature for more variety
-        streamLog('info', `      🔧 Retry ${retryAttempt}: Increasing maxTokens to ${maxTokens}, temperature to ${temperature}`);
+        streamLog('info', `      🔧 Retry ${retryAttempt}: Boosting maxTokens to ${maxTokens}, temperature to ${temperature}`);
       }
+      
+      // Optional hard cap if needed
+      maxTokens = Math.min(maxTokens, 2000);
     }
-    
-    // Balance prompting & maxTokens across providers - consistent limits to avoid latency skew
-    maxTokens = Math.min(task.maxTokens * 3, 1200);  // hard cap ~1200 for all
-    temperature = 0.1;
-    reasoning_effort = undefined; // remove special boosts
     
     // Only apply reasoning effort for models that absolutely require it, with latency budget consideration
     if (model.vendor === 'openai' && /^o\d|^o-mini|^o-/.test(model.name)) {
@@ -595,6 +803,12 @@ async function runSingleBenchmarkStreaming(
     // ANTI-CACHING: Generate unique identifiers for this request
     const sessionNonce = generateNonce();
     const trialId = `T${trialNumber || 1}_R${retryAttempt}_${Date.now().toString(36)}`;
+    
+    // CACHE-BUSTING: Apply real symbol renaming to kill provider caching
+    const cacheBustingNonce = generateNonce();
+    const cacheBustedTask = applyCacheBustingToTask(task, cacheBustingNonce);
+    const activeTask = cacheBustedTask;  // FIX 1: Use consistent variable
+    streamLog('info', `      🎯 Cache-busting: Renamed '${task.expectedCode}' to '${activeTask.expectedCode}'`);
     
     // ANTI-CACHING: Create varied system message with salt for Gemini 2.5
     // Use different system message variations on retries
@@ -612,7 +826,7 @@ async function runSingleBenchmarkStreaming(
     const systemMessage = getSaltedSystemMessage(baseSystemMessage, model);
     
     // ANTI-CACHING: Add no-op nonce to user prompt to ensure unique payload
-    const enhancedPrompt = addAntiCachingNonce(task.prompt, `${sessionNonce}_${trialId}`);
+    const enhancedPrompt = addAntiCachingNonce(activeTask.prompt, `${sessionNonce}_${trialId}`);
 
     const chatRequest: ChatRequest = {
       model: model.name,
@@ -681,11 +895,16 @@ async function runSingleBenchmarkStreaming(
       (res as any)?.usage?.output_tokens ?? 
       (res as any)?.usageMetadata?.candidatesTokenCount ?? 0;
     
-    streamLog('info', `      🔢 Token usage: ${tokensIn} in, ${tokensOut} out`);
+    // Additional fallback for total_tokens if individual counts are missing
+    const totalTokens = (res as any)?.usage?.total_tokens ?? 0;
+    const finalTokensIn = tokensIn || (totalTokens ? Math.ceil(totalTokens * 0.7) : 0); // Estimate 70% input
+    const finalTokensOut = tokensOut || (totalTokens ? Math.floor(totalTokens * 0.3) : 0); // Estimate 30% output
     
-    // Harden output: try to keep only Python
-    streamLog('info', `      🔧 Extracting Python code for function '${task.expectedCode}'...`);
-    const sanitized = extractPython(code, task.expectedCode);
+    streamLog('info', `      🔢 Token usage: ${finalTokensIn} in, ${finalTokensOut} out`);
+    
+    // FIX 1: Use activeTask for extraction and evaluation
+    streamLog('info', `      🔧 Extracting Python code for function '${activeTask.expectedCode}'...`);
+    const sanitized = extractPython(code, activeTask.expectedCode);
     
     if (!sanitized || sanitized.length < 10) {
       if (retryAttempt < maxRetries && code.length > 0) {
@@ -702,9 +921,9 @@ async function runSingleBenchmarkStreaming(
     streamLog('info', `      💻 Extracted code: ${sanitized.slice(0, 200)}${sanitized.length > 200 ? '...' : ''}`);
     
     // Log code evaluation process
-    streamLog('info', `      🧪 Evaluating code against ${task.testCases?.length || 0} test cases...`);
+    streamLog('info', `      🧪 Evaluating code against ${activeTask.testCases?.length || 0} test cases...`);
     
-    const evalRes = await evaluateCode(sanitized, task);
+    const evalRes = await evaluateCode(code, sanitized, activeTask);
     
     streamLog('info', `      📊 Code evaluation results:`);
     streamLog('info', `      ✓ Correctness: ${(evalRes.correctness * 100).toFixed(1)}%`);
@@ -726,10 +945,12 @@ async function runSingleBenchmarkStreaming(
       efficiency,
       stability: 0, // Will be calculated after trials
       edgeCases: evalRes.edgeCases,
-      debugging: evalRes.debugging
+      debugging: evalRes.debugging,
+      format: evalRes.format,
+      safety: evalRes.safety
     } as Record<AxisKey, number>;
 
-    return { success: true, latencyMs, code: sanitized, tokensIn, tokensOut, metrics: m };
+    return { success: true, latencyMs, code: sanitized, tokensIn: finalTokensIn, tokensOut: finalTokensOut, metrics: m };
   } catch (e: any) {
     // Enhanced error logging with more context and smart retry logic
     const errorMsg = String(e?.message || e).slice(0, 200);
@@ -780,160 +1001,6 @@ async function runSingleBenchmarkStreaming(
   }
 }
 
-// ---------- Single trial ----------
-async function runSingleBenchmark(
-  adapter: LLMAdapter,
-  model: { id: number; name: string; vendor: Provider },
-  task: typeof BENCHMARK_TASKS[0]
-): Promise<{
-  success: boolean; latencyMs: number; code: string;
-  tokensIn?: number; tokensOut?: number;
-  metrics: Record<AxisKey, number>;
-} | null> {
-  try {
-    // Enhanced token limits and parameters for different model types
-    let maxTokens = task.maxTokens;
-    let reasoning_effort: string | undefined = undefined;
-    
-    // Balance prompting & maxTokens across providers - consistent limits to avoid latency skew
-    maxTokens = Math.min(task.maxTokens * 3, 1200);  // hard cap ~1200 for all
-    reasoning_effort = undefined; // remove special boosts
-    
-    // Only apply reasoning effort for models that absolutely require it, with latency budget consideration
-    if (model.vendor === 'openai' && /^o\d|^o-mini|^o-/.test(model.name)) {
-      reasoning_effort = 'low'; // Use minimal reasoning to avoid excessive latency penalty
-    }
-
-    // ANTI-CACHING: Generate unique identifiers for this request
-    const sessionNonce = generateNonce();
-    const trialId = `${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`;
-    
-    // ANTI-CACHING: Create varied system message with salt for Gemini 2.5
-    const baseSystemMessage = getVariedSystemMessage();
-    const systemMessage = getSaltedSystemMessage(baseSystemMessage, model);
-    
-    // ANTI-CACHING: Add no-op nonce to user prompt to ensure unique payload
-    const enhancedPrompt = addAntiCachingNonce(task.prompt, `${sessionNonce}_${trialId}`);
-
-    const chatRequest: ChatRequest = {
-      model: model.name,
-      messages: [
-        { role: 'system', content: systemMessage },
-        { role: 'user', content: enhancedPrompt }
-      ],
-      temperature: 0.1,  // Lower temperature for more consistent results
-      maxTokens
-    };
-    
-    // Add reasoning effort for reasoning models
-    if (reasoning_effort) {
-      (chatRequest as any).reasoning_effort = reasoning_effort;
-    }
-
-    const t0 = Date.now();
-    const res = await withBackoff(() => adapter.chat(chatRequest));
-    if (!res) {
-      console.warn(`[CHAT-EMPTY] provider=${model.vendor} model=${model.name}`);
-      return null;
-    }
-    
-    if (!('text' in res) || !res.text) {
-      console.warn(`[NO-TEXT] provider=${model.vendor} model=${model.name} keys=${Object.keys(res)} sample=${JSON.stringify(res).slice(0,180)}`);
-      return null;
-    }
-    
-    const latencyMs = Date.now() - t0;
-    const code = res.text || '';
-    
-    // Harden output: try to keep only Python
-    const sanitized = extractPython(code, task.expectedCode);
-    if (!sanitized || sanitized.length < 10) {
-      console.warn(`[SANITIZE-EMPTY] provider=${model.vendor} model=${model.name} len=${sanitized?.length ?? 0} raw_len=${code.length}`);
-      return null;
-    }
-
-    const evalRes = await evaluateCode(sanitized, task);
-    // Fair efficiency calculation using relative z-score (will be calculated after all trials)
-    const efficiency = 0; // Placeholder - will be calculated in aggregation phase
-    
-    // Map evaluation results to axis metrics
-    const m = {
-      correctness: evalRes.correctness,
-      complexity: evalRes.complexity,
-      codeQuality: evalRes.codeQuality,
-      efficiency,
-      stability: 0, // Will be calculated after trials
-      edgeCases: evalRes.edgeCases,
-      debugging: evalRes.debugging
-    } as Record<AxisKey, number>;
-
-    // Enhanced token usage with comprehensive fallbacks for all providers
-    const tokensIn = res.tokensIn ?? 
-      (res as any)?.usage?.prompt_tokens ?? 
-      (res as any)?.usage?.input_tokens ?? 
-      (res as any)?.usageMetadata?.promptTokenCount ?? 0;
-    const tokensOut = res.tokensOut ?? 
-      (res as any)?.usage?.completion_tokens ?? 
-      (res as any)?.usage?.output_tokens ?? 
-      (res as any)?.usageMetadata?.candidatesTokenCount ?? 0;
-    
-    return { success: true, latencyMs, code: sanitized, tokensIn, tokensOut, metrics: m };
-  } catch (e) {
-    console.log(`⚠️ Benchmark trial failed: ${e}`);
-    return null;
-  }
-}
-
-// ---------- Trials per task ----------
-async function runTaskWithTrials(
-  adapter: LLMAdapter,
-  model: { id: number; name: string; vendor: Provider },
-  task: typeof BENCHMARK_TASKS[0],
-  N = TRIALS
-) {
-  const trials: any[] = [];
-  for (let i = 0; i < N; i++) {
-    const result = await runSingleBenchmark(adapter, model, task);
-    if (result) trials.push(result);
-    await sleep(jitter(SLEEP_MS_RANGE[0], SLEEP_MS_RANGE[1]));
-  }
-
-  if (trials.length === 0) return null; // All trials failed
-
-  const ok = trials.filter(t => t.success);
-  if (ok.length === 0) return null;
-
-  const axes: AxisKey[] = ['correctness','complexity','codeQuality','efficiency','edgeCases','debugging'];
-  const med: Record<AxisKey, number> = { 
-    correctness:0, complexity:0, codeQuality:0, efficiency:0, 
-    stability:0, edgeCases:0, debugging:0 
-  };
-  
-  for (const k of axes) {
-    med[k] = median(ok.map(t => t.metrics[k]));
-  }
-
-  // Stability from variance across trials - fix inflation on small samples
-  const corrSeries = trials.map(t => t.metrics.correctness ?? 0);
-  const sd = corrSeries.length > 1 ? stdev(corrSeries) : null;
-  med.stability = sd === null ? 0.5 : Math.max(0, Math.min(1, 1 - sd / 0.3)); // default 0.5 if <2 trials
-
-  const latencyMed = median(ok.map(t => t.latencyMs));
-  const tokensInMed = median(ok.map(t => t.tokensIn ?? 0));
-  const tokensOutMed = median(ok.map(t => t.tokensOut ?? 0));
-  const codeSample = ok[0]?.code ?? '';
-
-  return {
-    collapsed: { 
-      latencyMs: latencyMed, 
-      tokensIn: tokensInMed, 
-      tokensOut: tokensOutMed, 
-      metrics: med, 
-      code: codeSample 
-    },
-    trials
-  };
-}
 
 // ---------- Streaming version of trials per task ----------
 async function runTaskWithTrialsStreaming(
@@ -1010,10 +1077,10 @@ async function runTaskWithTrialsStreaming(
 
   streamLog('info', `  📊 Analyzing ${ok.length}/${trials.length} successful trials...`);
 
-  const axes: AxisKey[] = ['correctness','complexity','codeQuality','efficiency','edgeCases','debugging'];
+  const axes: AxisKey[] = ['correctness','complexity','codeQuality','efficiency','edgeCases','debugging','format','safety'];
   const med: Record<AxisKey, number> = { 
     correctness:0, complexity:0, codeQuality:0, efficiency:0, 
-    stability:0, edgeCases:0, debugging:0 
+    stability:0, edgeCases:0, debugging:0, format:0, safety:0
   };
   
   for (const k of axes) {
@@ -1078,7 +1145,7 @@ async function getHistoricalBaseline(modelId: number): Promise<{
 
   const collect: Record<AxisKey, number[]> = {
     correctness:[], complexity:[], codeQuality:[], efficiency:[], 
-    stability:[], edgeCases:[], debugging:[]
+    stability:[], edgeCases:[], debugging:[], format:[], safety:[]
   };
 
   for (const r of validRows as any[]) {
@@ -1115,17 +1182,16 @@ async function getHistoricalBaseline(modelId: number): Promise<{
   return { hasBaseline: true, means, stds, sampleCount: validRows.length };
 }
 
-function naiveScore(axesNow: Axes): number {
-  let num = 0, den = 0;
-  (Object.keys(AXIS_WEIGHTS) as AxisKey[]).forEach(k => {
-    num += (axesNow[k] || 0) * AXIS_WEIGHTS[k] * 100;
-    den += AXIS_WEIGHTS[k];
-  });
-  return Math.round(num / (den || 1));
+
+// Bayesian shrinkage function to regularize scores with small sample sizes
+function shrink(x: number, n: number, k: number = 8): number { 
+  // k ≈ how many tasks to trust
+  const λ = n / (n + k);
+  return λ * x + (1 - λ) * 50; // Shrink toward neutral score of 50
 }
 
-function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasBaseline: boolean = true): number {
-  // HARSH PROFESSOR MODE: Much stricter scoring that reflects reality
+function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasBaseline: boolean = true, successfulTasks: number = 1): number {
+  // SOFTENED PROFESSOR MODE: More balanced scoring that's still rigorous but fairer
   let weightedSum = 0;
   let totalWeight = 0;
   
@@ -1133,19 +1199,18 @@ function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasB
     let performance = axesNow[k] || 0;
     const weight = AXIS_WEIGHTS[k];
     
-    // HARSH: Apply exponential decay for imperfections
-    // Even small imperfections get heavily penalized
+    // SOFTENED: Apply more gentle exponential decay for imperfections
     if (performance < 1.0) {
-      // Exponential penalty: 0.9 -> 0.81, 0.8 -> 0.64, etc.
-      performance = Math.pow(performance, 1.8);
+      // Milder exponential penalty: 0.9 -> 0.85, 0.8 -> 0.70, etc.
+      performance = Math.pow(performance, 1.4); // Was 1.8, now 1.4
     }
     
-    // HARSH: Additional axis-specific penalties
+    // SOFTENED: Reduced axis-specific penalties
     if (k === 'correctness' && performance < 0.95) {
-      performance *= 0.7; // Correctness is critical - big penalty
+      performance *= 0.85; // Was 0.7, now 0.85 - less harsh
     }
     if (k === 'codeQuality' && performance < 0.6) {
-      performance *= 0.9; // tiny nudge instead of a hammer
+      performance *= 0.95; // Was 0.9, now 0.95 - even gentler nudge
     }
     
     weightedSum += performance * weight * 100;
@@ -1156,50 +1221,47 @@ function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasB
   
   let baseScore = weightedSum / totalWeight;
   
-  // HARSH: Make base scoring much more demanding
-  // Apply additional "professor curve" - shift scores down significantly
-  baseScore = Math.pow(baseScore / 100, 1.4) * 100; // Power curve makes high scores much harder
+  // SOFTENED: Make base scoring less demanding
+  // Apply gentler "professor curve" - less harsh shift
+  baseScore = Math.pow(baseScore / 100, 1.2) * 100; // Was 1.4, now 1.2 - less harsh curve
   
-  // HARSH: Stricter variance penalties
+  // SOFTENED: Reduced variance penalties
   let varianceAdjustment = 0;
   if (hasBaseline && baseline.means.correctness !== undefined) {
     (Object.keys(AXIS_WEIGHTS) as AxisKey[]).forEach(k => {
       const deviation = (axesNow[k] || 0) - (baseline.means[k] || 0.5);
       const normalizedDev = deviation / (baseline.stds[k] || 0.15);
-      varianceAdjustment += normalizedDev * AXIS_WEIGHTS[k] * 2; // Reduced impact
+      varianceAdjustment += normalizedDev * AXIS_WEIGHTS[k] * 1.5; // Was 2, now 1.5 - reduced impact
     });
     
-    // HARSH: Larger penalty range
-    varianceAdjustment = Math.max(-8, Math.min(3, varianceAdjustment)); // Easier to lose points than gain
+    // SOFTENED: Smaller penalty range
+    varianceAdjustment = Math.max(-6, Math.min(4, varianceAdjustment)); // Was -8/+3, now -6/+4 - more balanced
   }
   
   let finalScore = baseScore + varianceAdjustment;
   
-  // HARSH: Bigger calibration penalty for unproven models
+  // SOFTENED: Smaller calibration penalty for unproven models
   if (!hasBaseline) {
-    finalScore -= 8; // Much bigger penalty
+    finalScore -= 5; // Was 8, now 5 - less harsh penalty
   }
   
-  // HARSH: Comprehensive quality gates - multiple checkpoints
+  // SOFTENED: Less harsh quality gates with smaller penalties
   const correctness = axesNow.correctness || 0;
   const codeQuality = axesNow.codeQuality || 0;
   const complexity = axesNow.complexity || 0;
   
-  // Quality Gate 1: Correctness requirements (softened)
-  if (correctness < 0.9) finalScore -= 8;  // was 15
-  if (correctness < 0.7) finalScore -= 8;  // cumulative but smaller
-  if (correctness < 0.5) finalScore -= 10; // smaller again
-  
-  // Quality Gate 2: Code quality requirements  
-  if (codeQuality < 0.6) finalScore -= 10; // Penalty for poor code
-  if (codeQuality < 0.4) finalScore -= 20; // Major penalty for terrible code
-  
-  // Quality Gate 3: Task completion requirements
-  if (complexity < 0.3) finalScore -= 12; // Didn't understand the task
-  
-  // Fix 4: Remove grade caps that suppress top models
-  // Allow models to achieve high scores based on their actual performance
-  // No artificial caps - let the natural scoring system determine the final score
+  const gates = {
+    correctness_minor: correctness < 0.90 ? -5 : 0,  // Was -8, now -5
+    correctness_major: correctness < 0.70 ? -6 : 0,  // Was -8, now -6  
+    correctness_fail : correctness < 0.50 ? -8 : 0,  // Was -10, now -8
+    quality_minor    : codeQuality < 0.60 ? -6 : 0,  // Was -10, now -6
+    quality_major    : codeQuality < 0.40 ? -12: 0,  // Was -20, now -12
+    task_understood  : complexity  < 0.30 ? -8 : 0,  // Was -12, now -8
+  };
+  finalScore += Object.values(gates).reduce((a,b)=>a+b,0);
+
+  // Apply Bayesian shrinkage by number of successful tasks
+  finalScore = Math.round(shrink(finalScore, successfulTasks));
   
   return Math.round(Math.max(0, Math.min(100, finalScore)));
 }
@@ -1226,7 +1288,7 @@ async function persistCollapsedRun(params: {
       tokensIn: Math.round(params.tokensIn ?? 0),
       tokensOut: Math.round(params.tokensOut ?? 0),
       latencyMs: Math.round(params.latencyMs),
-      attempts: 1,
+      attempts: TRIALS, // Reflect collapsed trials
       passed: params.axes.correctness >= 0.5,
       artifacts: params.code ? { codeHash: hashCode(params.code) } : null
     }).returning({ id: runs.id });
@@ -1443,10 +1505,21 @@ export async function benchmarkModel(
         streamLog('info', `  💻 Generated code preview: ${codeSnippet}${result.collapsed.code.length > 200 ? '...' : ''}`);
       }
       
-      // Fix 1: Collect finished tasks instead of persisting immediately
+      // Fix 1: Collect finished tasks and persist per-task data
       finished.push({ task, collapsed: result.collapsed });
       perTaskAxes.push(result.collapsed.metrics);
       latencies.push(result.collapsed.latencyMs);
+      
+      // Persist individual task run for analytics
+      await persistCollapsedRun({
+        modelId: model.id,
+        taskSlug: task.slug,
+        latencyMs: result.collapsed.latencyMs,
+        tokensIn: result.collapsed.tokensIn,
+        tokensOut: result.collapsed.tokensOut,
+        axes: result.collapsed.metrics,
+        code: result.collapsed.code
+      });
     } catch (taskError: any) {
       // Catch any unexpected errors at the task level
       const errorMsg = String(taskError?.message || taskError).slice(0, 200);
@@ -1481,10 +1554,21 @@ export async function benchmarkModel(
           streamLog('success', `✅ Retry success! Task ${task.id}: ${(metrics.correctness * 100).toFixed(1)}% correct, ${result.collapsed.latencyMs}ms avg`);
           streamLog('info', `  📊 Enhanced metrics: correctness=${(metrics.correctness*100).toFixed(1)}%, quality=${(metrics.codeQuality*100).toFixed(1)}%`);
           
-          // Fix 1: Collect finished tasks instead of persisting immediately
+          // Fix 1: Collect finished tasks and persist per-task data
           finished.push({ task, collapsed: result.collapsed });
           perTaskAxes.push(result.collapsed.metrics);
           latencies.push(result.collapsed.latencyMs);
+          
+          // Persist individual task run for analytics
+          await persistCollapsedRun({
+            modelId: model.id,
+            taskSlug: task.slug,
+            latencyMs: result.collapsed.latencyMs,
+            tokensIn: result.collapsed.tokensIn,
+            tokensOut: result.collapsed.tokensOut,
+            axes: result.collapsed.metrics,
+            code: result.collapsed.code
+          });
           
           // Remove from failed list since it succeeded
           failedTasks.splice(failedTasks.indexOf(task), 1);
@@ -1529,19 +1613,28 @@ export async function benchmarkModel(
     return;
   }
 
-  // Fix 1: Implement absolute efficiency curve using EFF_REF_MS constant
-  // This provides consistent efficiency scoring across all models and batches
+  // FIX 2: Improved efficiency calculation with token usage fallback
   for (let i = 0; i < perTaskAxes.length; i++) {
     const latMs = latencies[i];
-    const z = (latMs - EFF_REF_MS) / EFF_SIGMA_MS;
-    const eff = 1 / (1 + Math.exp(z));
+    const rawTokensOut = finished[i]?.collapsed.tokensOut ?? 0;
+    const codeText = finished[i]?.collapsed.code ?? "";
+    
+    // Use token fallback when providers don't return usage
+    const tokensOut = rawTokensOut > 0 ? rawTokensOut : estimateTokensFromText(codeText);
+    const throughput = tokensOut / Math.max(1, latMs);
+    
+    // Robust normalization via log scale against a rolling reference
+    const logThroughput = Math.log10(throughput + 1e-6) + 3; // Add 3 to avoid negative logs
+    const eff = Math.max(0, Math.min(1, logThroughput / 3)); // Normalize to 0-1
+    
+    // Add clamp symmetry for efficiency (similar to stability)
     perTaskAxes[i].efficiency = Math.max(0.1, Math.min(0.9, eff));
   }
 
   // Aggregate metrics across successful tasks
   const agg: Axes = { 
     correctness:0, complexity:0, codeQuality:0, efficiency:0,
-    stability:0, edgeCases:0, debugging:0 
+    stability:0, edgeCases:0, debugging:0, format:0, safety:0
   };
   
   (Object.keys(agg) as AxisKey[]).forEach(k => {
@@ -1549,6 +1642,15 @@ export async function benchmarkModel(
       ? perTaskAxes.reduce((s,a) => s + (a[k] ?? 0), 0) / perTaskAxes.length
       : 0;
   });
+
+  // FIX 3: Cross-task stability override - stability should be cross-task, not within-task trials only
+  if (perTaskAxes.length > 1) {
+    const corrAcrossTasks = perTaskAxes.map(a => a.correctness ?? 0);
+    const sdAcross = stdev(corrAcrossTasks);
+    const crossTaskStability = Math.max(0, Math.min(1, 1 - sdAcross / 0.25));
+    // Override with cross-task signal (or blend 70/30 as recommended)
+    agg.stability = 0.7 * crossTaskStability + 0.3 * Math.max(0.3, Math.min(0.95, agg.stability));
+  }
 
   // Fix stability clamping issues - clamp both min and max for fairness
   function clampAxesForScore(a: Axes): Axes {
@@ -1567,12 +1669,12 @@ export async function benchmarkModel(
 
   if (!baseline.hasBaseline) {
     // Use calculateScore with hasBaseline=false for calibration penalty
-    finalScore = calculateScore(clampAxesForScore(agg), baseline, false);
+    finalScore = calculateScore(clampAxesForScore(agg), baseline, false, successfulTasks);
     // Small extra penalty while calibrating
     finalScore -= 2;
     note = `Calibrating (${baseline.sampleCount}/${MIN_HISTORY_FOR_BASELINE} samples)`;
   } else {
-    finalScore = calculateScore(clampAxesForScore(agg), baseline, true);
+    finalScore = calculateScore(clampAxesForScore(agg), baseline, true, successfulTasks);
   }
 
   // Apply failure penalty (reduced from 12 to 6)
@@ -1584,6 +1686,15 @@ export async function benchmarkModel(
     note = `${successPct}% tasks completed (${failedTasks.length} failed)`;
   }
 
+  // FIX 5: Add cost calculation
+  const pc = PROVIDER_COSTS[model.vendor] || { input: 0, output: 0 };
+  const totalIn = finished.reduce((s, f) => s + (f.collapsed.tokensIn || 0), 0);
+  const totalOut = finished.reduce((s, f) => s + (f.collapsed.tokensOut || 0), 0);
+  const batchCost = (totalIn / 1000) * pc.input + (totalOut / 1000) * pc.output;
+  if (batchCost > 0) {
+    note = (note ? note + ' | ' : '') + `~$${batchCost.toFixed(3)}`;
+  }
+
   // Save score (finalScore is always a number now)
   await db.insert(scores).values({
     modelId: model.id,
@@ -1593,6 +1704,31 @@ export async function benchmarkModel(
     cusum: 0.0,
     note
   });
+
+  // FIX 6: Apply drift detection after inserting the new score
+  try {
+    function pageHinkley(xs: number[], delta: number = DRIFT_DELTA, lambda: number = DRIFT_LAMBDA): boolean {
+      let mT = 0, M = 0, x0 = xs[0] ?? 0;
+      for (const x of xs) {
+        mT += (x - x0 - delta);
+        M = Math.min(M, mT);
+        if (mT - M > lambda) return true;
+      }
+      return false;
+    }
+    
+    const recent = await db.select().from(scores)
+      .where(eq(scores.modelId, model.id))
+      .orderBy(desc(scores.ts)).limit(DRIFT_WINDOW);
+    const series = recent.filter(r => (r as any).stupidScore >= 0).map(r => (r as any).stupidScore / 100);
+    if (series.length >= 6 && pageHinkley(series)) {
+      console.log(`⚠️ Potential drift detected for ${model.name}`);
+      streamLog && streamLog('warning', `⚠️ Potential performance drift detected for ${model.name}`);
+    }
+  } catch (driftError) {
+    // Don't let drift detection errors break benchmarking
+    console.warn(`[DRIFT-ERROR] ${model.name}: ${String(driftError).slice(0, 100)}`);
+  }
 
   // Logging
   const lat = Math.round(median(latencies));
