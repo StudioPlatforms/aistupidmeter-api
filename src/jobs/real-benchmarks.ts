@@ -25,6 +25,68 @@ try {
   // Streaming not available - will be null for regular benchmarks
 }
 
+// Smart skip system for persistently overloaded models
+const modelFailureTracker = new Map<string, {
+  consecutiveFailures: number;
+  lastFailureTime: number;
+  skipUntil: number;
+  reason: string;
+}>();
+
+function shouldSkipModel(modelName: string): { skip: boolean; reason?: string } {
+  const tracker = modelFailureTracker.get(modelName);
+  if (!tracker) return { skip: false };
+  
+  const now = Date.now();
+  if (now < tracker.skipUntil) {
+    const remainingMinutes = Math.ceil((tracker.skipUntil - now) / (1000 * 60));
+    return { 
+      skip: true, 
+      reason: `Skipping ${modelName} for ${remainingMinutes}m due to persistent ${tracker.reason} (${tracker.consecutiveFailures} consecutive failures)`
+    };
+  }
+  
+  return { skip: false };
+}
+
+function recordModelFailure(modelName: string, error: any) {
+  const errorMsg = String(error?.message || error);
+  const status = error?.status || error?.response?.status;
+  
+  // Only track persistent API overload/rate limit errors
+  if (status !== 503 && status !== 429 && !errorMsg.toLowerCase().includes('overloaded')) {
+    return;
+  }
+  
+  const tracker = modelFailureTracker.get(modelName) || {
+    consecutiveFailures: 0,
+    lastFailureTime: 0,
+    skipUntil: 0,
+    reason: ''
+  };
+  
+  tracker.consecutiveFailures++;
+  tracker.lastFailureTime = Date.now();
+  tracker.reason = status === 503 ? 'overloaded (503)' : status === 429 ? 'rate limited (429)' : 'unavailable';
+  
+  // Exponential backoff: skip for longer periods as failures increase
+  if (tracker.consecutiveFailures >= 3) {
+    const skipMinutes = Math.min(60, Math.pow(2, tracker.consecutiveFailures - 2) * 5); // 5, 10, 20, 40, 60 minutes max
+    tracker.skipUntil = Date.now() + (skipMinutes * 60 * 1000);
+    console.log(`⚠️ ${modelName}: ${tracker.consecutiveFailures} consecutive failures - skipping for ${skipMinutes} minutes`);
+  }
+  
+  modelFailureTracker.set(modelName, tracker);
+}
+
+function recordModelSuccess(modelName: string) {
+  const tracker = modelFailureTracker.get(modelName);
+  if (tracker) {
+    console.log(`✅ ${modelName}: Recovered from previous failures - resetting failure counter`);
+    modelFailureTracker.delete(modelName);
+  }
+}
+
 // ---------- Config ----------
 const TRIALS = 3;                    // Reduced trials for efficiency
 const SLEEP_MS_RANGE = [200, 400];   // jitter between trials
@@ -143,13 +205,26 @@ async function withBackoff<T>(fn: () => Promise<T>, maxTries = 3): Promise<T | n
   while (true) {
     try { return await fn(); }
     catch (e: any) {
-      const status = e?.status || e?.response?.status;
+      // More robust status extraction
+      const status = e?.status || e?.response?.status || e?.code;
+      const errorMessage = String(e?.message || e).toLowerCase();
+      
+      // Check if it's a retryable error by status code or message content
+      const isRetryableByStatus = status === 429 || status === 503 || (status >= 500 && status < 600);
+      const isRetryableByMessage = errorMessage.includes('overloaded') || 
+                                   errorMessage.includes('unavailable') || 
+                                   errorMessage.includes('timeout') ||
+                                   errorMessage.includes('rate limit');
+      
       if (t >= maxTries) {
         console.log(`⚠️ API call failed after ${maxTries} attempts: ${e?.message}`);
         return null; // Return null instead of throwing
       }
-      if (status === 429 || (status >= 500 && status < 600)) {
-        await sleep(Math.min(8000, 500 * 2 ** t) + jitter(0, 200));
+      
+      if (isRetryableByStatus || isRetryableByMessage) {
+        const delay = Math.min(8000, 500 * 2 ** t) + jitter(0, 200);
+        console.log(`⚠️ Retryable error (${status}): ${e?.message} - waiting ${delay}ms before retry ${t + 1}/${maxTries}`);
+        await sleep(delay);
         t++;
       } else {
         console.log(`⚠️ API error (non-retryable): ${e?.message}`);
@@ -430,8 +505,25 @@ signal.signal(signal.SIGALRM, timeout_handler); signal.alarm(5)
 
 orig_import = builtins.__import__
 def safe_import(name, *args, **kwargs):
-    banned = {'os','subprocess','socket','urllib','requests','http','ftplib','smtplib','shutil','pathlib'}
-    if name in banned:
+    banned = {'subprocess','socket','urllib','requests','http','ftplib','smtplib','shutil','pathlib'}
+    # Allow os but override dangerous functions
+    if name == 'os':
+        _os = orig_import('os')  # Use original import to avoid recursion
+        # Create a safe os module that only allows urandom and other safe functions
+        class SafeOS:
+            urandom = staticmethod(_os.urandom)  # Allow urandom for random module
+            name = _os.name  # Allow basic system info
+            path = _os.path  # Allow path operations for reading
+            sep = _os.sep
+            pathsep = _os.pathsep
+            linesep = _os.linesep
+            # Block dangerous functions
+            def __getattr__(self, name):
+                if name in ('system', 'popen', 'exec', 'spawn', 'fork', 'kill', 'remove', 'unlink', 'rmdir', 'mkdir', 'makedirs', 'chmod', 'chown', 'environ', 'putenv', 'unsetenv'):
+                    raise AttributeError(f"os.{name} is blocked for security")
+                return getattr(_os, name)
+        return SafeOS()
+    elif name in banned:
         raise ImportError(f"Import '{name}' blocked")
     return orig_import(name, *args, **kwargs)
 builtins.__import__ = safe_import
@@ -751,6 +843,38 @@ function applyCacheBustingToTask(task: typeof BENCHMARK_TASKS[0], nonce: string)
   };
 }
 
+// Text extraction normalizer function to handle different adapter response shapes
+function extractTextFromAdapter(res: any): string {
+  if (!res) return '';
+
+  // 1) Our adapters (old)
+  if (typeof res.text === 'string' && res.text.trim()) return res.text.trim();
+
+  // 2) OpenAI Responses API (common shapes)
+  //   - official SDK exposes response.output_text
+  if (typeof res.output_text === 'string' && res.output_text.trim()) return res.output_text.trim();
+
+  //   - sometimes you'll see response.output[] with content arrays
+  if (Array.isArray(res.output)) {
+    const pieces: string[] = [];
+    for (const part of res.output) {
+      const content = part?.content;
+      if (Array.isArray(content)) {
+        for (const c of content) {
+          if (typeof c?.text === 'string') pieces.push(c.text);
+        }
+      }
+    }
+    if (pieces.length) return pieces.join('\n').trim();
+  }
+
+  // 3) Chat Completions fallback (older adapters)
+  const msg = res?.choices?.[0]?.message?.content;
+  if (typeof msg === 'string' && msg.trim()) return msg.trim();
+
+  return '';
+}
+
 // Token usage estimation fallback
 function estimateTokensFromText(text: string): number {
   // crude but consistent; ~4 chars/token for code
@@ -881,7 +1005,10 @@ async function runSingleBenchmarkStreaming(
       return null;
     }
     
-    if (!('text' in res) || !res.text) {
+    // Extract text using the normalizer function
+    const rawText = extractTextFromAdapter(res);
+    
+    if (!rawText) {
       if (retryAttempt < maxRetries) {
         streamLog('warning', `      ⚠️ No text in response from ${model.vendor}/${model.name} - trying again...`);
         await sleep(1000 + retryAttempt * 500);
@@ -892,21 +1019,22 @@ async function runSingleBenchmarkStreaming(
       return null;
     }
     
-    const code = res.text || '';
-    
     // Log raw response details
-    streamLog('info', `      📄 Raw response (${code.length} chars):`);
-    streamLog('info', `      💬 First 300 chars: ${code.slice(0, 300)}${code.length > 300 ? '...' : ''}`);
+    streamLog('info', `      📄 Raw response (${rawText.length} chars):`);
+    streamLog('info', `      💬 First 300 chars: ${rawText.slice(0, 300)}${rawText.length > 300 ? '...' : ''}`);
     
-    // Enhanced token usage with comprehensive fallbacks for all providers
-    const tokensIn = res.tokensIn ?? 
-      (res as any)?.usage?.prompt_tokens ?? 
-      (res as any)?.usage?.input_tokens ?? 
-      (res as any)?.usageMetadata?.promptTokenCount ?? 0;
-    const tokensOut = res.tokensOut ?? 
-      (res as any)?.usage?.completion_tokens ?? 
-      (res as any)?.usage?.output_tokens ?? 
-      (res as any)?.usageMetadata?.candidatesTokenCount ?? 0;
+    // Defensive token accounting with comprehensive fallbacks for all providers
+    const tokensIn = res.tokensIn ??
+                     (res as any)?.usage?.prompt_tokens ??
+                     (res as any)?.usage?.input_tokens ??
+                     (res as any)?.response?.usage?.input_tokens ??
+                     (res as any)?.usageMetadata?.promptTokenCount ?? 0;
+
+    const tokensOut = res.tokensOut ??
+                      (res as any)?.usage?.completion_tokens ??
+                      (res as any)?.usage?.output_tokens ??
+                      (res as any)?.response?.usage?.output_tokens ??
+                      (res as any)?.usageMetadata?.candidatesTokenCount ?? 0;
     
     // Additional fallback for total_tokens if individual counts are missing
     const totalTokens = (res as any)?.usage?.total_tokens ?? 0;
@@ -917,15 +1045,15 @@ async function runSingleBenchmarkStreaming(
     
     // FIX 1: Use activeTask for extraction and evaluation
     streamLog('info', `      🔧 Extracting Python code for function '${activeTask.expectedCode}'...`);
-    const sanitized = extractPython(code, activeTask.expectedCode);
+    const sanitized = extractPython(rawText, activeTask.expectedCode);
     
     if (!sanitized || sanitized.length < 10) {
-      if (retryAttempt < maxRetries && code.length > 0) {
-        streamLog('warning', `      ⚠️ Code extraction failed, but got ${code.length} chars - retrying with different approach...`);
+      if (retryAttempt < maxRetries && rawText.length > 0) {
+        streamLog('warning', `      ⚠️ Code extraction failed, but got ${rawText.length} chars - retrying with different approach...`);
         await sleep(800 + retryAttempt * 400);
         return runSingleBenchmarkStreaming(adapter, model, task, streamingSessionId, trialNumber, retryAttempt + 1);
       }
-      streamLog('error', `      ❌ Code extraction failed after ${retryAttempt + 1} attempts. Sanitized: ${sanitized?.length ?? 0} chars, raw: ${code.length} chars`);
+      streamLog('error', `      ❌ Code extraction failed after ${retryAttempt + 1} attempts. Sanitized: ${sanitized?.length ?? 0} chars, raw: ${rawText.length} chars`);
       streamLog('error', `      📝 Extracted code: ${sanitized || '(empty)'}`);
       return null;
     }
@@ -936,7 +1064,7 @@ async function runSingleBenchmarkStreaming(
     // Log code evaluation process
     streamLog('info', `      🧪 Evaluating code against ${activeTask.testCases?.length || 0} test cases...`);
     
-    const evalRes = await evaluateCode(code, sanitized, activeTask);
+    const evalRes = await evaluateCode(rawText, sanitized, activeTask);
     
     streamLog('info', `      📊 Code evaluation results:`);
     streamLog('info', `      ✓ Correctness: ${(evalRes.correctness * 100).toFixed(1)}%`);
@@ -1128,6 +1256,70 @@ async function runTaskWithTrialsStreaming(
 // ---------- New baseline system with N/A support ----------
 type Axes = Record<AxisKey, number>;
 
+async function getCohortBaseline(provider: Provider): Promise<{
+  means: Axes; 
+  stds: Axes; 
+  sampleCount: number;
+}> {
+  // Get scores from all models of this provider
+  const modelRows = await db.select().from(models).where(eq(models.vendor, provider));
+  const modelIds = modelRows.map(m => m.id);
+  
+  if (modelIds.length === 0) {
+    // No models for this provider - return defaults
+    const defaultAxes = {} as Axes;
+    (Object.keys(AXIS_WEIGHTS) as AxisKey[]).forEach(k => {
+      defaultAxes[k] = 0.5;
+    });
+    return { means: defaultAxes, stds: defaultAxes, sampleCount: 0 };
+  }
+  
+  // Get last 200 non-sentinel scores across ALL models of this provider
+  const allScores = [];
+  for (const modelId of modelIds) {
+    const modelScores = await db.select().from(scores)
+      .where(eq(scores.modelId, modelId))
+      .orderBy(desc(scores.ts))
+      .limit(Math.ceil(200 / modelIds.length)); // Distribute across models
+    allScores.push(...modelScores);
+  }
+  
+  // Filter and sort by timestamp
+  const validRows = allScores
+    .filter(r => (r as any).axes && (r as any).stupidScore >= 0)
+    .sort((a, b) => new Date(b.ts || '').getTime() - new Date(a.ts || '').getTime())
+    .slice(0, 200);
+
+  const vals: Record<AxisKey, number[]> = {
+    correctness:[], complexity:[], codeQuality:[], efficiency:[],
+    stability:[], edgeCases:[], debugging:[], format:[], safety:[]
+  };
+
+  for (const r of validRows as any[]) {
+    const a = r.axes; 
+    if (!a) continue;
+    (Object.keys(vals) as AxisKey[]).forEach(k => {
+      let v = a[k];
+      if (v === undefined) {
+        if (k === 'complexity' && a.spec !== undefined) v = a.spec;
+        if (k === 'edgeCases' && a.refusal !== undefined) v = a.refusal;
+        if (k === 'debugging' && a.recovery !== undefined) v = a.recovery;
+      }
+      if (typeof v === 'number' && v >= 0 && v <= 1) vals[k].push(v);
+    });
+  }
+
+  const means = {} as Axes, stds = {} as Axes;
+  (Object.keys(vals) as AxisKey[]).forEach(k => {
+    const arr = vals[k]; 
+    const m = arr.length ? arr.reduce((s,n) => s + n, 0) / arr.length : 0.5;
+    means[k] = m; 
+    stds[k] = Math.max(stdev(arr), 0.05); // Floor std to avoid huge z-scores
+  });
+  
+  return { means, stds, sampleCount: validRows.length };
+}
+
 async function getHistoricalBaseline(modelId: number): Promise<{ 
   hasBaseline: boolean; 
   means: Axes; 
@@ -1195,12 +1387,11 @@ async function getHistoricalBaseline(modelId: number): Promise<{
   return { hasBaseline: true, means, stds, sampleCount: validRows.length };
 }
 
-
 // Bayesian shrinkage function to regularize scores with small sample sizes
-function shrink(x: number, n: number, k: number = 8): number { 
+function shrinkTo(x: number, n: number, target: number, k: number = 8): number { 
   // k ≈ how many tasks to trust
   const λ = n / (n + k);
-  return λ * x + (1 - λ) * 50; // Shrink toward neutral score of 50
+  return λ * x + (1 - λ) * target; // Shrink toward cohort center, not 50
 }
 
 function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasBaseline: boolean = true, successfulTasks: number = 1): number {
@@ -1274,7 +1465,8 @@ function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasB
   finalScore += Object.values(gates).reduce((a,b)=>a+b,0);
 
   // Apply Bayesian shrinkage by number of successful tasks
-  finalScore = Math.round(shrink(finalScore, successfulTasks));
+  const cohortCenter = 70; // Shrink toward cohort center, not 50
+  finalScore = Math.round(shrinkTo(finalScore, successfulTasks, cohortCenter));
   
   return Math.round(Math.max(0, Math.min(100, finalScore)));
 }
@@ -1341,6 +1533,15 @@ export async function benchmarkModel(
       emitBenchmarkProgress(streamingSessionId, { type, message, data });
     }
   };
+  
+  // Check if model should be skipped due to persistent failures
+  const skipCheck = shouldSkipModel(model.name);
+  if (skipCheck.skip) {
+    console.log(`⏭️ ${skipCheck.reason}`);
+    streamLog('warning', `⏭️ ${skipCheck.reason}`);
+    // Don't record a score - just skip this model for now
+    return;
+  }
   
   if (!adapter) {
     // No API key - record N/A with sentinel values
@@ -1434,9 +1635,23 @@ export async function benchmarkModel(
     }
     
     if (!ping || !sanitized) throw new Error('canary test failed after retries');
-  } catch (e) {
+  } catch (e: any) {
     console.warn(`[CANARY-FAIL] ${model.vendor}/${model.name}: ${String(e).slice(0,200)}`);
-    // Record N/A with adapter failure sentinel
+    
+    // Check if this is a retryable error (503, 429, 5xx) that should be retried later
+    const status = e?.status || e?.response?.status;
+    const isRetryableError = status === 503 || status === 429 || (status >= 500 && status < 600);
+    
+    if (isRetryableError) {
+      // Record the failure in our tracking system
+      recordModelFailure(model.name, e);
+      
+      // Don't record N/A, let the model be retried later in Phase 2
+      console.log(`⚠️ ${model.name}: Temporary failure (${status}) - will retry later`);
+      throw new Error(`Retryable canary failure: ${String(e).slice(0,100)}`);
+    }
+    
+    // Only record N/A for non-retryable errors (missing API keys, auth issues, etc.)
     await db.insert(scores).values({
       modelId: model.id,
       ts: batchTimestamp || new Date().toISOString(),
@@ -1748,6 +1963,9 @@ export async function benchmarkModel(
     // Don't let drift detection errors break benchmarking
     console.warn(`[DRIFT-ERROR] ${model.name}: ${String(driftError).slice(0, 100)}`);
   }
+
+  // Record successful completion to reset failure tracking
+  recordModelSuccess(model.name);
 
   // Logging
   const lat = Math.round(median(latencies));
