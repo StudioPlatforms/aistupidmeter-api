@@ -31,6 +31,19 @@ const SLEEP_MS_RANGE = [200, 400];   // jitter between trials
 const MIN_HISTORY_FOR_BASELINE = 10; // Minimum historical scores needed for baseline
 const STD_EPS = 1e-6;                // avoid div-by-zero
 
+// --- Simple global score calibration (rank-preserving) ---
+const SCORE_SCALE = Number(process.env.SCORE_SCALE ?? '1');  // multiplicative
+const SCORE_LIFT  = Number(process.env.SCORE_LIFT  ?? '0');  // additive
+const SCORE_MIN   = Number(process.env.SCORE_MIN   ?? '0');  // optional clamp
+const SCORE_MAX   = Number(process.env.SCORE_MAX   ?? '100');
+
+function calibrateScore(s: number): number {
+  // keep sentinels like -999, -888, -777 untouched
+  if (s < 0) return s;
+  const y = SCORE_SCALE * s + SCORE_LIFT;
+  return Math.max(SCORE_MIN, Math.min(SCORE_MAX, Math.round(y)));
+}
+
 const AXIS_WEIGHTS = {
   correctness: 0.30,   // Reduced slightly
   complexity: 0.18,    // Changed from spec to complexity
@@ -1681,9 +1694,15 @@ export async function benchmarkModel(
   const failurePenalty = Math.round((1 - taskSuccessRate) * 6);
   finalScore = Math.max(0, finalScore - failurePenalty);
 
+  const rawScore = finalScore;
+  finalScore = calibrateScore(finalScore);
+  if (finalScore !== rawScore) {
+    note = (note ? note + ' | ' : '') + `calibrated ${rawScore}→${finalScore}`;
+  }
+
   if (failedTasks.length > 0) {
     const successPct = Math.round(taskSuccessRate * 100);
-    note = `${successPct}% tasks completed (${failedTasks.length} failed)`;
+    note = (note ? note + ' | ' : '') + `${successPct}% tasks completed (${failedTasks.length} failed)`;
   }
 
   // FIX 5: Add cost calculation
