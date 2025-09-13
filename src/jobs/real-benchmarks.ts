@@ -529,18 +529,19 @@ def safe_import(name, *args, **kwargs):
 builtins.__import__ = safe_import
 
 orig_open = builtins.open
+
+sol_path = sys.argv[1]
+ALLOWED_DIR = __import__('os').path.dirname(sol_path) + __import__('os').sep
+
 def safe_open(file, mode='r', *args, **kwargs):
-    # interzice scrierea și căi absolute (dar permite /tmp pentru runner)
+    # interzice scrierea și căi absolute (dar permite sol_path dir pentru runner)
     if 'w' in mode or 'a' in mode or '+' in mode: 
         raise PermissionError("File write blocked")
-    if isinstance(file, str) and file.startswith(('/', '\\\\')):
-        # Allow reading from /tmp/ for our test files
-        if not (file.startswith('/tmp/') and 'r' in mode):
+    if isinstance(file, str) and (file.startswith(('/', '\\\\'))):
+        if not (file.startswith(ALLOWED_DIR) and 'r' in mode):
             raise PermissionError("Absolute paths blocked")
     return orig_open(file, mode, *args, **kwargs)
 builtins.open = safe_open
-
-sol_path = sys.argv[1]
 src = open(sol_path).read().replace('\\r\\n','\\n')
 
 ns = {}
@@ -790,8 +791,8 @@ for case in edge_cases[:3]:  # Limit to avoid too many tests
   // worst: no fences and doesn't look like code (we had to guess)
   else format = 0.2;
   
-  // Safety (basic for code tasks): detect dangerous calls/imports
-  const unsafe = /(exec|eval|__import__|subprocess|socket|urllib|requests|ftplib|smtplib|os\.)/;
+  // Safety (basic for code tasks): detect dangerous calls/imports, allow harmless os.path usage
+  const unsafe = /\b(exec|eval|__import__|subprocess|socket|urllib|requests|ftplib|smtplib)\b|(?<!\bos\.)(\bos\.(?!path\b|name\b|urandom\b))/;
   const safety = unsafe.test(clean) ? 0.2 : 1.0;
   
   return { correctness, complexity, codeQuality, edgeCases, debugging, format, safety };
@@ -1038,7 +1039,15 @@ async function runSingleBenchmarkStreaming(
     
     // Additional fallback for total_tokens if individual counts are missing
     const totalTokens = (res as any)?.usage?.total_tokens ?? 0;
-    const finalTokensIn = tokensIn || (totalTokens ? Math.ceil(totalTokens * 0.7) : 0); // Estimate 70% input
+    
+    // Better fallback for input tokens - estimate from actual prompt sent
+    const reasoningText = (chatRequest as any).reasoning_effort;
+    const estimatedIn = estimateTokensFromText(
+      (chatRequest.messages?.map(m => String(m.content)).join('\n') ?? '') +
+      (typeof reasoningText === 'string' ? reasoningText : '')
+    );
+    
+    const finalTokensIn = tokensIn || (totalTokens ? Math.ceil(totalTokens * 0.7) : estimatedIn);
     const finalTokensOut = tokensOut || (totalTokens ? Math.floor(totalTokens * 0.3) : 0); // Estimate 30% output
     
     streamLog('info', `      🔢 Token usage: ${finalTokensIn} in, ${finalTokensOut} out`);
@@ -1600,10 +1609,10 @@ export async function benchmarkModel(
     
     // Use withBackoff for canary test to handle 503 errors gracefully
     let ping = await withBackoff(() => adapter.chat(canaryRequest));
-    let sanitized = (ping?.text ?? '').trim();
+    let canaryText = extractTextFromAdapter(ping);
     
     // Additional retry for Gemini 2.5 models if still empty
-    if (!sanitized && model.vendor === 'google' && model.name.includes('gemini-2.5')) {
+    if (!canaryText && model.vendor === 'google' && model.name.includes('gemini-2.5')) {
       console.log(`[CANARY-RETRY] ${model.name}: First canary empty, retrying...`);
       const retryId = Math.random().toString(36).slice(2, 8);
       const retryRequest: any = {
@@ -1615,11 +1624,11 @@ export async function benchmarkModel(
         maxTokens: 64
       };
       ping = await withBackoff(() => adapter.chat(retryRequest));
-      sanitized = (ping?.text ?? '').trim();
+      canaryText = extractTextFromAdapter(ping);
     }
     
     // Additional retry for GPT-5 models if still empty  
-    if (!sanitized && model.vendor === 'openai' && /^gpt-5/.test(model.name)) {
+    if (!canaryText && model.vendor === 'openai' && /^gpt-5/.test(model.name)) {
       console.log(`[CANARY-RETRY] ${model.name}: First canary empty, retrying with simpler prompt...`);
       const retryRequest: any = {
         model: model.name,
@@ -1631,10 +1640,10 @@ export async function benchmarkModel(
         reasoning_effort: 'low'
       };
       ping = await withBackoff(() => adapter.chat(retryRequest));
-      sanitized = (ping?.text ?? '').trim();
+      canaryText = extractTextFromAdapter(ping);
     }
     
-    if (!ping || !sanitized) throw new Error('canary test failed after retries');
+    if (!canaryText) throw new Error('canary test failed after retries');
   } catch (e: any) {
     console.warn(`[CANARY-FAIL] ${model.vendor}/${model.name}: ${String(e).slice(0,200)}`);
     
