@@ -686,10 +686,8 @@ export default async function (fastify: FastifyInstance, opts: any) {
           stability,
           latency,
           period: period, // Track which period this data represents
-          // CRITICAL FIX: Smart "avoid now" logic - considers both score and trend
-          isAvoidNow: currentDisplayScore < 45 || hasMajorDegradation || 
-                     (performanceTrend === 'declining' && currentDisplayScore < 60) ||
-                     (currentDisplayScore < 60 && hasRecentDegradation),
+          // CRITICAL FIX: Perfect threshold - models ≤60 show warnings, >60 are fine
+          isAvoidNow: currentDisplayScore <= 60 || hasMajorDegradation,
           hasValidData: true, // Always true since we estimate missing data
           // Separate criteria for different recommendations based on period performance
           isGoodPerformance: periodDisplayScore >= 60,
