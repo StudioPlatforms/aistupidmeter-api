@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { db } from '../db/index';
-import { models, scores } from '../db/schema';
+import { models, scores, deep_sessions } from '../db/schema';
 import { eq, desc, sql, and, gte } from 'drizzle-orm';
 
 // Helper function to calculate z-score for anomaly detection
@@ -46,6 +46,81 @@ function getDateRangeFromPeriod(period: 'latest' | '24h' | '7d' | '1m' = 'latest
     case 'latest':
     default:
       return new Date(now - 7 * 24 * 60 * 60 * 1000); // Default to 7 days for latest
+  }
+}
+
+// Helper function to get combined scores (70% hourly + 30% deep) for a single model
+async function getCombinedScore(modelId: number): Promise<number | null> {
+  try {
+    // Get latest hourly score
+    const latestHourlyScore = await db
+      .select()
+      .from(scores)
+      .where(and(eq(scores.modelId, modelId), eq(scores.suite, 'hourly')))
+      .orderBy(desc(scores.ts))
+      .limit(1);
+
+    // Get latest deep score  
+    const latestDeepScore = await db
+      .select()
+      .from(scores)
+      .where(and(eq(scores.modelId, modelId), eq(scores.suite, 'deep')))
+      .orderBy(desc(scores.ts))
+      .limit(1);
+
+    const hourlyScore = latestHourlyScore[0];
+    const deepScore = latestDeepScore[0];
+    
+    // Combine scores with 70% hourly, 30% deep weighting
+    let combinedScore: number | null = null;
+    
+    if (hourlyScore && hourlyScore.stupidScore !== null && hourlyScore.stupidScore >= 0) {
+      let hourlyDisplay = Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore)));
+      
+      if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
+        // Has both scores - combine them
+        let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
+        combinedScore = Math.round(hourlyDisplay * 0.7 + deepDisplay * 0.3);
+      } else {
+        // Only hourly score - use it directly
+        combinedScore = hourlyDisplay;
+      }
+    } else if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
+      // Only deep score - use it directly
+      let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
+      combinedScore = deepDisplay;
+    }
+    
+    return combinedScore;
+  } catch (error) {
+    console.error(`Error getting combined score for model ${modelId}:`, error);
+    return null;
+  }
+}
+
+// Helper function to get combined scores for all models (same as dashboard)
+async function getAllCombinedModelScores() {
+  try {
+    const allModels = await db.select().from(models);
+    const modelScores = [];
+    
+    for (const model of allModels) {
+      const combinedScore = await getCombinedScore(model.id);
+      
+      if (combinedScore !== null) {
+        modelScores.push({
+          id: model.id,
+          name: model.name,
+          vendor: model.vendor,
+          score: combinedScore
+        });
+      }
+    }
+    
+    return modelScores;
+  } catch (error) {
+    console.error('Error fetching combined model scores:', error);
+    return [];
   }
 }
 
@@ -424,21 +499,56 @@ export default async function (fastify: FastifyInstance, opts: any) {
             latestScore.stupidScore === -999 || latestScore.stupidScore === null || 
             latestScore.stupidScore === -100) continue;
         
-        // PERIOD-CONSISTENT SCORING: Use ONLY valid scores for the selected period
-        const convertedValidScores = validPeriodScores.map(s => {
-          const raw = s.stupidScore;
-          if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
-            return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
+        // For 'latest' period, use combined scores (70% hourly + 30% deep)
+        let currentDisplayScore: number;
+        let periodDisplayScore: number;
+        let convertedValidScores: number[];
+        
+        if (period === 'latest') {
+          // Get combined score for current (latest) performance
+          const combinedScore = await getCombinedScore(model.id);
+          if (combinedScore !== null) {
+            currentDisplayScore = combinedScore;
+            periodDisplayScore = combinedScore; // For latest, current = period
+            // Still need converted scores for stability calculations
+            convertedValidScores = validPeriodScores.map(s => {
+              const raw = s.stupidScore;
+              if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
+                return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
+              } else {
+                return Math.max(0, Math.min(100, Math.round(raw)));
+              }
+            });
           } else {
-            return Math.max(0, Math.min(100, Math.round(raw)));
+            // Fallback to converted scores if combined score not available
+            convertedValidScores = validPeriodScores.map(s => {
+              const raw = s.stupidScore;
+              if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
+                return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
+              } else {
+                return Math.max(0, Math.min(100, Math.round(raw)));
+              }
+            });
+            currentDisplayScore = convertedValidScores[0];
+            periodDisplayScore = Math.round(convertedValidScores.reduce((sum, s) => sum + s, 0) / convertedValidScores.length);
           }
-        });
-        
-        // Current score is always the latest valid score
-        const currentDisplayScore = convertedValidScores[0];
-        
-        // Period score represents the true average for the selected timeframe
-        const periodDisplayScore = Math.round(convertedValidScores.reduce((sum, s) => sum + s, 0) / convertedValidScores.length);
+        } else {
+          // For historical periods, use converted scores from specific timeframes
+          convertedValidScores = validPeriodScores.map(s => {
+            const raw = s.stupidScore;
+            if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
+              return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
+            } else {
+              return Math.max(0, Math.min(100, Math.round(raw)));
+            }
+          });
+          
+          // Current score is always the latest valid score
+          currentDisplayScore = convertedValidScores[0];
+          
+          // Period score represents the true average for the selected timeframe
+          periodDisplayScore = Math.round(convertedValidScores.reduce((sum, s) => sum + s, 0) / convertedValidScores.length);
+        }
         
         // Calculate stability using converted display scores for consistency
         const rawStability = convertedValidScores.length >= 2 

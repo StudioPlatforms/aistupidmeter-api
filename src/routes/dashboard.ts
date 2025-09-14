@@ -1,9 +1,276 @@
 import { FastifyInstance } from 'fastify';
 import { db } from '../db/index';
-import { models, scores, runs, metrics } from '../db/schema';
+import { models, scores, runs, metrics, deep_sessions } from '../db/schema';
 import { eq, desc, sql, gte, and } from 'drizzle-orm';
 
-// Helper function to get real database model scores
+// Helper function to get combined score for a single model (same as analytics)
+async function getCombinedScore(modelId: number): Promise<number | null> {
+  try {
+    // Get latest hourly score
+    const latestHourlyScore = await db
+      .select()
+      .from(scores)
+      .where(and(eq(scores.modelId, modelId), eq(scores.suite, 'hourly')))
+      .orderBy(desc(scores.ts))
+      .limit(1);
+
+    // Get latest deep score  
+    const latestDeepScore = await db
+      .select()
+      .from(scores)
+      .where(and(eq(scores.modelId, modelId), eq(scores.suite, 'deep')))
+      .orderBy(desc(scores.ts))
+      .limit(1);
+
+    const hourlyScore = latestHourlyScore[0];
+    const deepScore = latestDeepScore[0];
+    
+    // Combine scores with 70% hourly, 30% deep weighting
+    let combinedScore: number | null = null;
+    
+    if (hourlyScore && hourlyScore.stupidScore !== null && hourlyScore.stupidScore >= 0) {
+      let hourlyDisplay = Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore)));
+      
+      if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
+        // Has both scores - combine them
+        let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
+        combinedScore = Math.round(hourlyDisplay * 0.7 + deepDisplay * 0.3);
+      } else {
+        // Only hourly score - use it directly
+        combinedScore = hourlyDisplay;
+      }
+    } else if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
+      // Only deep score - use it directly
+      let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
+      combinedScore = deepDisplay;
+    }
+    
+    return combinedScore;
+  } catch (error) {
+    console.error(`Error getting combined score for model ${modelId}:`, error);
+    return null;
+  }
+}
+
+// Helper function to get deep reasoning scores ONLY (100% deep reasoning, 0% speed)
+async function getDeepReasoningScores() {
+  try {
+    const allModels = await db.select().from(models);
+    const modelScores = [];
+    
+    for (const model of allModels) {
+      // Get ONLY latest deep score (ignore hourly scores completely)
+      const latestDeepScore = await db
+        .select()
+        .from(scores)
+        .where(and(eq(scores.modelId, model.id), eq(scores.suite, 'deep')))
+        .orderBy(desc(scores.ts))
+        .limit(1);
+
+      const deepScore = latestDeepScore[0];
+      
+      // Use ONLY deep reasoning scores - no fallback to hourly
+      let reasoningScore: number | 'unavailable' = 'unavailable';
+      let isAvailable = false;
+      
+      if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
+        // Pure deep reasoning score
+        reasoningScore = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
+        isAvailable = true;
+      }
+      
+      if (!isAvailable) {
+        modelScores.push({
+          id: String(model.id),
+          name: model.name,
+          provider: model.vendor,
+          currentScore: 'unavailable',
+          trend: 'unavailable',
+          lastUpdated: new Date(),
+          status: 'unavailable',
+          unavailableReason: 'No recent deep reasoning benchmark data',
+          history: []
+        });
+        continue;
+      }
+
+      // Calculate trend using deep scores only (if available)
+      const recentDeepScores = await db
+        .select()
+        .from(scores)
+        .where(and(eq(scores.modelId, model.id), eq(scores.suite, 'deep')))
+        .orderBy(desc(scores.ts))
+        .limit(10); // Less frequent than hourly, so use fewer data points
+
+      let trend = 'stable';
+      if (recentDeepScores.length >= 3) {
+        const validScores = recentDeepScores.filter(s => s.stupidScore !== null && s.stupidScore >= 0);
+        if (validScores.length >= 3) {
+          const latest = Math.round(validScores[0].stupidScore);
+          const oldest = Math.round(validScores[validScores.length - 1].stupidScore);
+          const trendValue = latest - oldest;
+          
+          if (trendValue > 5) trend = 'up';
+          else if (trendValue < -5) trend = 'down';
+        }
+      }
+
+      // Determine status based on reasoning score
+      let status = 'excellent';
+      if (typeof reasoningScore === 'number') {
+        if (reasoningScore < 40) status = 'critical';
+        else if (reasoningScore < 65) status = 'warning';
+        else if (reasoningScore < 80) status = 'good';
+      }
+
+      // Use deep score timestamp
+      const lastUpdated = new Date(deepScore.ts || new Date());
+
+      modelScores.push({
+        id: String(model.id),
+        name: model.name,
+        provider: model.vendor,
+        currentScore: reasoningScore,
+        trend,
+        lastUpdated,
+        status,
+        history: recentDeepScores.filter(h => h.stupidScore !== null && h.stupidScore >= 0).slice(0, 10).map(h => ({
+          stupidScore: h.stupidScore,
+          displayScore: Math.max(0, Math.min(100, Math.round(h.stupidScore))),
+          timestamp: h.ts
+        }))
+      });
+    }
+    
+    return modelScores;
+  } catch (error) {
+    console.error('Error fetching deep reasoning scores:', error);
+    return [];
+  }
+}
+
+// Helper function to get combined scores (hourly + deep)
+async function getCombinedModelScores() {
+  try {
+    const allModels = await db.select().from(models);
+    const modelScores = [];
+    
+    for (const model of allModels) {
+      // Get latest hourly score
+      const latestHourlyScore = await db
+        .select()
+        .from(scores)
+        .where(and(eq(scores.modelId, model.id), eq(scores.suite, 'hourly')))
+        .orderBy(desc(scores.ts))
+        .limit(1);
+
+      // Get latest deep score  
+      const latestDeepScore = await db
+        .select()
+        .from(scores)
+        .where(and(eq(scores.modelId, model.id), eq(scores.suite, 'deep')))
+        .orderBy(desc(scores.ts))
+        .limit(1);
+
+      const hourlyScore = latestHourlyScore[0];
+      const deepScore = latestDeepScore[0];
+      
+      // Combine scores with 70% hourly, 30% deep weighting
+      let combinedScore: number | 'unavailable' = 'unavailable';
+      let isAvailable = false;
+      
+      if (hourlyScore && hourlyScore.stupidScore !== null && hourlyScore.stupidScore >= 0) {
+        let hourlyDisplay = Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore)));
+        
+        if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
+          // Has both scores - combine them
+          let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
+          combinedScore = Math.round(hourlyDisplay * 0.7 + deepDisplay * 0.3);
+          isAvailable = true;
+        } else {
+          // Only hourly score - use it directly
+          combinedScore = hourlyDisplay;
+          isAvailable = true;
+        }
+      } else if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
+        // Only deep score - use it directly
+        let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
+        combinedScore = deepDisplay;
+        isAvailable = true;
+      }
+      
+      if (!isAvailable) {
+        modelScores.push({
+          id: String(model.id),
+          name: model.name,
+          provider: model.vendor,
+          currentScore: 'unavailable',
+          trend: 'unavailable',
+          lastUpdated: new Date(),
+          status: 'unavailable',
+          unavailableReason: 'No recent benchmark data',
+          history: []
+        });
+        continue;
+      }
+
+      // Calculate trend using hourly data (more frequent)
+      const recentHourlyScores = await db
+        .select()
+        .from(scores)
+        .where(and(eq(scores.modelId, model.id), eq(scores.suite, 'hourly')))
+        .orderBy(desc(scores.ts))
+        .limit(24);
+
+      let trend = 'stable';
+      if (recentHourlyScores.length >= 3) {
+        const validScores = recentHourlyScores.filter(s => s.stupidScore !== null && s.stupidScore >= 0);
+        if (validScores.length >= 3) {
+          const latest = Math.round(validScores[0].stupidScore);
+          const oldest = Math.round(validScores[validScores.length - 1].stupidScore);
+          const trendValue = latest - oldest;
+          
+          if (trendValue > 5) trend = 'up';
+          else if (trendValue < -5) trend = 'down';
+        }
+      }
+
+      // Determine status
+      let status = 'excellent';
+      if (typeof combinedScore === 'number') {
+        if (combinedScore < 40) status = 'critical';
+        else if (combinedScore < 65) status = 'warning';
+        else if (combinedScore < 80) status = 'good';
+      }
+
+      // Use most recent timestamp
+      const primaryScore = hourlyScore || deepScore;
+      const lastUpdated = new Date(primaryScore.ts || new Date());
+
+      modelScores.push({
+        id: String(model.id),
+        name: model.name,
+        provider: model.vendor,
+        currentScore: combinedScore,
+        trend,
+        lastUpdated,
+        status,
+        history: recentHourlyScores.filter(h => h.stupidScore !== null && h.stupidScore >= 0).slice(0, 24).map(h => ({
+          stupidScore: h.stupidScore,
+          displayScore: Math.max(0, Math.min(100, Math.round(h.stupidScore))),
+          timestamp: h.ts
+        }))
+      });
+    }
+    
+    return modelScores;
+  } catch (error) {
+    console.error('Error fetching combined model scores:', error);
+    return [];
+  }
+}
+
+// Helper function to get real database model scores (hourly only)
 async function getModelScoresFromDB() {
   try {
     console.log('🔍 Starting getModelScoresFromDB...');
@@ -536,12 +803,84 @@ async function getHistoricalModelScores(period: string) {
   }
 }
 
+// Helper function to get model pricing (cost per 1M tokens)
+function getModelPricing(modelName: string, provider: string): { input: number; output: number } {
+  const name = modelName.toLowerCase();
+  const prov = provider.toLowerCase();
+  
+  // Pricing as of early 2025 (approximate, in USD per 1M tokens)
+  if (prov === 'openai') {
+    if (name.includes('gpt-5') && name.includes('turbo')) return { input: 10, output: 30 };
+    if (name.includes('gpt-5')) return { input: 15, output: 45 };
+    if (name.includes('o3-pro')) return { input: 60, output: 240 };  
+    if (name.includes('o3-mini')) return { input: 3.5, output: 14 };
+    if (name.includes('o3')) return { input: 15, output: 60 };
+    if (name.includes('gpt-4o') && name.includes('mini')) return { input: 0.15, output: 0.6 };
+    if (name.includes('gpt-4o')) return { input: 2.5, output: 10 };
+    return { input: 5, output: 15 }; // Default OpenAI
+  }
+  
+  if (prov === 'anthropic') {
+    if (name.includes('opus-4')) return { input: 15, output: 75 };
+    if (name.includes('sonnet-4')) return { input: 3, output: 15 };
+    if (name.includes('haiku-4')) return { input: 0.25, output: 1.25 };
+    return { input: 8, output: 24 }; // Default Anthropic
+  }
+  
+  if (prov === 'xai' || prov === 'x.ai') {
+    if (name.includes('grok-4')) return { input: 5, output: 15 };
+    if (name.includes('grok-code-fast')) return { input: 5, output: 15 };
+    return { input: 5, output: 15 }; // Default xAI
+  }
+  
+  if (prov === 'google') {
+    if (name.includes('2.5-pro')) return { input: 1.25, output: 5 };
+    if (name.includes('2.5-flash')) return { input: 0.075, output: 0.3 };
+    if (name.includes('2.5-flash-lite')) return { input: 0.075, output: 0.3 };
+    return { input: 2, output: 6 }; // Default Google
+  }
+  
+  return { input: 3, output: 10 }; // Default fallback
+}
+
+// Helper function to calculate price-to-performance ratio
+function calculatePricePerformanceRatio(score: number, pricing: { input: number; output: number }): number {
+  if (score <= 0) return Infinity; // Avoid division by zero
+  
+  // Estimate total cost per 1M tokens (assume 60% output, 40% input for typical usage)
+  const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
+  
+  // Price-performance ratio: lower is better (cost per performance point)
+  // We'll invert this when sorting so higher ratios appear first
+  return estimatedCost / score;
+}
+
 // Helper function to sort model scores by different criteria
 function sortModelScores(modelScores: any[], sortBy: string) {
   const availableModels = modelScores.filter(m => m.currentScore !== 'unavailable');
   const unavailableModels = modelScores.filter(m => m.currentScore === 'unavailable');
   
   switch (sortBy) {
+    case 'price':
+      // Sort by price-to-performance ratio (best value first)
+      availableModels.forEach(model => {
+        const pricing = getModelPricing(model.name, model.provider);
+        const priceRatio = calculatePricePerformanceRatio(model.currentScore as number, pricing);
+        model.priceRatio = priceRatio;
+        model.pricing = pricing;
+        
+        // Calculate estimated cost for typical usage
+        const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
+        model.estimatedCost = estimatedCost;
+        
+        // Calculate value score (higher is better value)
+        model.valueScore = model.currentScore / estimatedCost;
+      });
+      
+      // Sort by value score (higher = better value)
+      availableModels.sort((a, b) => (b.valueScore || 0) - (a.valueScore || 0));
+      break;
+      
     case 'trend':
       // Sort by trend: up > stable > down, then by score
       availableModels.sort((a, b) => {
@@ -574,7 +913,7 @@ function sortModelScores(modelScores: any[], sortBy: string) {
       });
       break;
       
-    default: // 'score'
+    default: // 'combined', 'reasoning', 'speed'
       // Sort by current score (highest first)
       availableModels.sort((a, b) => (b.currentScore as number) - (a.currentScore as number));
       break;
@@ -803,14 +1142,23 @@ export default async function (fastify: FastifyInstance, opts: any) {
   fastify.get('/scores', async (req: any) => {
     try {
       const period = req.query.period || 'latest'; // latest, 24h, 7d, 1m
-      const sortBy = req.query.sortBy || 'score'; // score, trend, stability, change
+      const sortBy = req.query.sortBy || 'combined'; // combined, reasoning, speed, trend, stability, change
       
       let modelScores;
       
-      if (period === 'latest') {
-        modelScores = await getModelScoresFromDB();
+      // Route to appropriate score provider based on sortBy
+      if (sortBy === 'combined') {
+        // Combined scores (default): hourly + deep weighted
+        modelScores = period === 'latest' ? await getCombinedModelScores() : await getHistoricalModelScores(period);
+      } else if (sortBy === 'reasoning') {
+        // Deep reasoning scores ONLY (100% deep reasoning, 0% speed)
+        modelScores = period === 'latest' ? await getDeepReasoningScores() : await getHistoricalModelScores(period);
+      } else if (sortBy === 'speed') {
+        // Hourly speed/coding scores only
+        modelScores = period === 'latest' ? await getModelScoresFromDB() : await getHistoricalModelScores(period);
       } else {
-        modelScores = await getHistoricalModelScores(period);
+        // Default to combined for other sort types
+        modelScores = period === 'latest' ? await getCombinedModelScores() : await getHistoricalModelScores(period);
       }
       
       // Apply sorting
@@ -994,7 +1342,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
     }
   });
 
-  // Get global AI stupidity index with historical data
+  // Get global AI stupidity index with historical data (using combined scores)
   fastify.get('/global-index', async () => {
     try {
       // Get all available model scores from last 24 hours with 6-hour intervals
@@ -1032,7 +1380,16 @@ export default async function (fastify: FastifyInstance, opts: any) {
         const modelScoresAtTime = [];
         
         for (const model of availableModels) {
-          // Get the score closest to this time point
+          if (timePoint.hoursAgo === 0) {
+            // For current time, use combined scores
+            const combinedScore = await getCombinedScore(model.id);
+            if (combinedScore !== null) {
+              modelScoresAtTime.push(combinedScore);
+              continue;
+            }
+          }
+          
+          // For historical times or fallback, use time-based scoring
           const scoreAtTime = await db
             .select()
             .from(scores)
@@ -1094,12 +1451,10 @@ export default async function (fastify: FastifyInstance, opts: any) {
         else if (current < sixHoursAgo - 2) trend = 'declining';
       }
       
-      // Count models performing well (score >= 65)
-      const modelScores = await getModelScoresFromDB();
-      const performingWell = modelScores.filter(m => 
-        typeof m.currentScore === 'number' && m.currentScore >= 65
-      ).length;
-      const totalModels = modelScores.filter(m => m.currentScore !== 'unavailable').length;
+      // Count models performing well (score >= 65) using combined scores for current
+      const modelScores = await getCombinedModelScores();
+      const performingWell = modelScores.filter(m => typeof m.currentScore === 'number' && m.currentScore >= 65).length;
+      const totalModels = modelScores.length;
       
       return {
         success: true,

@@ -77,7 +77,34 @@ export const scores = sqliteTable('scores', {
   stupidScore: real('stupid_score').notNull(),
   axes: text('axes', { mode: 'json' }).$type<Record<string, number>>().notNull(),
   cusum: real('cusum').notNull(),
-  note: text('note')
+  note: text('note'),
+  suite: text('suite').default('hourly') // 'hourly' | 'deep'
+});
+
+// Deep session tracking
+export const deep_sessions = sqliteTable('deep_sessions', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  modelId: integer('model_id').references(() => models.id).notNull(),
+  taskSlug: text('task_slug').notNull(),
+  ts: text('ts').default('CURRENT_TIMESTAMP'),
+  turns: integer('turns').notNull(),
+  totalLatencyMs: integer('total_latency_ms').notNull(),
+  totalTokensIn: integer('total_tokens_in').notNull(),
+  totalTokensOut: integer('total_tokens_out').notNull(),
+  passed: integer('passed', { mode: 'boolean' }).notNull(),
+  conversationData: text('conversation_data', { mode: 'json' }).$type<any[]>(),
+  stepResults: text('step_results', { mode: 'json' }).$type<any[]>(),
+  finalScore: integer('final_score').notNull()
+});
+
+// Deep session alerts
+export const deep_alerts = sqliteTable('deep_alerts', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  modelId: integer('model_id').references(() => models.id).notNull(),
+  ts: text('ts').default('CURRENT_TIMESTAMP'),
+  level: text('level').notNull(), // 'warning' | 'critical'
+  message: text('message').notNull(),
+  context: text('context', { mode: 'json' }).$type<Record<string, any>>()
 });
 
 export const visitors = sqliteTable('visitors', {

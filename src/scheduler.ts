@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import { runRealBenchmarks } from './jobs/real-benchmarks';
+import { runDeepBenchmarks, isDeepBenchmarkActive } from './deepbench/index';
 
 let isRunning = false;
 let lastRunTime: Date | null = null;
@@ -12,10 +13,10 @@ export function startBenchmarkScheduler() {
   const isValidCron = cron.validate('0 * * * *');
   console.log(`📋 Cron expression validation: ${isValidCron ? '✅ Valid' : '❌ Invalid'}`);
 
-  // Run benchmarks every hour at the top of the hour (:00)
+  // Run both regular and deep benchmarks every hour at the top of the hour (:00)
   scheduledTask = cron.schedule('0 * * * *', async () => {
     const now = new Date();
-    console.log(`🔔 Cron triggered at ${now.toISOString()}`);
+    console.log(`🔔 Combined benchmark cron triggered at ${now.toISOString()}`);
     
     if (isRunning) {
       console.log('⏸️  Benchmark already running, skipping this cycle...');
@@ -25,14 +26,22 @@ export function startBenchmarkScheduler() {
     try {
       isRunning = true;
       lastRunTime = now;
-      console.log(`🕐 ${now.toISOString()} - Starting scheduled benchmark run...`);
+      console.log(`🕐 ${now.toISOString()} - Starting scheduled combined benchmark run...`);
       console.log(`📊 Previous run was: ${lastRunTime ? lastRunTime.toISOString() : 'Never'}`);
       
+      // Run regular benchmarks first
+      console.log(`📊 Running regular benchmarks...`);
       await runRealBenchmarks();
+      console.log(`✅ Regular benchmarks completed`);
       
-      console.log(`✅ ${new Date().toISOString()} - Scheduled benchmark completed successfully`);
+      // Then run deep benchmarks
+      console.log(`🏗️ Running deep benchmarks...`);
+      await runDeepBenchmarks();
+      console.log(`✅ Deep benchmarks completed`);
+      
+      console.log(`✅ ${new Date().toISOString()} - Combined benchmark run completed successfully`);
     } catch (error) {
-      console.error(`❌ ${new Date().toISOString()} - Scheduled benchmark failed:`, error);
+      console.error(`❌ ${new Date().toISOString()} - Combined benchmark run failed:`, error);
       // Don't let errors stop future runs
     } finally {
       isRunning = false;
@@ -41,7 +50,7 @@ export function startBenchmarkScheduler() {
     timezone: 'Europe/Berlin' // Explicitly set timezone
   });
 
-  console.log('📅 Benchmark scheduler started - runs every hour at the top of the hour (:00)');
+  console.log('📅 Combined benchmark scheduler started - runs both regular and deep benchmarks every hour at the top of the hour (:00)');
   console.log(`🌍 Scheduler timezone: Europe/Berlin`);
   console.log(`⚡ Scheduler is active: ${scheduledTask ? scheduledTask.getStatus() : 'Unknown'}`);
   

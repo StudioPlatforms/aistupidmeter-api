@@ -99,9 +99,68 @@ try {
       stupid_score REAL NOT NULL,
       axes TEXT NOT NULL,
       cusum REAL NOT NULL,
-      note TEXT
+      note TEXT,
+      suite TEXT DEFAULT 'hourly'
+    );
+
+    -- Deep benchmark tables
+    CREATE TABLE IF NOT EXISTS deep_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      model_id INTEGER NOT NULL REFERENCES models(id),
+      task_slug TEXT NOT NULL,
+      ts TEXT DEFAULT CURRENT_TIMESTAMP,
+      turns INTEGER NOT NULL,
+      total_latency_ms INTEGER NOT NULL,
+      total_tokens_in INTEGER NOT NULL,
+      total_tokens_out INTEGER NOT NULL,
+      passed INTEGER NOT NULL,
+      conversation_data TEXT,
+      step_results TEXT,
+      final_score INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS deep_alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      model_id INTEGER NOT NULL REFERENCES models(id),
+      ts TEXT DEFAULT CURRENT_TIMESTAMP,
+      level TEXT NOT NULL,
+      message TEXT NOT NULL,
+      context TEXT
+    );
+
+    -- Visitor tracking tables
+    CREATE TABLE IF NOT EXISTS visitors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ip TEXT NOT NULL,
+      user_agent TEXT,
+      referer TEXT,
+      path TEXT NOT NULL,
+      timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+      country TEXT,
+      city TEXT,
+      is_unique INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS visitor_stats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL UNIQUE,
+      total_visits INTEGER NOT NULL DEFAULT 0,
+      unique_visitors INTEGER NOT NULL DEFAULT 0,
+      top_pages TEXT NOT NULL,
+      top_countries TEXT NOT NULL
     );
   `);
+  
+  // Add missing columns to existing tables
+  try {
+    // Add suite column to existing scores table if it doesn't exist
+    sqlite.exec(`ALTER TABLE scores ADD COLUMN suite TEXT DEFAULT 'hourly'`);
+    console.log('✅ Added suite column to scores table');
+  } catch (err) {
+    // Column probably already exists, ignore error
+    console.log('ℹ️ Suite column already exists in scores table');
+  }
+  
   console.log('✅ Database tables created/verified');
 } catch (err) {
   console.error('❌ Database table creation failed:', err);
