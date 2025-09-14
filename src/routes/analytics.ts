@@ -126,9 +126,12 @@ async function getAllCombinedModelScores() {
 
 export default async function (fastify: FastifyInstance, opts: any) {
   
-  // Degradation detection endpoint
+  // Degradation detection endpoint - now supports sortBy for mode-specific degradation detection
   fastify.get('/degradations', async (request) => {
-    const { period = 'latest' } = request.query as { period?: 'latest' | '24h' | '7d' | '1m' };
+    const { period = 'latest', sortBy = 'combined' } = request.query as { 
+      period?: 'latest' | '24h' | '7d' | '1m';
+      sortBy?: 'combined' | 'reasoning' | 'speed' | 'price';
+    };
     try {
       const allModels = await db.select().from(models);
       const degradations = [];
@@ -218,26 +221,63 @@ export default async function (fastify: FastifyInstance, opts: any) {
         const baselineMean = validBaselineValues.reduce((a, b) => a + b, 0) / validBaselineValues.length;
         const baselineStdDev = calculateStdDev(validBaselineValues);
         
-        // Use the LATEST score (same as dashboard), not average of recent scores
-        const latestRawScore = historicalScores[0].stupidScore;
+        // CRITICAL FIX: Use mode-specific scores for degradation detection
+        let currentDisplayScore: number;
+        let baselineDisplayScore: number;
+        let latestRawScore = historicalScores[0].stupidScore;
+        
+        if (sortBy === 'combined') {
+          // Use combined score for COMBINED mode (70% hourly + 30% deep)
+          const currentCombinedScore = await getCombinedScore(model.id);
+          if (currentCombinedScore !== null) {
+            currentDisplayScore = currentCombinedScore;
+            console.log(`🔍 Degradation check for ${model.name} in COMBINED mode: ${currentCombinedScore}`);
+            
+            // For baseline, estimate combined scores from historical data
+            // This is approximate but gives us the right direction
+            baselineDisplayScore = (() => {
+              if (Math.abs(baselineMean) < 1 || Math.abs(baselineMean) > 100) {
+                return Math.max(0, Math.min(100, Math.round(50 - baselineMean * 100)));
+              } else {
+                return Math.max(0, Math.min(100, Math.round(baselineMean)));
+              }
+            })();
+          } else {
+            // Fallback to converted scores if combined not available
+            currentDisplayScore = (() => {
+              if (Math.abs(latestRawScore) < 1 || Math.abs(latestRawScore) > 100) {
+                return Math.max(0, Math.min(100, Math.round(50 - latestRawScore * 100)));
+              } else {
+                return Math.max(0, Math.min(100, Math.round(latestRawScore)));
+              }
+            })();
+            baselineDisplayScore = (() => {
+              if (Math.abs(baselineMean) < 1 || Math.abs(baselineMean) > 100) {
+                return Math.max(0, Math.min(100, Math.round(50 - baselineMean * 100)));
+              } else {
+                return Math.max(0, Math.min(100, Math.round(baselineMean)));
+              }
+            })();
+          }
+        } else {
+          // For other modes (reasoning, speed, price), use converted historical scores
+          currentDisplayScore = (() => {
+            if (Math.abs(latestRawScore) < 1 || Math.abs(latestRawScore) > 100) {
+              return Math.max(0, Math.min(100, Math.round(50 - latestRawScore * 100)));
+            } else {
+              return Math.max(0, Math.min(100, Math.round(latestRawScore)));
+            }
+          })();
+          baselineDisplayScore = (() => {
+            if (Math.abs(baselineMean) < 1 || Math.abs(baselineMean) > 100) {
+              return Math.max(0, Math.min(100, Math.round(50 - baselineMean * 100)));
+            } else {
+              return Math.max(0, Math.min(100, Math.round(baselineMean)));
+            }
+          })();
+        }
+        
         const zScore = calculateZScore(latestRawScore, baselineMean, baselineStdDev);
-        
-        // Convert scores to display format for consistent comparison (same as dashboard)
-        const currentDisplayScore = (() => {
-          if (Math.abs(latestRawScore) < 1 || Math.abs(latestRawScore) > 100) {
-            return Math.max(0, Math.min(100, Math.round(50 - latestRawScore * 100)));
-          } else {
-            return Math.max(0, Math.min(100, Math.round(latestRawScore)));
-          }
-        })();
-        
-        const baselineDisplayScore = (() => {
-          if (Math.abs(baselineMean) < 1 || Math.abs(baselineMean) > 100) {
-            return Math.max(0, Math.min(100, Math.round(50 - baselineMean * 100)));
-          } else {
-            return Math.max(0, Math.min(100, Math.round(baselineMean)));
-          }
-        })();
         
         // Only report meaningful degradations with sufficient baseline data
         const scoreDrop = baselineDisplayScore - currentDisplayScore;
@@ -417,9 +457,12 @@ export default async function (fastify: FastifyInstance, opts: any) {
     }
   });
   
-  // Model recommendations based on use case
+  // Model recommendations based on use case - now supports sortBy for mode-specific recommendations
   fastify.get('/recommendations', async (request) => {
-    const { period = 'latest' } = request.query as { period?: 'latest' | '24h' | '7d' | '1m' };
+    const { period = 'latest', sortBy = 'combined' } = request.query as { 
+      period?: 'latest' | '24h' | '7d' | '1m';
+      sortBy?: 'combined' | 'reasoning' | 'speed' | 'price';
+    };
     try {
       const allModels = await db.select().from(models);
       const recommendations = {
@@ -643,8 +686,10 @@ export default async function (fastify: FastifyInstance, opts: any) {
           stability,
           latency,
           period: period, // Track which period this data represents
-          // Only avoid models with serious current issues (don't avoid based on historical averages if currently good)
-          isAvoidNow: currentDisplayScore < 40 || hasMajorDegradation,
+          // CRITICAL FIX: Smart "avoid now" logic - considers both score and trend
+          isAvoidNow: currentDisplayScore < 45 || hasMajorDegradation || 
+                     (performanceTrend === 'declining' && currentDisplayScore < 60) ||
+                     (currentDisplayScore < 60 && hasRecentDegradation),
           hasValidData: true, // Always true since we estimate missing data
           // Separate criteria for different recommendations based on period performance
           isGoodPerformance: periodDisplayScore >= 60,
