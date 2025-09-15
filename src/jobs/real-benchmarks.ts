@@ -88,7 +88,7 @@ function recordModelSuccess(modelName: string) {
 }
 
 // ---------- Config ----------
-const TRIALS = 3;                    // Reduced trials for efficiency
+const TRIALS = 5;                    // Increased for better statistical power with multi-key rotation
 const SLEEP_MS_RANGE = [200, 400];   // jitter between trials
 const MIN_HISTORY_FOR_BASELINE = 10; // Minimum historical scores needed for baseline
 const STD_EPS = 1e-6;                // avoid div-by-zero
@@ -394,23 +394,53 @@ export const BENCHMARK_TASKS = [
   }
 ];
 
-// ---------- Provider adapter ----------
-function getAdapter(provider: Provider): LLMAdapter | null {
-  const apiKeys = {
-    openai: process.env.OPENAI_API_KEY,
-    xai: process.env.XAI_API_KEY,
-    anthropic: process.env.ANTHROPIC_API_KEY,
-    google: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
+// ---------- Multi-key provider adapter ----------
+export function getKeysForProvider(provider: Provider): string[] {
+  const keyArrays = {
+    openai: [
+      process.env.OPENAI_API_KEY,
+      process.env.OPENAI_API_KEY_2
+    ],
+    
+    xai: [
+      process.env.XAI_API_KEY
+    ],
+    
+    anthropic: [
+      process.env.ANTHROPIC_API_KEY,
+      process.env.ANTHROPIC_API_KEY_2
+    ],
+    
+    google: [
+      process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
+      process.env.GEMINI_API_KEY_2
+    ]
   };
-  const key = apiKeys[provider as keyof typeof apiKeys];
-  if (!key || key.startsWith('your_')) return null;
+  
+  // Filter out undefined values and invalid keys
+  const keys = keyArrays[provider] || [];
+  return keys.filter((k): k is string => k !== undefined && k !== null && !k.startsWith('your_'));
+}
+
+export function getAdapter(provider: Provider, keyIndex: number = 0): LLMAdapter | null {
+  const keys = getKeysForProvider(provider);
+  if (keys.length === 0) return null;
+  
+  // Use modulo to cycle through available keys
+  const selectedKey = keys[keyIndex % keys.length];
+  
   switch (provider) {
-    case 'openai': return new OpenAIAdapter(key);
-    case 'xai': return new XAIAdapter(key);
-    case 'anthropic': return new AnthropicAdapter(key);
-    case 'google': return new GoogleAdapter(key);
+    case 'openai': return new OpenAIAdapter(selectedKey);
+    case 'xai': return new XAIAdapter(selectedKey);
+    case 'anthropic': return new AnthropicAdapter(selectedKey);
+    case 'google': return new GoogleAdapter(selectedKey);
     default: return null;
   }
+}
+
+// Helper to get total number of keys for a provider
+export function getKeyCount(provider: Provider): number {
+  return getKeysForProvider(provider).length;
 }
 
 // ---------- Enhanced code evaluation ----------
@@ -910,10 +940,34 @@ async function runSingleBenchmarkStreaming(
     let temperature = 0.1;
     let reasoning_effort: string | undefined = undefined;
     
-    // Balance prompting & maxTokens across providers - base limits to avoid latency skew
-    maxTokens = Math.min(task.maxTokens * 3, 1200);  // base cap ~1200 for all
-    temperature = 0.1;
-    reasoning_effort = undefined; // remove special boosts
+    // GPT-5 OPTIMIZATION: Model-specific token limits and configuration
+    if (model.vendor === 'openai') {
+      if (model.name === 'gpt-5-2025-08-07') {
+        // Reasoning variant: Much higher token limit, optimized for quality
+        maxTokens = Math.max(task.maxTokens * 5, 3000);  // 3000+ tokens for reasoning
+        temperature = 0.05; // Lower temperature for more focused reasoning
+        reasoning_effort = 'medium'; // Use medium reasoning effort
+        streamLog && streamLog('info', `      🧠 GPT-5 Reasoning: maxTokens=${maxTokens}, reasoning_effort=medium`);
+      } else if (model.name === 'gpt-5-auto') {
+        // Router variant: Balanced approach, let router decide
+        maxTokens = Math.max(task.maxTokens * 3, 2000);  // 2000 tokens for router
+        temperature = 0.1;
+        reasoning_effort = 'low'; // Let router decide, minimal reasoning
+        streamLog && streamLog('info', `      🔄 GPT-5 Router: maxTokens=${maxTokens}, reasoning_effort=low`);
+      } else if (/^o\d|^o-mini|^o-/.test(model.name)) {
+        // o-series models: Also reasoning-focused
+        maxTokens = Math.max(task.maxTokens * 4, 2500);
+        temperature = 0.1;
+        reasoning_effort = 'low'; // Keep low for speed vs accuracy balance
+        streamLog && streamLog('info', `      🔮 ${model.name}: maxTokens=${maxTokens}, reasoning_effort=low`);
+      } else {
+        // Standard OpenAI models (GPT-4o, etc.)
+        maxTokens = Math.min(task.maxTokens * 3, 1200);
+      }
+    } else {
+      // Non-OpenAI models: Keep existing limits
+      maxTokens = Math.min(task.maxTokens * 3, 1200);
+    }
     
     // Smart retry strategy: apply boosts after base calculation
     if (retryAttempt > 0) {
@@ -1169,14 +1223,29 @@ async function runTaskWithTrialsStreaming(
 
   streamLog('info', `  🔄 Running ${N} trials for ${task.id}...`);
 
+  const keyCount = getKeyCount(model.vendor);
+  if (keyCount > 1) {
+    streamLog('info', `  🔑 Using ${keyCount} different API keys for key rotation across trials`);
+  }
+
   const trials: any[] = [];
   let consecutiveFailures = 0;
   
   for (let i = 0; i < N; i++) {
-    streamLog('info', `    🎯 Trial ${i + 1}/${N}: Sending prompt to ${model.vendor}/${model.name}...`);
+    // MULTI-KEY ROTATION: Use different key for each trial
+    const keyIndex = i % Math.max(1, keyCount); // Rotate keys across trials
+    const trialAdapter = getAdapter(model.vendor, keyIndex);
+    
+    if (!trialAdapter) {
+      streamLog('error', `    ❌ Trial ${i + 1}: Could not get adapter for key ${keyIndex}`);
+      consecutiveFailures++;
+      continue;
+    }
+    
+    streamLog('info', `    🎯 Trial ${i + 1}/${N}: Using API key ${keyIndex + 1}/${keyCount} for ${model.vendor}/${model.name}...`);
     
     try {
-      const result = await runSingleBenchmarkStreaming(adapter, model, task, streamingSessionId, i + 1);
+      const result = await runSingleBenchmarkStreaming(trialAdapter, model, task, streamingSessionId, i + 1);
       if (result) {
         trials.push(result);
         consecutiveFailures = 0; // Reset failure counter on success
@@ -2062,7 +2131,8 @@ export async function runRealBenchmarks() {
     // First, auto-discover and add any new models
     await ensureAllModelsInDatabase();
     
-    const allModels = await db.select().from(models);
+    // Only test whitelisted models (show_in_rankings = true)
+    const allModels = await db.select().from(models).where(eq(models.showInRankings, true));
     
     // Create synchronized timestamp for batch
     const batchTimestamp = new Date().toISOString();
@@ -2222,4 +2292,16 @@ async function benchmarkModelWithEnhancedParams(
 
   // Run benchmark with the existing system (it already has enhanced retry logic)
   await benchmarkModel(model, batchTimestamp);
+}
+
+// If this file is run directly, execute the benchmarks
+if (require.main === module) {
+  console.log('🚀 Running real-benchmarks directly...');
+  runRealBenchmarks().then(() => {
+    console.log('✅ Benchmark run completed!');
+    process.exit(0);
+  }).catch((error) => {
+    console.error('❌ Benchmark run failed:', error);
+    process.exit(1);
+  });
 }
