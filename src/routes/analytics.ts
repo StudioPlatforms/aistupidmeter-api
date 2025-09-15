@@ -286,21 +286,59 @@ export default async function (fastify: FastifyInstance, opts: any) {
         
         const zScore = calculateZScore(latestRawScore, baselineMean, baselineStdDev);
         
-        // Only report meaningful degradations with sufficient baseline data
+        // TWO TYPES OF WARNINGS:
+        // 1. DEGRADATION WARNINGS (performance drops from baseline)
+        // 2. LOW PERFORMANCE WARNINGS (current scores under 60)
+        
         const scoreDrop = baselineDisplayScore - currentDisplayScore;
+        let warningAdded = false;
         
+        // TYPE 1: DEGRADATION WARNINGS (existing logic)
         // Stricter criteria: Must have meaningful baseline (>30) and significant drop
-        if (baselineDisplayScore < 30) continue; // Skip if baseline is too low to be meaningful
+        if (baselineDisplayScore >= 30) {
+          // Require significant degradation: 15+ point drop AND statistical significance
+          if (scoreDrop >= 15 && currentDisplayScore < baselineDisplayScore * 0.8 && Math.abs(zScore) > 2) {
+            const dropPercentage = Math.round((scoreDrop / Math.max(1, baselineDisplayScore)) * 100);
+            // Use actual calculated percentage, not artificially capped
+            const realDropPercentage = Math.max(1, Math.min(90, Math.abs(dropPercentage)));
+            
+            let severity = 'minor';
+            if (scoreDrop > 30 || currentDisplayScore < 40) severity = 'critical';
+            else if (scoreDrop > 20 || currentDisplayScore < 60) severity = 'major';
+            
+            degradations.push({
+              modelId: model.id,
+              modelName: model.name,
+              provider: model.vendor,
+              currentScore: currentDisplayScore,
+              baselineScore: baselineDisplayScore,
+              dropPercentage: realDropPercentage,
+              zScore: zScore.toFixed(2),
+              severity,
+              detectedAt: new Date(),
+              message: `Performance dropped ${realDropPercentage}% from baseline (${baselineDisplayScore} → ${currentDisplayScore})`,
+              type: 'degradation'
+            });
+            warningAdded = true;
+          }
+        }
         
-        // Require significant degradation: 15+ point drop AND statistical significance
-        if (scoreDrop >= 15 && currentDisplayScore < baselineDisplayScore * 0.8 && Math.abs(zScore) > 2) {
-          const dropPercentage = Math.round((scoreDrop / Math.max(1, baselineDisplayScore)) * 100);
-          // Use actual calculated percentage, not artificially capped
-          const realDropPercentage = Math.max(1, Math.min(90, Math.abs(dropPercentage)));
-          
+        // TYPE 2: LOW PERFORMANCE WARNINGS (NEW!)
+        // Trigger warnings for any model currently performing under 60, regardless of baseline
+        if (!warningAdded && currentDisplayScore < 60) {
           let severity = 'minor';
-          if (scoreDrop > 30 || currentDisplayScore < 40) severity = 'critical';
-          else if (scoreDrop > 20 || currentDisplayScore < 60) severity = 'major';
+          let message = '';
+          
+          if (currentDisplayScore < 40) {
+            severity = 'critical';
+            message = `Critical performance: ${currentDisplayScore} points (well below acceptable threshold)`;
+          } else if (currentDisplayScore < 50) {
+            severity = 'major';
+            message = `Poor performance: ${currentDisplayScore} points (below 50 point threshold)`;
+          } else { // currentDisplayScore < 60
+            severity = 'minor';
+            message = `Below average performance: ${currentDisplayScore} points (below 60 point threshold)`;
+          }
           
           degradations.push({
             modelId: model.id,
@@ -308,11 +346,12 @@ export default async function (fastify: FastifyInstance, opts: any) {
             provider: model.vendor,
             currentScore: currentDisplayScore,
             baselineScore: baselineDisplayScore,
-            dropPercentage: realDropPercentage,
+            dropPercentage: 0, // No drop percentage for low-performance warnings
             zScore: zScore.toFixed(2),
             severity,
             detectedAt: new Date(),
-            message: `Performance dropped ${realDropPercentage}% from baseline (${baselineDisplayScore} → ${currentDisplayScore})`
+            message,
+            type: 'low_performance'
           });
         }
       }
