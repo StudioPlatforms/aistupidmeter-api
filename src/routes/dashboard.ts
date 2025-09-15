@@ -59,48 +59,64 @@ async function getDeepReasoningScores() {
     const modelScores = [];
     
     for (const model of allModels) {
-      // Get ONLY latest deep score (ignore hourly scores completely)
+      // STRICT: Get ONLY deep scores (suite = 'deep'), never hourly scores
       const latestDeepScore = await db
         .select()
         .from(scores)
-        .where(and(eq(scores.modelId, model.id), eq(scores.suite, 'deep')))
+        .where(and(
+          eq(scores.modelId, model.id), 
+          eq(scores.suite, 'deep')  // CRITICAL: Only deep reasoning benchmarks
+        ))
         .orderBy(desc(scores.ts))
         .limit(1);
 
       const deepScore = latestDeepScore[0];
       
-      // Use ONLY deep reasoning scores - no fallback to hourly
+      // STRICT: Use ONLY deep reasoning scores - NO fallback to hourly data
       let reasoningScore: number | 'unavailable' = 'unavailable';
       let isAvailable = false;
+      let lastUpdatedTime = new Date(); // Default to current time if no data
       
+      // Check if we have a valid deep reasoning score
       if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
         // Pure deep reasoning score
         reasoningScore = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
         isAvailable = true;
+        lastUpdatedTime = new Date(deepScore.ts || new Date());
+        
+        // VERIFICATION: Log the deep score timestamp to debug
+        const hoursAgo = (Date.now() - lastUpdatedTime.getTime()) / (1000 * 60 * 60);
+        console.log(`🧠 REASONING MODE: ${model.name} deep score from ${hoursAgo.toFixed(1)} hours ago (should be ~1-25 hours if running daily at 3 AM)`);
       }
       
+      // If no deep reasoning data available, mark as unavailable
       if (!isAvailable) {
+        console.log(`❌ REASONING MODE: ${model.name} has no deep reasoning benchmark data - marking unavailable`);
+        
         modelScores.push({
           id: String(model.id),
           name: model.name,
           provider: model.vendor,
           currentScore: 'unavailable',
           trend: 'unavailable',
-          lastUpdated: new Date(),
+          lastUpdated: new Date(), // Use current time for unavailable models
           status: 'unavailable',
-          unavailableReason: 'No recent deep reasoning benchmark data',
+          unavailableReason: 'No deep reasoning benchmark data available',
           history: []
         });
         continue;
       }
 
-      // Calculate trend using deep scores only (if available)
+      // Calculate trend using ONLY deep scores (never hourly)
       const recentDeepScores = await db
         .select()
         .from(scores)
-        .where(and(eq(scores.modelId, model.id), eq(scores.suite, 'deep')))
+        .where(and(
+          eq(scores.modelId, model.id), 
+          eq(scores.suite, 'deep')  // CRITICAL: Only deep reasoning benchmarks
+        ))
         .orderBy(desc(scores.ts))
-        .limit(10); // Less frequent than hourly, so use fewer data points
+        .limit(10); // Deep benchmarks are daily, so 10 = ~10 days of data
 
       let trend = 'stable';
       if (recentDeepScores.length >= 3) {
@@ -123,8 +139,8 @@ async function getDeepReasoningScores() {
         else if (reasoningScore < 80) status = 'good';
       }
 
-      // Use deep score timestamp
-      const lastUpdated = new Date(deepScore.ts || new Date());
+      // CRITICAL: Use ONLY the deep score timestamp - this should be from 3 AM daily run
+      const lastUpdated = lastUpdatedTime;
 
       modelScores.push({
         id: String(model.id),
@@ -132,7 +148,7 @@ async function getDeepReasoningScores() {
         provider: model.vendor,
         currentScore: reasoningScore,
         trend,
-        lastUpdated,
+        lastUpdated, // This should show timestamps from daily 3 AM runs, not hourly
         status,
         history: recentDeepScores.filter(h => h.stupidScore !== null && h.stupidScore >= 0).slice(0, 10).map(h => ({
           stupidScore: h.stupidScore,
@@ -142,6 +158,7 @@ async function getDeepReasoningScores() {
       });
     }
     
+    console.log(`🧠 REASONING MODE: Returned ${modelScores.length} models with deep reasoning scores`);
     return modelScores;
   } catch (error) {
     console.error('Error fetching deep reasoning scores:', error);
@@ -1142,7 +1159,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
   fastify.get('/scores', async (req: any) => {
     try {
       const period = req.query.period || 'latest'; // latest, 24h, 7d, 1m
-      const sortBy = req.query.sortBy || 'combined'; // combined, reasoning, speed, trend, stability, change
+      const sortBy = req.query.sortBy || 'combined'; // combined, reasoning, speed, 7axis, trend, stability, change
       
       let modelScores;
       
@@ -1156,9 +1173,140 @@ export default async function (fastify: FastifyInstance, opts: any) {
       } else if (sortBy === 'speed') {
         // Hourly speed/coding scores only
         modelScores = period === 'latest' ? await getModelScoresFromDB() : await getHistoricalModelScores(period);
+      } else if (sortBy === '7axis') {
+        // 7axis mode: Get hourly scores with proper period-based history
+        modelScores = period === 'latest' ? await getModelScoresFromDB() : await getHistoricalModelScores(period);
       } else {
         // Default to combined for other sort types
         modelScores = period === 'latest' ? await getCombinedModelScores() : await getHistoricalModelScores(period);
+      }
+      
+      // FIX: Enhance history data for each model based on sortBy and period
+      // This ensures charts display correct data for each mode
+      for (const model of modelScores) {
+        if (model.currentScore !== 'unavailable' && model.id) {
+          try {
+            // Directly query the database for proper history based on mode and period
+            let timeThreshold: Date;
+            let dataLimit: number;
+            
+            switch (period) {
+              case '24h':
+                timeThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
+                dataLimit = 48;
+                break;
+              case '7d':
+                timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+                dataLimit = 168;
+                break;
+              case '1m':
+                timeThreshold = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+                dataLimit = 720;
+                break;
+              case 'latest':
+              default:
+                if (sortBy === '7axis') {
+                  timeThreshold = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+                  dataLimit = 2000;
+                } else {
+                  timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+                  dataLimit = 168;
+                }
+                break;
+            }
+
+            // Get appropriate history based on sort mode
+            let historyQuery;
+            
+            if (sortBy === 'reasoning') {
+              // REASONING: Only deep scores
+              if (period === 'latest') {
+                historyQuery = db
+                  .select()
+                  .from(scores)
+                  .where(and(
+                    eq(scores.modelId, parseInt(model.id)),
+                    eq(scores.suite, 'deep')
+                  ))
+                  .orderBy(desc(scores.ts))
+                  .limit(100);
+              } else {
+                historyQuery = db
+                  .select()
+                  .from(scores)
+                  .where(and(
+                    eq(scores.modelId, parseInt(model.id)),
+                    eq(scores.suite, 'deep'),
+                    gte(scores.ts, timeThreshold.toISOString())
+                  ))
+                  .orderBy(desc(scores.ts))
+                  .limit(dataLimit);
+              }
+            } else if (sortBy === '7axis') {
+              // 7AXIS: Only hourly scores
+              historyQuery = db
+                .select()
+                .from(scores)
+                .where(and(
+                  eq(scores.modelId, parseInt(model.id)),
+                  eq(scores.suite, 'hourly'),
+                  gte(scores.ts, timeThreshold.toISOString())
+                ))
+                .orderBy(desc(scores.ts))
+                .limit(dataLimit);
+            } else {
+              // COMBINED/SPEED: Hourly scores
+              historyQuery = db
+                .select()
+                .from(scores)
+                .where(and(
+                  eq(scores.modelId, parseInt(model.id)),
+                  eq(scores.suite, 'hourly'),
+                  gte(scores.ts, timeThreshold.toISOString())
+                ))
+                .orderBy(desc(scores.ts))
+                .limit(dataLimit);
+            }
+
+            const historyData = await historyQuery;
+            
+            // Filter and format the history data
+            const validHistory = historyData.filter(score => 
+              score.stupidScore !== null && 
+              score.stupidScore !== -777 && 
+              score.stupidScore !== -888 && 
+              score.stupidScore !== -999 && 
+              score.stupidScore >= 0
+            );
+
+            // Convert to display format - ensure type compatibility
+            model.history = validHistory.map(score => {
+              const rawScore = score.stupidScore;
+              let displayScore: number;
+              
+              const isUserTest = score.note && score.note.includes('User API key test');
+              
+              if (isUserTest) {
+                displayScore = Math.max(0, Math.min(100, Math.round(100 - (rawScore / 0.8))));
+              } else if (Math.abs(rawScore) < 1 && rawScore !== 0) {
+                displayScore = Math.max(0, Math.min(100, Math.round(50 - rawScore * 100)));
+              } else {
+                displayScore = Math.max(0, Math.min(100, Math.round(rawScore)));
+              }
+
+              return {
+                stupidScore: rawScore,
+                displayScore: displayScore,
+                timestamp: score.ts
+              };
+            });
+            
+            console.log(`📊 Enhanced history for model ${model.id} (${sortBy}, ${period}): ${model.history.length} data points`);
+          } catch (error) {
+            console.log(`Could not enhance history for model ${model.id}: ${error}`);
+            // Keep existing history if enhancement fails
+          }
+        }
       }
       
       // Apply sorting
@@ -1256,28 +1404,156 @@ export default async function (fastify: FastifyInstance, opts: any) {
     }
   });
 
-  // Get historical data for a specific model
+  // Get historical data for a specific model - FIXED for 7axis and period support
   fastify.get('/history/:modelId', async (req: any) => {
     const { modelId } = req.params;
+    const { period = 'latest', sortBy = 'combined' } = req.query;
     
     try {
-      // Get real historical data from database
-      const history = await db
-        .select()
-        .from(scores)
-        .where(eq(scores.modelId, parseInt(modelId)))
-        .orderBy(desc(scores.ts))
-        .limit(168); // 7 days of hourly interval data (24 entries per day * 7 days)
+      // Determine time period and data limits based on request
+      let timeThreshold: Date;
+      let dataLimit: number;
+      
+      switch (period) {
+        case '24h':
+          timeThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
+          dataLimit = 48; // More frequent data points for 24h
+          break;
+        case '7d':
+          timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+          dataLimit = 168; // 7 days of hourly data
+          break;
+        case '1m':
+          timeThreshold = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+          dataLimit = 720; // 30 days of data
+          break;
+        case 'latest':
+        default:
+          if (sortBy === '7axis') {
+            // For 7axis, we want ALL historical data to show the full trend
+            timeThreshold = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000); // 1 year
+            dataLimit = 2000; // Large limit to get all available data
+          } else {
+            // For other modes in latest, use 7 days
+            timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+            dataLimit = 168;
+          }
+          break;
+      }
 
-      const formattedHistory = history.map(score => ({
-        timestamp: new Date(score.ts || new Date().toISOString()),
-        score: Math.max(0, Math.min(100, Math.round(50 - score.stupidScore * 100))), // Convert to 0-100 range with bounds checking
-        axes: score.axes
-      }));
+      // Get historical data based on sort mode - FIXED for proper suite filtering with time periods
+      let historyQuery;
+      
+      if (sortBy === 'reasoning') {
+        // For reasoning mode, get ONLY deep benchmark scores
+        // BUT respect time periods - if user selects 24h/7d, only show deep scores from that period
+        console.log(`🧠 REASONING: Getting deep scores for model ${modelId} (period: ${period})`);
+        
+        if (period === 'latest') {
+          // For latest, get all available deep scores (should be very few anyway)
+          historyQuery = db
+            .select()
+            .from(scores)
+            .where(and(
+              eq(scores.modelId, parseInt(modelId)),
+              eq(scores.suite, 'deep')
+            ))
+            .orderBy(desc(scores.ts))
+            .limit(100);
+        } else {
+          // For specific periods (24h, 7d, 1m), filter deep scores by time period
+          historyQuery = db
+            .select()
+            .from(scores)
+            .where(and(
+              eq(scores.modelId, parseInt(modelId)),
+              eq(scores.suite, 'deep'),
+              gte(scores.ts, timeThreshold.toISOString())
+            ))
+            .orderBy(desc(scores.ts))
+            .limit(dataLimit);
+        }
+      } else if (sortBy === '7axis') {
+        // For 7axis mode, get ONLY real-benchmark (hourly) scores
+        // ALWAYS respect time periods - this should show lots of data for 7d
+        console.log(`📊 7AXIS: Getting hourly/real-benchmark scores for model ${modelId} (period: ${period})`);
+        historyQuery = db
+          .select()
+          .from(scores)
+          .where(and(
+            eq(scores.modelId, parseInt(modelId)),
+            eq(scores.suite, 'hourly'),  // 7axis = real benchmarks that run hourly
+            gte(scores.ts, timeThreshold.toISOString())
+          ))
+          .orderBy(desc(scores.ts))
+          .limit(dataLimit);
+      } else {
+        // For combined/speed modes, get hourly scores (most data available)
+        // ALWAYS respect time periods
+        console.log(`⚡ ${sortBy.toUpperCase()}: Getting hourly scores for model ${modelId} (period: ${period})`);
+        historyQuery = db
+          .select()
+          .from(scores)
+          .where(and(
+            eq(scores.modelId, parseInt(modelId)),
+            eq(scores.suite, 'hourly'),  // Combined and speed use hourly benchmark data
+            gte(scores.ts, timeThreshold.toISOString())
+          ))
+          .orderBy(desc(scores.ts))
+          .limit(dataLimit);
+      }
 
+      const history = await historyQuery;
+      
+      // Filter out invalid scores (same logic as other endpoints)
+      const validHistory = history.filter(score => 
+        score.stupidScore !== null && 
+        score.stupidScore !== -777 && 
+        score.stupidScore !== -888 && 
+        score.stupidScore !== -999 && 
+        score.stupidScore >= 0
+      );
+
+      // FIXED: Use consistent score conversion logic across all modes
+      const formattedHistory = validHistory.map(score => {
+        const rawScore = score.stupidScore;
+        let displayScore: number;
+        
+        // Use the SAME conversion logic as the rest of the system
+        const isUserTest = score.note && score.note.includes('User API key test');
+        
+        if (isUserTest) {
+          // For user tests, stupidScore is already inverted (lower = better)
+          displayScore = Math.max(0, Math.min(100, Math.round(100 - (rawScore / 0.8))));
+        } else if (Math.abs(rawScore) < 1 && rawScore !== 0) {
+          // Old format: small decimal values, need conversion
+          displayScore = Math.max(0, Math.min(100, Math.round(50 - rawScore * 100)));
+        } else {
+          // Standard format: stupidScore in 0-100 range
+          displayScore = Math.max(0, Math.min(100, Math.round(rawScore)));
+        }
+
+        return {
+          timestamp: new Date(score.ts || new Date().toISOString()),
+          score: displayScore,
+          axes: score.axes,
+          stupidScore: rawScore, // Include raw score for debugging
+          suite: score.suite // Include suite info
+        };
+      });
+
+      console.log(`📊 History for model ${modelId} (${sortBy}, ${period}): ${formattedHistory.length} data points`);
+      
       return {
         success: true,
-        data: formattedHistory
+        data: formattedHistory,
+        period,
+        sortBy,
+        dataPoints: formattedHistory.length,
+        timeRange: {
+          from: timeThreshold.toISOString(),
+          to: new Date().toISOString()
+        }
       };
     } catch (error) {
       console.error('Error fetching historical data:', error);

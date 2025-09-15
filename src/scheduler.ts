@@ -3,58 +3,95 @@ import { runRealBenchmarks } from './jobs/real-benchmarks';
 import { runDeepBenchmarks, isDeepBenchmarkActive } from './deepbench/index';
 
 let isRunning = false;
+let isDeepRunning = false;
 let lastRunTime: Date | null = null;
-let scheduledTask: any = null; // Using any to avoid TypeScript issues
+let lastDeepRunTime: Date | null = null;
+let hourlyScheduledTask: any = null;
+let dailyScheduledTask: any = null;
 
 export function startBenchmarkScheduler() {
   console.log(`🚀 Starting benchmark scheduler at ${new Date().toISOString()}`);
   
-  // Validate cron is working by testing the expression
-  const isValidCron = cron.validate('0 * * * *');
-  console.log(`📋 Cron expression validation: ${isValidCron ? '✅ Valid' : '❌ Invalid'}`);
+  // Validate cron expressions
+  const hourlyValid = cron.validate('0 * * * *');
+  const dailyValid = cron.validate('0 3 * * *');
+  console.log(`📋 Hourly cron expression validation: ${hourlyValid ? '✅ Valid' : '❌ Invalid'}`);
+  console.log(`📋 Daily cron expression validation: ${dailyValid ? '✅ Valid' : '❌ Invalid'}`);
 
-  // Run both regular and deep benchmarks every hour at the top of the hour (:00)
-  scheduledTask = cron.schedule('0 * * * *', async () => {
+  // REGULAR (Speed) BENCHMARKS: Run every hour at the top of the hour (:00)
+  hourlyScheduledTask = cron.schedule('0 * * * *', async () => {
     const now = new Date();
-    console.log(`🔔 Combined benchmark cron triggered at ${now.toISOString()}`);
+    console.log(`🔔 Hourly benchmark cron triggered at ${now.toISOString()}`);
     
     if (isRunning) {
-      console.log('⏸️  Benchmark already running, skipping this cycle...');
+      console.log('⏸️ Hourly benchmark already running, skipping this cycle...');
       return;
     }
 
     try {
       isRunning = true;
       lastRunTime = now;
-      console.log(`🕐 ${now.toISOString()} - Starting scheduled combined benchmark run...`);
+      console.log(`🕐 ${now.toISOString()} - Starting scheduled hourly benchmark run...`);
       console.log(`📊 Previous run was: ${lastRunTime ? lastRunTime.toISOString() : 'Never'}`);
       
-      // Run regular benchmarks first
-      console.log(`📊 Running regular benchmarks...`);
+      // Run regular benchmarks only
+      console.log(`📊 Running regular (speed) benchmarks...`);
       await runRealBenchmarks();
       console.log(`✅ Regular benchmarks completed`);
       
-      // Then run deep benchmarks
-      console.log(`🏗️ Running deep benchmarks...`);
-      await runDeepBenchmarks();
-      console.log(`✅ Deep benchmarks completed`);
-      
-      console.log(`✅ ${new Date().toISOString()} - Combined benchmark run completed successfully`);
+      console.log(`✅ ${new Date().toISOString()} - Hourly benchmark run completed successfully`);
     } catch (error) {
-      console.error(`❌ ${new Date().toISOString()} - Combined benchmark run failed:`, error);
-      // Don't let errors stop future runs
+      console.error(`❌ ${new Date().toISOString()} - Hourly benchmark run failed:`, error);
     } finally {
       isRunning = false;
     }
   }, {
-    timezone: 'Europe/Berlin' // Explicitly set timezone
+    timezone: 'Europe/Berlin'
   });
 
-  console.log('📅 Combined benchmark scheduler started - runs both regular and deep benchmarks every hour at the top of the hour (:00)');
+  // DEEP (Reasoning) BENCHMARKS: Run daily at 3:00 AM Berlin time
+  dailyScheduledTask = cron.schedule('0 3 * * *', async () => {
+    const now = new Date();
+    const berlinTime = now.toLocaleString('en-US', { timeZone: 'Europe/Berlin' });
+    console.log(`🔔 Daily deep benchmark cron triggered at ${now.toISOString()} (Berlin: ${berlinTime})`);
+    console.log(`🏗️ This should create scores with suite='deep' for REASONING mode display`);
+    
+    if (isDeepRunning || isDeepBenchmarkActive()) {
+      console.log('⏸️ Deep benchmark already running, skipping this cycle...');
+      return;
+    }
+
+    try {
+      isDeepRunning = true;
+      lastDeepRunTime = now;
+      console.log(`🕐 ${now.toISOString()} - Starting scheduled daily deep benchmark run...`);
+      console.log(`🏗️ Previous deep run was: ${lastDeepRunTime ? lastDeepRunTime.toISOString() : 'Never'}`);
+      console.log(`📊 REASONING mode timestamps will update after this completes`);
+      
+      // Run deep benchmarks only
+      console.log(`🏗️ Running deep (reasoning) benchmarks...`);
+      await runDeepBenchmarks();
+      console.log(`✅ Deep benchmarks completed - REASONING mode should now show ~1-2 hours ago`);
+      
+      console.log(`✅ ${new Date().toISOString()} - Daily deep benchmark run completed successfully`);
+    } catch (error) {
+      console.error(`❌ ${new Date().toISOString()} - Daily deep benchmark run failed:`, error);
+      console.error(`🚨 This will affect REASONING mode display until next successful run`);
+    } finally {
+      isDeepRunning = false;
+    }
+  }, {
+    timezone: 'Europe/Berlin'
+  });
+
+  console.log('📅 Scheduler started with separate timing:');
+  console.log('   • Regular (speed) benchmarks: Every hour at :00');
+  console.log('   • Deep (reasoning) benchmarks: Daily at 3:00 AM Berlin time');
   console.log(`🌍 Scheduler timezone: Europe/Berlin`);
-  console.log(`⚡ Scheduler is active: ${scheduledTask ? scheduledTask.getStatus() : 'Unknown'}`);
+  console.log(`⚡ Hourly scheduler active: ${hourlyScheduledTask ? hourlyScheduledTask.getStatus() : 'Unknown'}`);
+  console.log(`⚡ Daily scheduler active: ${dailyScheduledTask ? dailyScheduledTask.getStatus() : 'Unknown'}`);
   
-  // Log next scheduled times
+  // Log next scheduled times for both
   const now = new Date();
   const minutes = now.getMinutes();
   let nextMinute = 0;
@@ -65,67 +102,73 @@ export function startBenchmarkScheduler() {
     nextHour = (nextHour + 1) % 24;
   }
   
-  const nextRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), nextHour, nextMinute, 0, 0);
-  console.log(`⏰ Next benchmark run scheduled for: ${nextRun.toLocaleString('en-US', { timeZone: 'Europe/Berlin' })}`);
-  console.log(`📊 Time until next run: ${Math.ceil((nextRun.getTime() - now.getTime()) / 60000)} minutes`);
+  const nextHourlyRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), nextHour, nextMinute, 0, 0);
+  console.log(`⏰ Next hourly run: ${nextHourlyRun.toLocaleString('en-US', { timeZone: 'Europe/Berlin' })}`);
+  console.log(`📊 Time until next hourly: ${Math.ceil((nextHourlyRun.getTime() - now.getTime()) / 60000)} minutes`);
   
-  // Set up a debug timer to log scheduler status every 5 minutes
+  // Calculate next daily run (3 AM)
+  const nextDailyRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 3, 0, 0, 0);
+  if (now.getHours() >= 3) {
+    nextDailyRun.setDate(nextDailyRun.getDate() + 1); // Tomorrow if already past 3 AM
+  }
+  console.log(`⏰ Next deep run: ${nextDailyRun.toLocaleString('en-US', { timeZone: 'Europe/Berlin' })}`);
+  console.log(`🏗️ Time until next deep: ${Math.ceil((nextDailyRun.getTime() - now.getTime()) / (1000 * 60 * 60))} hours`);
+  
+  // Set up debug timer
   setInterval(() => {
     const currentTime = new Date();
     console.log(`🕐 Scheduler status check at ${currentTime.toISOString()}`);
-    console.log(`   - Is running: ${isRunning}`);
-    console.log(`   - Last run: ${lastRunTime ? lastRunTime.toISOString() : 'Never'}`);
-    console.log(`   - Scheduler active: ${scheduledTask ? scheduledTask.getStatus() : 'Unknown'}`);
-    
-    const mins = currentTime.getMinutes();
-    let nextMin = 0;
-    let nextHr = currentTime.getHours();
-    
-    // If we're past the top of the hour, schedule for next hour
-    if (mins > 0) {
-      nextHr = (nextHr + 1) % 24;
-    }
-    
-    const nextScheduled = new Date(currentTime.getFullYear(), currentTime.getMonth(), currentTime.getDate(), nextHr, nextMin, 0, 0);
-    const minutesUntil = Math.ceil((nextScheduled.getTime() - currentTime.getTime()) / 60000);
-    console.log(`   - Next run in: ${minutesUntil} minutes (at ${nextScheduled.toLocaleTimeString('en-US', { timeZone: 'Europe/Berlin' })})`);
-  }, 5 * 60 * 1000); // Every 5 minutes
+    console.log(`   - Hourly running: ${isRunning}`);
+    console.log(`   - Deep running: ${isDeepRunning}`);
+    console.log(`   - Last hourly run: ${lastRunTime ? lastRunTime.toISOString() : 'Never'}`);
+    console.log(`   - Last deep run: ${lastDeepRunTime ? lastDeepRunTime.toISOString() : 'Never'}`);
+    console.log(`   - Hourly scheduler active: ${hourlyScheduledTask ? hourlyScheduledTask.getStatus() : 'Unknown'}`);
+    console.log(`   - Daily scheduler active: ${dailyScheduledTask ? dailyScheduledTask.getStatus() : 'Unknown'}`);
+  }, 5 * 60 * 1000);
   
-  // Force a test run in 2 minutes to verify the system is working
+  // Test run for hourly benchmarks only
   setTimeout(async () => {
     if (!isRunning) {
-      console.log('🧪 Running test benchmark to verify scheduler...');
+      console.log('🧪 Running test hourly benchmark to verify scheduler...');
       try {
         isRunning = true;
         await runRealBenchmarks();
-        console.log('✅ Test benchmark completed successfully');
+        console.log('✅ Test hourly benchmark completed successfully');
       } catch (error) {
-        console.error('❌ Test benchmark failed:', error);
+        console.error('❌ Test hourly benchmark failed:', error);
       } finally {
         isRunning = false;
       }
     }
-  }, 2 * 60 * 1000); // 2 minutes
+  }, 2 * 60 * 1000);
 }
 
 export function getBenchmarkStatus() {
   const now = new Date();
   const minutes = now.getMinutes();
-  let nextRun: Date;
   
-  // Benchmarks run every hour at the top of the hour (:00)
+  // Next hourly run
+  let nextHourlyRun: Date;
   if (minutes === 0) {
-    // If it's exactly the top of the hour, next run is in 1 hour
-    nextRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0, 0);
+    nextHourlyRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0, 0);
   } else {
-    // If we're past the top of the hour, next run is at the next hour's :00
-    nextRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0, 0);
+    nextHourlyRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0, 0);
+  }
+  
+  // Next daily run (3 AM)
+  const nextDailyRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 3, 0, 0, 0);
+  if (now.getHours() >= 3) {
+    nextDailyRun.setDate(nextDailyRun.getDate() + 1);
   }
   
   return {
-    isRunning,
-    nextScheduledRun: nextRun, // When benchmark actually runs (every hour at :00)
-    nextActualRun: nextRun,    // Same time - no confusion
-    minutesUntilNext: Math.ceil((nextRun.getTime() - now.getTime()) / 60000)
+    isRunning: isRunning || isDeepRunning,
+    isHourlyRunning: isRunning,
+    isDeepRunning: isDeepRunning,
+    nextScheduledRun: nextHourlyRun, // Regular benchmarks for compatibility
+    nextHourlyRun: nextHourlyRun,
+    nextDeepRun: nextDailyRun,
+    minutesUntilNext: Math.ceil((nextHourlyRun.getTime() - now.getTime()) / 60000),
+    hoursUntilDeepRun: Math.ceil((nextDailyRun.getTime() - now.getTime()) / (1000 * 60 * 60))
   };
 }

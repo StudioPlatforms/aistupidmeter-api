@@ -144,12 +144,13 @@ export default async function (fastify: FastifyInstance, opts: any) {
         
         if (isUnavailable) continue;
         
-        // PERIOD-SPECIFIC DEGRADATION LOGIC
+        // ENHANCED LATEST LOGIC: For LATEST period, use 24H degradation detection
+        // This ensures LATEST shows all current issues and warnings
         let historicalScores, baselineHours, minBaselinePoints, minRecentPoints;
         
         if (period === 'latest') {
-          // For LATEST: Focus on current degradations (last 3 hours vs previous 18 hours)
-          // This catches immediate issues while being more sensitive than 24h
+          // For LATEST: Use 24H logic to show all current degradations and warnings
+          // Users expect LATEST to be the most comprehensive and actionable view
           const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
           historicalScores = await db
             .select()
@@ -161,9 +162,9 @@ export default async function (fastify: FastifyInstance, opts: any) {
               )
             )
             .orderBy(desc(scores.ts));
-          baselineHours = 3; // Compare last 3 hours vs older baseline (more sensitive)
-          minBaselinePoints = 2; // Lower requirements for LATEST
-          minRecentPoints = 1; // Even single recent point can trigger alert
+          baselineHours = 12; // Same as 24H: Last 12h vs previous 12h
+          minBaselinePoints = 3; // Same requirements as 24H
+          minRecentPoints = 2; // Same requirements as 24H
         } else {
           // For specific periods: Use period-appropriate data and baseline logic
           const periodStartDate = getDateRangeFromPeriod(period);
@@ -233,15 +234,15 @@ export default async function (fastify: FastifyInstance, opts: any) {
             currentDisplayScore = currentCombinedScore;
             console.log(`🔍 Degradation check for ${model.name} in COMBINED mode: ${currentCombinedScore}`);
             
-            // For baseline, estimate combined scores from historical data
-            // This is approximate but gives us the right direction
-            baselineDisplayScore = (() => {
-              if (Math.abs(baselineMean) < 1 || Math.abs(baselineMean) > 100) {
-                return Math.max(0, Math.min(100, Math.round(50 - baselineMean * 100)));
+            // FIXED: Calculate proper baseline from BASELINE PERIOD scores, not recent period
+            const convertedBaselineScores = validBaselineValues.map(raw => {
+              if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
+                return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
               } else {
-                return Math.max(0, Math.min(100, Math.round(baselineMean)));
+                return Math.max(0, Math.min(100, Math.round(raw)));
               }
-            })();
+            });
+            baselineDisplayScore = Math.round(convertedBaselineScores.reduce((sum, s) => sum + s, 0) / convertedBaselineScores.length);
           } else {
             // Fallback to converted scores if combined not available
             currentDisplayScore = (() => {
@@ -251,13 +252,16 @@ export default async function (fastify: FastifyInstance, opts: any) {
                 return Math.max(0, Math.min(100, Math.round(latestRawScore)));
               }
             })();
-            baselineDisplayScore = (() => {
-              if (Math.abs(baselineMean) < 1 || Math.abs(baselineMean) > 100) {
-                return Math.max(0, Math.min(100, Math.round(50 - baselineMean * 100)));
+            
+            // FIXED: Use actual baseline period scores, not the same calculation method
+            const convertedBaselineScores = validBaselineValues.map(raw => {
+              if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
+                return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
               } else {
-                return Math.max(0, Math.min(100, Math.round(baselineMean)));
+                return Math.max(0, Math.min(100, Math.round(raw)));
               }
-            })();
+            });
+            baselineDisplayScore = Math.round(convertedBaselineScores.reduce((sum, s) => sum + s, 0) / convertedBaselineScores.length);
           }
         } else {
           // For other modes (reasoning, speed, price), use converted historical scores
@@ -268,13 +272,16 @@ export default async function (fastify: FastifyInstance, opts: any) {
               return Math.max(0, Math.min(100, Math.round(latestRawScore)));
             }
           })();
-          baselineDisplayScore = (() => {
-            if (Math.abs(baselineMean) < 1 || Math.abs(baselineMean) > 100) {
-              return Math.max(0, Math.min(100, Math.round(50 - baselineMean * 100)));
+          
+          // FIXED: Use actual baseline period scores, not the same conversion of recent scores
+          const convertedBaselineScores = validBaselineValues.map(raw => {
+            if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
+              return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
             } else {
-              return Math.max(0, Math.min(100, Math.round(baselineMean)));
+              return Math.max(0, Math.min(100, Math.round(raw)));
             }
-          })();
+          });
+          baselineDisplayScore = Math.round(convertedBaselineScores.reduce((sum, s) => sum + s, 0) / convertedBaselineScores.length);
         }
         
         const zScore = calculateZScore(latestRawScore, baselineMean, baselineStdDev);
@@ -686,8 +693,8 @@ export default async function (fastify: FastifyInstance, opts: any) {
           stability,
           latency,
           period: period, // Track which period this data represents
-          // CRITICAL FIX: Perfect threshold - models ≤60 show warnings, >60 are fine
-          isAvoidNow: currentDisplayScore <= 60 || hasMajorDegradation,
+          // ADJUSTED: More sensitive threshold for "Avoid Now" warnings
+          isAvoidNow: currentDisplayScore <= 50 || hasMajorDegradation,
           hasValidData: true, // Always true since we estimate missing data
           // Separate criteria for different recommendations based on period performance
           isGoodPerformance: periodDisplayScore >= 60,
@@ -742,16 +749,126 @@ export default async function (fastify: FastifyInstance, opts: any) {
         };
       }
       
-      // Find models to avoid - only serious issues
-      recommendations.avoidNow = modelAnalysis
-        .filter(m => m.isAvoidNow)
-        .map(m => ({
-          ...m,
-          reason: m.hasMajorDegradation ? 
-            `Critically degraded (${m.currentDisplayScore} vs ${m.periodDisplayScore} period avg)` :
-            `Performance critically low at ${m.periodDisplayScore} points`
-        }))
-        .slice(0, 3);
+      // LOGICAL FIX: Only show "Avoid Now" for LATEST period
+      // Historical periods (24H, 7D, 1M) are for trend analysis, not current actionable warnings
+      if (period === 'latest') {
+        // Find models to avoid - only serious issues with proper baseline comparison
+        const modelsToAvoid = [];
+        
+        for (const model of modelAnalysis.filter(m => m.isAvoidNow)) {
+          // Get proper historical baseline for comparison (last 7 days vs previous 7 days)
+          const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+          const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+          
+          try {
+            // Get historical baseline (7-14 days ago)
+            const baselineScores = await db
+              .select()
+              .from(scores)
+              .where(
+                and(
+                  eq(scores.modelId, model.id),
+                  gte(scores.ts, fourteenDaysAgo.toISOString()),
+                  sql`${scores.ts} < ${sevenDaysAgo.toISOString()}`
+                )
+              )
+              .orderBy(desc(scores.ts));
+            
+            // Get recent scores (last 7 days)
+            const recentScores = await db
+              .select()
+              .from(scores)
+              .where(
+                and(
+                  eq(scores.modelId, model.id),
+                  gte(scores.ts, sevenDaysAgo.toISOString())
+                )
+              )
+              .orderBy(desc(scores.ts));
+            
+            // Calculate proper baseline vs current comparison
+            const validBaselineScores = baselineScores.filter(s => 
+              s.stupidScore !== -777 && s.stupidScore !== -888 && s.stupidScore !== -999 && 
+              s.stupidScore !== null && s.stupidScore !== -100 && s.stupidScore >= 0
+            );
+            
+            const validRecentScores = recentScores.filter(s => 
+              s.stupidScore !== -777 && s.stupidScore !== -888 && s.stupidScore !== -999 && 
+              s.stupidScore !== null && s.stupidScore !== -100 && s.stupidScore >= 0
+            );
+            
+            if (validBaselineScores.length >= 3 && validRecentScores.length >= 2) {
+              // Convert baseline scores to display scores
+              const baselineDisplayScores = validBaselineScores.map(s => {
+                const raw = s.stupidScore;
+                if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
+                  return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
+                } else {
+                  return Math.max(0, Math.min(100, Math.round(raw)));
+                }
+              });
+              
+              // Convert recent scores to display scores
+              const recentDisplayScores = validRecentScores.map(s => {
+                const raw = s.stupidScore;
+                if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
+                  return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
+                } else {
+                  return Math.max(0, Math.min(100, Math.round(raw)));
+                }
+              });
+              
+              const baselineAvg = Math.round(baselineDisplayScores.reduce((a, b) => a + b, 0) / baselineDisplayScores.length);
+              const recentAvg = Math.round(recentDisplayScores.reduce((a, b) => a + b, 0) / recentDisplayScores.length);
+              const scoreDrop = baselineAvg - recentAvg;
+              
+              // FIXED: Only show if there's a REAL meaningful degradation (at least 10 point drop)
+              // Don't show degradation message if scores are the same or similar
+              if (scoreDrop >= 10 && recentAvg < baselineAvg * 0.85 && baselineAvg !== recentAvg) {
+                const dropPercentage = Math.round((scoreDrop / Math.max(1, baselineAvg)) * 100);
+                
+                modelsToAvoid.push({
+                  ...model,
+                  reason: `Performance degraded ${dropPercentage}% (${recentAvg} from ${baselineAvg} baseline)`
+                });
+              } else if (recentAvg <= 45 && baselineAvg > recentAvg + 5) {
+                // Include models that degraded to poor performance
+                modelsToAvoid.push({
+                  ...model,
+                  reason: `Performance dropped to ${recentAvg} points (was ${baselineAvg})`
+                });
+              } else if (model.currentDisplayScore <= 40 && !model.hasMajorDegradation) {
+                // Only show currently poor performing models without degradation context
+                modelsToAvoid.push({
+                  ...model,
+                  reason: `Currently performing poorly at ${model.currentDisplayScore} points`
+                });
+              }
+            } else if (model.currentDisplayScore <= 45) {
+              // Fallback for models without enough historical data
+              modelsToAvoid.push({
+                ...model,
+                reason: `Performance critically low at ${model.currentDisplayScore} points`
+              });
+            }
+          } catch (error) {
+            console.error(`Error calculating baseline for model ${model.name}:`, error);
+            // Fallback to simple low performance check
+            if (model.currentDisplayScore <= 45) {
+              modelsToAvoid.push({
+                ...model,
+                reason: `Performance critically low at ${model.currentDisplayScore} points`
+              });
+            }
+          }
+        }
+        
+        recommendations.avoidNow = modelsToAvoid.slice(0, 3);
+      } else {
+        // For historical periods (24H, 7D, 1M), don't show current "Avoid Now" warnings
+        // These periods are for analyzing past trends, not current actionable advice
+        recommendations.avoidNow = [];
+      }
       
       return {
         success: true,

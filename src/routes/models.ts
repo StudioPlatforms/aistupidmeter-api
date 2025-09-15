@@ -104,116 +104,184 @@ export default async function (fastify: FastifyInstance, opts: any) {
     }
   });
 
-  // Get model historical scores (for charts)
+  // Get model historical scores (for charts) - ENHANCED with suite filtering
   fastify.get('/:id/history', async (req: any) => {
     const modelId = parseInt(req.params.id);
     const days = parseInt(req.query?.days as string) || 30;
+    const period = req.query?.period || 'latest'; // Support period parameter
+    const sortBy = req.query?.sortBy || 'combined'; // Support sortBy for mode filtering
     
     try {
-      // For days=1, get last 24 hours of data (not 1 day ago to now)
-      // This matches Dashboard API behavior for recent data
-      if (days === 1) {
-        // Get most recent 24 records (similar to Dashboard API)
-        const historicalScores = await db
-          .select({
-            timestamp: scores.ts,
-            stupidScore: scores.stupidScore,
-            axes: scores.axes,
-            note: scores.note
-          })
-          .from(scores)
-          .where(eq(scores.modelId, modelId))
-          .orderBy(desc(scores.ts))
-          .limit(24);
-
-        // Don't filter valid sentinel values (-777, -888)
-        // Only filter truly extreme values that indicate corrupt data
-        const filteredScores = historicalScores.filter(score => {
-          // Keep sentinel values and normal range values
-          return score.stupidScore === -777 || 
-                 score.stupidScore === -888 || 
-                 score.stupidScore === null ||
-                 (score.stupidScore >= -10 && score.stupidScore <= 110);
-        });
-        
-        return {
-          modelId,
-          period: `last 24 records`,
-          dataPoints: filteredScores.length,
-          history: filteredScores.map(score => {
-            const rawScore = score.stupidScore;
-            let displayScore;
-            
-            // Use robust detection logic for score conversion
-            if (Math.abs(rawScore) < 1 || Math.abs(rawScore) > 100) {
-              // Raw format (e.g., 0.123, -0.456)
-              displayScore = Math.max(0, Math.min(100, Math.round(50 - rawScore * 100)));
-            } else {
-              // Already in percentage-like format
-              displayScore = Math.max(0, Math.min(100, Math.round(rawScore)));
-            }
-            
-            return {
-              ...score,
-              displayScore
-            };
-          })
-        };
+      // Determine time threshold and data limit based on period
+      let timeThreshold: Date;
+      let dataLimit: number;
+      let periodLabel: string;
+      
+      if (period === '24h' || days === 1) {
+        timeThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        dataLimit = 48;
+        periodLabel = '24 hours';
+      } else if (period === '7d' || days === 7) {
+        timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        dataLimit = 168;
+        periodLabel = '7 days';
+      } else if (period === '1m' || days === 30) {
+        timeThreshold = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        dataLimit = 720;
+        periodLabel = '30 days';
+      } else if (period === 'latest') {
+        if (sortBy === '7axis') {
+          // For 7axis mode in latest, get ALL historical data
+          timeThreshold = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+          dataLimit = 2000;
+          periodLabel = 'all time';
+        } else {
+          // Default to 7 days for latest
+          timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+          dataLimit = 168;
+          periodLabel = 'latest (7 days)';
+        }
       } else {
-        // For longer periods, use date-based filtering
-        const since = new Date();
-        since.setDate(since.getDate() - days);
-        const sinceStr = since.toISOString();
+        // Fallback to days parameter
+        timeThreshold = new Date();
+        timeThreshold.setDate(timeThreshold.getDate() - days);
+        dataLimit = days * 24; // Roughly hourly data
+        periodLabel = `${days} days`;
+      }
+      
+      // Build query based on sort mode (same logic as dashboard)
+      let historyQuery;
+      
+      if (sortBy === 'reasoning') {
+        // REASONING mode: Only deep benchmark scores
+        console.log(`🧠 REASONING: Getting deep scores for model ${modelId}`);
         
-        const historicalScores = await db
+        if (period === 'latest') {
+          // For latest, get all available deep scores
+          historyQuery = db
+            .select({
+              timestamp: scores.ts,
+              stupidScore: scores.stupidScore,
+              axes: scores.axes,
+              note: scores.note,
+              suite: scores.suite
+            })
+            .from(scores)
+            .where(and(
+              eq(scores.modelId, modelId),
+              eq(scores.suite, 'deep')
+            ))
+            .orderBy(desc(scores.ts))
+            .limit(100); // Deep benchmarks are rare
+        } else {
+          // For specific periods, filter by time
+          historyQuery = db
+            .select({
+              timestamp: scores.ts,
+              stupidScore: scores.stupidScore,
+              axes: scores.axes,
+              note: scores.note,
+              suite: scores.suite
+            })
+            .from(scores)
+            .where(and(
+              eq(scores.modelId, modelId),
+              eq(scores.suite, 'deep'),
+              gte(scores.ts, timeThreshold.toISOString())
+            ))
+            .orderBy(desc(scores.ts))
+            .limit(dataLimit);
+        }
+      } else if (sortBy === '7axis') {
+        // 7AXIS mode: Only hourly/real-benchmark scores
+        console.log(`📊 7AXIS: Getting hourly scores for model ${modelId}`);
+        historyQuery = db
           .select({
             timestamp: scores.ts,
             stupidScore: scores.stupidScore,
             axes: scores.axes,
-            note: scores.note
+            note: scores.note,
+            suite: scores.suite
           })
           .from(scores)
           .where(and(
             eq(scores.modelId, modelId),
-            gte(scores.ts, sinceStr)
+            eq(scores.suite, 'hourly'),
+            gte(scores.ts, timeThreshold.toISOString())
           ))
           .orderBy(desc(scores.ts))
-          .limit(200); // Increase limit to get more data points
-
-        // Don't filter valid sentinel values (-777, -888)
-        // Only filter truly extreme values that indicate corrupt data
-        const filteredScores = historicalScores.filter(score => {
-          // Keep sentinel values and normal range values
-          return score.stupidScore === -777 || 
-                 score.stupidScore === -888 || 
-                 score.stupidScore === null ||
-                 (score.stupidScore >= -10 && score.stupidScore <= 110);
-        });
+          .limit(dataLimit);
+      } else {
+        // COMBINED/SPEED modes: Use hourly scores
+        console.log(`⚡ ${sortBy.toUpperCase()}: Getting hourly scores for model ${modelId}`);
+        historyQuery = db
+          .select({
+            timestamp: scores.ts,
+            stupidScore: scores.stupidScore,
+            axes: scores.axes,
+            note: scores.note,
+            suite: scores.suite
+          })
+          .from(scores)
+          .where(and(
+            eq(scores.modelId, modelId),
+            eq(scores.suite, 'hourly'),
+            gte(scores.ts, timeThreshold.toISOString())
+          ))
+          .orderBy(desc(scores.ts))
+          .limit(dataLimit);
+      }
+      
+      const historicalScores = await historyQuery;
+      
+      // Filter out invalid scores (same logic as dashboard)
+      const filteredScores = historicalScores.filter(score => {
+        return score.stupidScore !== null && 
+               score.stupidScore !== -777 &&
+               score.stupidScore !== -888 &&
+               score.stupidScore !== -999 &&
+               score.stupidScore >= 0;
+      });
+      
+      // Convert scores to display format
+      const formattedHistory = filteredScores.map(score => {
+        const rawScore = score.stupidScore;
+        let displayScore;
+        
+        // Use same conversion logic as dashboard
+        const isUserTest = score.note && score.note.includes('User API key test');
+        
+        if (isUserTest) {
+          displayScore = Math.max(0, Math.min(100, Math.round(100 - (rawScore / 0.8))));
+        } else if (Math.abs(rawScore) < 1 && rawScore !== 0) {
+          displayScore = Math.max(0, Math.min(100, Math.round(50 - rawScore * 100)));
+        } else {
+          displayScore = Math.max(0, Math.min(100, Math.round(rawScore)));
+        }
         
         return {
-          modelId,
-          period: `${days} days`,
-          dataPoints: filteredScores.length,
-          history: filteredScores.map(score => {
-            const rawScore = score.stupidScore;
-            let displayScore;
-            
-            // Use robust detection logic for score conversion
-            if (Math.abs(rawScore) < 1 || Math.abs(rawScore) > 100) {
-              // Raw format (e.g., 0.123, -0.456)
-              displayScore = Math.max(0, Math.min(100, Math.round(50 - rawScore * 100)));
-            } else {
-              // Already in percentage-like format
-              displayScore = Math.max(0, Math.min(100, Math.round(rawScore)));
-            }
-            
-            return {
-              ...score,
-              displayScore
-            };
-          })
+          timestamp: score.timestamp,
+          stupidScore: rawScore,
+          displayScore,
+          axes: score.axes,
+          note: score.note,
+          suite: score.suite
         };
-      }
+      });
+      
+      console.log(`📊 History for model ${modelId} (${sortBy}, ${period}): ${formattedHistory.length} data points`);
+      
+      return {
+        modelId,
+        period: periodLabel,
+        sortBy,
+        dataPoints: formattedHistory.length,
+        history: formattedHistory,
+        timeRange: {
+          from: timeThreshold.toISOString(),
+          to: new Date().toISOString()
+        }
+      };
     } catch (error) {
       console.error('Error fetching model history:', error);
       return {
