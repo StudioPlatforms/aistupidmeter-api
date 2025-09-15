@@ -8,7 +8,23 @@ export default async function (fastify: FastifyInstance, opts: any) {
   fastify.get('/', async () => {
     try {
       const allModels = await db.select().from(models);
-      return allModels;
+      
+      // Add "new" badge logic - models are "new" for 7 days
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+      
+      const modelsWithNewBadge = allModels.map(model => {
+        const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+        const isNew = createdAt && createdAt > sevenDaysAgo;
+        
+        return {
+          ...model,
+          displayName: model.displayName || model.name, // Use displayName if available, fallback to name
+          isNew: isNew || false
+        };
+      });
+      
+      return modelsWithNewBadge;
     } catch (error) {
       console.error('Error fetching models:', error);
       return [];

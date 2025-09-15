@@ -1985,10 +1985,83 @@ export async function benchmarkModel(
   }
 }
 
+// Helper function to auto-discover and add new models
+async function ensureAllModelsInDatabase() {
+  console.log('🔍 Auto-discovering models from all providers...');
+  
+  const providers: Array<{ name: Provider; adapter: LLMAdapter | null }> = [
+    { name: 'openai', adapter: getAdapter('openai') },
+    { name: 'xai', adapter: getAdapter('xai') },
+    { name: 'anthropic', adapter: getAdapter('anthropic') },
+    { name: 'google', adapter: getAdapter('google') }
+  ];
+  
+  let newModelsAdded = 0;
+  
+  for (const { name: providerName, adapter } of providers) {
+    if (!adapter) {
+      console.log(`⏭️ Skipping ${providerName} - no API key configured`);
+      continue;
+    }
+    
+    try {
+      const discoveredModels = await adapter.listModels();
+      console.log(`🔍 Discovered ${discoveredModels.length} ${providerName} models: ${discoveredModels.join(', ')}`);
+      
+      // Check which models are already in database
+      const existingModels = await db.select().from(models).where(eq(models.vendor, providerName));
+      const existingModelNames = existingModels.map(m => m.name);
+      
+      // Add new models to database
+      for (const modelName of discoveredModels) {
+        if (!existingModelNames.includes(modelName)) {
+          // Generate user-friendly display name for confusing model names
+          let displayName: string | null = null;
+          
+          // Handle confusing GPT-5 naming
+          if (modelName === 'gpt-5' && providerName === 'openai') {
+            displayName = 'GPT-5 (Base)';
+          } else if (modelName === 'gpt-5-2025-08-07' && providerName === 'openai') {
+            displayName = 'GPT-5 (Aug 2025)';
+          } else if (modelName === 'gpt-5-chat-latest' && providerName === 'openai') {
+            displayName = 'GPT-5 Chat Latest';
+          }
+          
+          const newModel = {
+            name: modelName,
+            vendor: providerName,
+            version: null,
+            notes: `Auto-discovered ${new Date().toISOString()}`,
+            displayName: displayName
+          };
+          
+          await db.insert(models).values(newModel);
+          console.log(`✅ Added new model: ${modelName} (${providerName})${displayName ? ` -> "${displayName}"` : ''}`);
+          newModelsAdded++;
+        }
+      }
+      
+    } catch (error) {
+      console.warn(`⚠️ Failed to discover models for ${providerName}: ${String(error).slice(0, 100)}`);
+    }
+  }
+  
+  if (newModelsAdded > 0) {
+    console.log(`🎉 Auto-discovery complete: Added ${newModelsAdded} new models!`);
+  } else {
+    console.log('✅ Auto-discovery complete: No new models found');
+  }
+  
+  return newModelsAdded;
+}
+
 // ---------- Entry point ----------
 export async function runRealBenchmarks() {
   console.log('🚀 Starting enhanced benchmark sweep with challenging tasks...');
   try {
+    // First, auto-discover and add any new models
+    await ensureAllModelsInDatabase();
+    
     const allModels = await db.select().from(models);
     
     // Create synchronized timestamp for batch

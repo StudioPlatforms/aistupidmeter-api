@@ -55,7 +55,8 @@ async function getCombinedScore(modelId: number): Promise<number | null> {
 // Helper function to get deep reasoning scores ONLY (100% deep reasoning, 0% speed)
 async function getDeepReasoningScores() {
   try {
-    const allModels = await db.select().from(models);
+    // Only get models marked for live rankings (using raw SQL to avoid type issues)
+    const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
     const modelScores = [];
     
     for (const model of allModels) {
@@ -93,6 +94,11 @@ async function getDeepReasoningScores() {
       if (!isAvailable) {
         console.log(`❌ REASONING MODE: ${model.name} has no deep reasoning benchmark data - marking unavailable`);
         
+        // Calculate isNew field based on createdAt timestamp
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+        const isNew = createdAt && createdAt > sevenDaysAgo;
+
         modelScores.push({
           id: String(model.id),
           name: model.name,
@@ -102,7 +108,8 @@ async function getDeepReasoningScores() {
           lastUpdated: new Date(), // Use current time for unavailable models
           status: 'unavailable',
           unavailableReason: 'No deep reasoning benchmark data available',
-          history: []
+          history: [],
+          isNew: isNew
         });
         continue;
       }
@@ -142,6 +149,11 @@ async function getDeepReasoningScores() {
       // CRITICAL: Use ONLY the deep score timestamp - this should be from 3 AM daily run
       const lastUpdated = lastUpdatedTime;
 
+      // Calculate isNew field based on createdAt timestamp
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+      const isNew = createdAt && createdAt > sevenDaysAgo;
+
       modelScores.push({
         id: String(model.id),
         name: model.name,
@@ -154,7 +166,8 @@ async function getDeepReasoningScores() {
           stupidScore: h.stupidScore,
           displayScore: Math.max(0, Math.min(100, Math.round(h.stupidScore))),
           timestamp: h.ts
-        }))
+        })),
+        isNew: isNew
       });
     }
     
@@ -169,7 +182,8 @@ async function getDeepReasoningScores() {
 // Helper function to get combined scores (hourly + deep)
 async function getCombinedModelScores() {
   try {
-    const allModels = await db.select().from(models);
+    // Only get models marked for live rankings (using raw SQL to avoid type issues)
+    const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
     const modelScores = [];
     
     for (const model of allModels) {
@@ -217,6 +231,11 @@ async function getCombinedModelScores() {
       }
       
       if (!isAvailable) {
+        // Calculate isNew field based on createdAt timestamp
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+        const isNew = createdAt && createdAt > sevenDaysAgo;
+
         modelScores.push({
           id: String(model.id),
           name: model.name,
@@ -226,7 +245,8 @@ async function getCombinedModelScores() {
           lastUpdated: new Date(),
           status: 'unavailable',
           unavailableReason: 'No recent benchmark data',
-          history: []
+          history: [],
+          isNew: isNew
         });
         continue;
       }
@@ -264,6 +284,11 @@ async function getCombinedModelScores() {
       const primaryScore = hourlyScore || deepScore;
       const lastUpdated = new Date(primaryScore.ts || new Date());
 
+      // Calculate isNew field based on createdAt timestamp
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+      const isNew = createdAt && createdAt > sevenDaysAgo;
+
       modelScores.push({
         id: String(model.id),
         name: model.name,
@@ -276,7 +301,8 @@ async function getCombinedModelScores() {
           stupidScore: h.stupidScore,
           displayScore: Math.max(0, Math.min(100, Math.round(h.stupidScore))),
           timestamp: h.ts
-        }))
+        })),
+        isNew: isNew
       });
     }
     
@@ -302,9 +328,9 @@ async function getModelScoresFromDB() {
       console.error('❌ Raw SQL failed:', rawError);
     }
     
-    // Get all models with their latest scores
-    const allModels = await db.select().from(models);
-    console.log(`📊 Found ${allModels.length} models:`, allModels.map(m => ({ id: m.id, name: m.name })));
+    // Get only models marked for live rankings (same as other functions)
+    const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
+    console.log(`📊 Found ${allModels.length} core ranking models:`, allModels.map(m => ({ id: m.id, name: m.name })));
     
     if (allModels.length === 0) {
       console.error('⚠️ No models found! Database might not be properly connected.');
@@ -349,6 +375,11 @@ async function getModelScoresFromDB() {
             (score.note && (score.note.includes('N/A') || score.note.includes('unavailable')) && !score.note.includes('Calibrating'));
         
         if (isUnavailable) {
+          // Calculate isNew field based on createdAt timestamp
+          const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+          const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+          const isNew = createdAt && createdAt > sevenDaysAgo;
+
           modelScores.push({
             id: String(model.id),
             name: model.name,
@@ -363,7 +394,8 @@ async function getModelScoresFromDB() {
             tasksCompleted: 0,
             totalTasks: 0,
             unavailableReason: score.note || model.notes || 'API key not configured',
-            history: [] // Empty history for unavailable models
+            history: [], // Empty history for unavailable models
+            isNew: isNew
           });
           continue;
         }
@@ -520,6 +552,11 @@ async function getModelScoresFromDB() {
           changeFromPrevious = Math.round(currentConverted - midConverted);
         }
 
+        // Calculate isNew field based on createdAt timestamp
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+        const isNew = createdAt && createdAt > sevenDaysAgo;
+
         modelScores.push({
           id: String(model.id), // Convert to string for consistency
           name: model.name,
@@ -553,7 +590,8 @@ async function getModelScoresFromDB() {
           // Add fields needed for sorting compatibility
           stability: Math.round(stabilityScore),
           changeFromPrevious: changeFromPrevious,
-          periodAvg: currentScore
+          periodAvg: currentScore,
+          isNew: isNew
         });
       }
     }

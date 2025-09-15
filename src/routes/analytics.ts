@@ -124,6 +124,50 @@ async function getAllCombinedModelScores() {
   }
 }
 
+// Helper function to get model pricing (cost per 1M tokens)
+function getModelPricing(modelName: string, provider: string): { input: number; output: number } {
+  const name = modelName.toLowerCase();
+  const prov = provider.toLowerCase();
+  
+  // Updated pricing based on actual 2025 rates (USD per 1M tokens)
+  if (prov === 'openai') {
+    if (name.includes('gpt-5') && name.includes('turbo')) return { input: 5, output: 15 };
+    if (name.includes('gpt-5')) return { input: 8, output: 24 };
+    if (name.includes('o3-pro')) return { input: 60, output: 240 };  
+    if (name.includes('o3-mini')) return { input: 3.5, output: 14 };
+    if (name.includes('o3')) return { input: 15, output: 60 };
+    if (name.includes('gpt-4o') && name.includes('mini')) return { input: 0.15, output: 0.6 };
+    if (name.includes('gpt-4o')) return { input: 2.5, output: 10 };
+    return { input: 3, output: 9 }; // Default OpenAI
+  }
+  
+  if (prov === 'anthropic') {
+    if (name.includes('opus-4')) return { input: 8, output: 40 };
+    if (name.includes('sonnet-4')) return { input: 3, output: 15 };
+    if (name.includes('haiku-4')) return { input: 0.25, output: 1.25 };
+    if (name.includes('3-5-sonnet')) return { input: 3, output: 15 };
+    if (name.includes('3-5-haiku')) return { input: 0.25, output: 1.25 };
+    return { input: 3, output: 15 }; // Default Anthropic
+  }
+  
+  if (prov === 'xai' || prov === 'x.ai') {
+    if (name.includes('grok-4')) return { input: 5, output: 15 };
+    if (name.includes('grok-code-fast')) return { input: 5, output: 15 };
+    return { input: 5, output: 15 }; // Default xAI
+  }
+  
+  if (prov === 'google') {
+    if (name.includes('2.5-pro')) return { input: 1.25, output: 5 };
+    if (name.includes('2.5-flash')) return { input: 0.075, output: 0.3 };
+    if (name.includes('2.5-flash-lite')) return { input: 0.075, output: 0.3 };
+    if (name.includes('1.5-pro')) return { input: 1.25, output: 5 };
+    if (name.includes('1.5-flash')) return { input: 0.075, output: 0.3 };
+    return { input: 1, output: 3 }; // Default Google
+  }
+  
+  return { input: 2, output: 6 }; // Default fallback
+}
+
 export default async function (fastify: FastifyInstance, opts: any) {
   
   // Degradation detection endpoint - now supports sortBy for mode-specific degradation detection
@@ -323,21 +367,89 @@ export default async function (fastify: FastifyInstance, opts: any) {
           }
         }
         
-        // TYPE 2: LOW PERFORMANCE WARNINGS (NEW!)
-        // Trigger warnings for any model currently performing under 60, regardless of baseline
+        // TYPE 2: LOW PERFORMANCE WARNINGS (ENHANCED!)
+        // Advanced multi-factor warning system for comprehensive user guidance
         if (!warningAdded && currentDisplayScore < 60) {
           let severity = 'minor';
           let message = '';
+          let warningType = 'low_performance';
+          let actionableAdvice = '';
+          let alternatives = [];
           
-          if (currentDisplayScore < 40) {
-            severity = 'critical';
-            message = `Critical performance: ${currentDisplayScore} points (well below acceptable threshold)`;
-          } else if (currentDisplayScore < 50) {
-            severity = 'major';
-            message = `Poor performance: ${currentDisplayScore} points (below 50 point threshold)`;
-          } else { // currentDisplayScore < 60
-            severity = 'minor';
-            message = `Below average performance: ${currentDisplayScore} points (below 60 point threshold)`;
+          // VOLATILITY ANALYSIS - detect unstable models
+          if (validRecentValues.length >= 3) {
+            const recentDisplayScores = validRecentValues.map(raw => {
+              if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
+                return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
+              } else {
+                return Math.max(0, Math.min(100, Math.round(raw)));
+              }
+            });
+            
+            const volatility = calculateStdDev(recentDisplayScores);
+            if (volatility > 15) {
+              warningType = 'high_volatility';
+              severity = volatility > 25 ? 'critical' : 'major';
+              message = `Highly unstable performance: ${currentDisplayScore} points with ${Math.round(volatility)} volatility`;
+              actionableAdvice = 'Consider switching to a more stable alternative';
+            }
+          }
+          
+          // COST-PERFORMANCE ANALYSIS - expensive models performing poorly
+          if (warningType === 'low_performance') {
+            const pricing = getModelPricing(model.name, model.vendor);
+            const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
+            
+            if (estimatedCost > 10 && currentDisplayScore < 50) {
+              warningType = 'poor_value';
+              severity = 'major';
+              message = `Expensive model underperforming: ${currentDisplayScore} points at $${estimatedCost.toFixed(2)}/1M tokens`;
+              actionableAdvice = 'Switch to cheaper alternative with similar performance';
+            }
+          }
+          
+          // LATENCY DEGRADATION - response time issues
+          const latestScore = historicalScores[0];
+          if (latestScore.axes && typeof latestScore.axes === 'object') {
+            const efficiency = (latestScore.axes as any).efficiency;
+            if (typeof efficiency === 'number' && efficiency < 0.3 && currentDisplayScore > 40) {
+              warningType = 'latency_degradation';
+              severity = 'major';
+              const estimatedLatency = Math.round(2000 - (efficiency * 1500));
+              message = `Slow response times: ~${estimatedLatency}ms despite ${currentDisplayScore} point performance`;
+              actionableAdvice = 'Consider faster alternatives for time-sensitive tasks';
+            }
+          }
+          
+          // CONSISTENCY WARNINGS - repeated failures
+          if (validRecentValues.length >= 5) {
+            const consistentlyLow = validRecentValues.slice(0, 5).every(raw => {
+              const displayScore = Math.abs(raw) < 1 || Math.abs(raw) > 100 ?
+                Math.max(0, Math.min(100, Math.round(50 - raw * 100))) :
+                Math.max(0, Math.min(100, Math.round(raw)));
+              return displayScore < 45;
+            });
+            
+            if (consistentlyLow) {
+              warningType = 'consistency_failure';
+              severity = 'major';
+              message = `Consistently failing: ${currentDisplayScore} points with repeated poor performance`;
+              actionableAdvice = 'Model may be experiencing systematic issues';
+            }
+          }
+          
+          // Use default low performance message if no specific type detected
+          if (warningType === 'low_performance') {
+            if (currentDisplayScore < 40) {
+              severity = 'critical';
+              message = `Critical performance: ${currentDisplayScore} points (well below acceptable threshold)`;
+            } else if (currentDisplayScore < 50) {
+              severity = 'major';
+              message = `Poor performance: ${currentDisplayScore} points (below 50 point threshold)`;
+            } else { // currentDisplayScore < 60
+              severity = 'minor';
+              message = `Below average performance: ${currentDisplayScore} points (below 60 point threshold)`;
+            }
           }
           
           degradations.push({
@@ -351,7 +463,8 @@ export default async function (fastify: FastifyInstance, opts: any) {
             severity,
             detectedAt: new Date(),
             message,
-            type: 'low_performance'
+            type: warningType,
+            actionableAdvice
           });
         }
       }

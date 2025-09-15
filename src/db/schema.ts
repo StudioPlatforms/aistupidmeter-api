@@ -5,7 +5,10 @@ export const models = sqliteTable('models', {
   name: text('name').notNull(), // e.g., "gpt-4.1-mini"
   vendor: text('vendor').notNull(), // openai | xai | etc
   version: text('version'), // provider-reported
-  notes: text('notes')
+  notes: text('notes'),
+  createdAt: text('created_at').default('CURRENT_TIMESTAMP'), // Track when model was first discovered
+  displayName: text('display_name'), // Optional friendly display name for confusing model names
+  showInRankings: integer('show_in_rankings', { mode: 'boolean' }).default(false) // Whether to show in live rankings
 });
 
 export const tasks = sqliteTable('tasks', {
