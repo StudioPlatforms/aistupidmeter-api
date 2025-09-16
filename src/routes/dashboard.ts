@@ -858,7 +858,7 @@ async function getHistoricalModelScores(period: string) {
   }
 }
 
-// Helper function to get model pricing (cost per 1M tokens)
+// Helper function to get model pricing (cost per 1M tokens) - Updated with latest Google AI pricing
 function getModelPricing(modelName: string, provider: string): { input: number; output: number } {
   const name = modelName.toLowerCase();
   const prov = provider.toLowerCase();
@@ -889,9 +889,10 @@ function getModelPricing(modelName: string, provider: string): { input: number; 
   }
   
   if (prov === 'google') {
-    if (name.includes('2.5-pro')) return { input: 1.25, output: 5 };
-    if (name.includes('2.5-flash')) return { input: 0.075, output: 0.3 };
-    if (name.includes('2.5-flash-lite')) return { input: 0.075, output: 0.3 };
+    if (name.includes('2.5-pro')) return { input: 1.25, output: 10.00 }; // Fixed from 5 to 10.00
+    // FIXED: Corrected Gemini 2.5 Flash and Flash-Lite pricing based on latest Google AI pricing
+    if (name.includes('2.5-flash-lite')) return { input: 0.10, output: 0.40 };
+    if (name.includes('2.5-flash')) return { input: 0.30, output: 2.50 };
     return { input: 2, output: 6 }; // Default Google
   }
   

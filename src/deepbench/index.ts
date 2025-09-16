@@ -136,9 +136,10 @@ async function benchmarkModelDeep(
 // Cost data per model (per 1M tokens)
 const MODEL_COSTS = {
   // OpenAI
-  'gpt-4o': { input: 5.0, output: 15.0 },
+  'gpt-4o-2024-11-20': { input: 5.0, output: 15.0 },
   'gpt-4o-mini': { input: 0.15, output: 0.60 },
-  'gpt-5': { input: 150.0, output: 600.0 },
+  'gpt-5-auto': { input: 150.0, output: 600.0 },  // Router variant
+  'gpt-5-2025-08-07': { input: 200.0, output: 800.0 },  // Reasoning variant (higher cost)
   'gpt-5-mini': { input: 15.0, output: 60.0 },
   'gpt-5-nano': { input: 5.0, output: 20.0 },
   
@@ -577,9 +578,9 @@ export async function runDeepBenchmarks(): Promise<void> {
   try {
     console.log('🏗️ Starting daily deep benchmark sweep...');
     
-    // Get all models from database
-    const allModels = await db.select().from(models);
-    console.log(`📊 Found ${allModels.length} total models in database`);
+    // Get only whitelisted models from database (show_in_rankings = true)
+    const allModels = await db.select().from(models).where(eq(models.showInRankings, true));
+    console.log(`📊 Found ${allModels.length} whitelisted models in database`);
     
     // Filter for supported providers
     const supportedProviders: Provider[] = ['openai', 'anthropic', 'google', 'xai'];
