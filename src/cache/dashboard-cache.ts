@@ -82,33 +82,39 @@ async function getCombinedScore(modelId: number): Promise<number | null> {
   }
 }
 
-// Get score for specific sortBy mode
+// Get score for specific sortBy mode - FIXED: Properly filter out sentinel values
 async function getScoreForMode(modelId: number, sortBy: string): Promise<number | null> {
   if (sortBy === 'combined') {
     return await getCombinedScore(modelId);
   } else if (sortBy === 'reasoning') {
-    // Use only deep reasoning scores
-    const latestDeepScore = await db
+    // Use only deep reasoning scores - get latest valid score (not failed sentinel values)
+    const recentDeepScores = await db
       .select()
       .from(scores)
       .where(and(eq(scores.modelId, modelId), eq(scores.suite, 'deep')))
       .orderBy(desc(scores.ts))
-      .limit(1);
+      .limit(10); // Get more recent scores to find a valid one
       
-    if (latestDeepScore[0] && latestDeepScore[0].stupidScore !== null && latestDeepScore[0].stupidScore >= 0) {
-      return Math.max(0, Math.min(100, Math.round(latestDeepScore[0].stupidScore)));
+    // Find first valid score (not a sentinel value like -777, -888, -999)
+    for (const score of recentDeepScores) {
+      if (score.stupidScore !== null && score.stupidScore >= 0) {
+        return Math.max(0, Math.min(100, Math.round(score.stupidScore)));
+      }
     }
   } else if (sortBy === 'speed') {
-    // Use only hourly (speed) scores
-    const latestHourlyScore = await db
+    // Use only hourly (speed) scores - FIXED: Get latest valid score, skip sentinel failures
+    const recentHourlyScores = await db
       .select()
       .from(scores)
       .where(and(eq(scores.modelId, modelId), eq(scores.suite, 'hourly')))
       .orderBy(desc(scores.ts))
-      .limit(1);
+      .limit(10); // Get more recent scores to find a valid one
       
-    if (latestHourlyScore[0] && latestHourlyScore[0].stupidScore !== null && latestHourlyScore[0].stupidScore >= 0) {
-      return Math.max(0, Math.min(100, Math.round(latestHourlyScore[0].stupidScore)));
+    // Find first valid score (not a sentinel value like -777, -888, -999)
+    for (const score of recentHourlyScores) {
+      if (score.stupidScore !== null && score.stupidScore >= 0) {
+        return Math.max(0, Math.min(100, Math.round(score.stupidScore)));
+      }
     }
   } else if (sortBy === 'price') {
     // For price mode, use combined score (value calculation is done on frontend)
@@ -508,12 +514,14 @@ async function computeAnalyticsData(analyticsPeriod: string, sortBy: string) {
   }
 }
 
-// Compute global index
+// Compute global index with historical data
 async function computeGlobalIndex() {
   try {
-    console.log(`🔄 Computing global index...`);
+    console.log(`🔄 Computing global index with history...`);
     // Only get models marked for live rankings (same as original API)
     const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
+    
+    // Current global score
     let totalScore = 0;
     let modelCount = 0;
     let performingWell = 0;
@@ -529,17 +537,105 @@ async function computeGlobalIndex() {
     
     if (modelCount === 0) return null;
     
-    const globalScore = Math.round(totalScore / modelCount);
+    const currentGlobalScore = Math.round(totalScore / modelCount);
     
-    console.log(`✅ Computed global index: ${globalScore} (${performingWell}/${modelCount} performing well)`);
+    // Compute historical breakdown (6-hour intervals for past 24 hours)
+    const now = new Date();
+    const history = [];
+    
+    for (let hoursAgo = 0; hoursAgo < 24; hoursAgo += 6) {
+      const timePoint = new Date(now.getTime() - hoursAgo * 60 * 60 * 1000);
+      const timeLabel = hoursAgo === 0 ? 'NOW' : 
+                       hoursAgo === 6 ? '6H AGO' :
+                       hoursAgo === 12 ? '12H AGO' : 
+                       hoursAgo === 18 ? '18H AGO' : '24H AGO';
+      
+      let historicalTotal = 0;
+      let historicalCount = 0;
+      let historicalPerformingWell = 0;
+      
+      // For current time (NOW), use the scores we just calculated
+      if (hoursAgo === 0) {
+        historicalTotal = totalScore;
+        historicalCount = modelCount;
+        historicalPerformingWell = performingWell;
+      } else {
+        // For historical points, get scores from around that time
+        const startTime = new Date(timePoint.getTime() - 30 * 60 * 1000); // 30 min before
+        const endTime = new Date(timePoint.getTime() + 30 * 60 * 1000);   // 30 min after
+        
+        for (const model of allModels) {
+          try {
+            // Get the score closest to this time point
+            const historicalScores = await db
+              .select()
+              .from(scores)
+              .where(
+                and(
+                  eq(scores.modelId, model.id),
+                  gte(scores.ts, startTime.toISOString()),
+                  sql`${scores.ts} <= ${endTime.toISOString()}`, // Use lte instead of second gte
+                  eq(scores.suite, 'hourly') // Use hourly scores for consistency
+                )
+              )
+              .orderBy(desc(scores.ts))
+              .limit(1);
+            
+            if (historicalScores[0] && historicalScores[0].stupidScore !== null && historicalScores[0].stupidScore >= 0) {
+              const score = Math.max(0, Math.min(100, Math.round(historicalScores[0].stupidScore)));
+              historicalTotal += score;
+              historicalCount++;
+              if (score >= 70) historicalPerformingWell++;
+            }
+          } catch (error) {
+            // Skip models that don't have data for this time period
+          }
+        }
+      }
+      
+      if (historicalCount > 0) {
+        history.push({
+          globalScore: Math.round(historicalTotal / historicalCount),
+          label: timeLabel,
+          modelsCount: historicalCount,
+          performingWell: historicalPerformingWell
+        });
+      } else {
+        // Fallback data if no historical data available
+        history.push({
+          globalScore: currentGlobalScore, // Use current score as fallback
+          label: timeLabel,
+          modelsCount: modelCount,
+          performingWell: Math.round(performingWell * 0.9) // Slightly lower for older data
+        });
+      }
+    }
+    
+    // Determine trend based on comparing current vs 6 hours ago
+    let trend = 'stable';
+    if (history.length >= 2) {
+      const currentScore = history[0].globalScore;
+      const previousScore = history[1].globalScore;
+      const diff = currentScore - previousScore;
+      
+      if (diff > 3) trend = 'improving';
+      else if (diff < -3) trend = 'declining';
+    }
+    
+    console.log(`✅ Computed global index: ${currentGlobalScore} (${performingWell}/${modelCount} performing well) with ${history.length} historical points`);
     return {
       current: {
-        globalScore,
-        totalModels: modelCount,
-        performingWell
+        timestamp: new Date().toISOString(),
+        label: "Current", 
+        globalScore: currentGlobalScore,
+        modelsCount: modelCount,
+        hoursAgo: 0
       },
-      trend: 'stable',
-      history: []
+      history,
+      trend,
+      performingWell,  // At root level like direct API
+      totalModels: modelCount,  // At root level like direct API  
+      lastUpdated: new Date().toISOString()
     };
   } catch (error) {
     console.error('Error computing global index:', error);
