@@ -40,10 +40,30 @@ export function startBenchmarkScheduler() {
       await runRealBenchmarks();
       console.log(`✅ Regular benchmarks completed`);
       
-      // Refresh cache after benchmark completion
+      // Refresh cache after benchmark completion - FORCE FRESH DATA
       console.log(`🔄 Refreshing dashboard cache after benchmark completion...`);
       const cacheResult = await refreshAllCache();
       console.log(`✅ Cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms`);
+      
+      // Double-check cache was updated properly - log first model timestamp
+      try {
+        const { getCachedData } = await import('./cache/dashboard-cache');
+        const testCache = await getCachedData('latest', 'combined', 'latest');
+        if (testCache?.data?.modelScores?.[0]) {
+          const firstModel = testCache.data.modelScores[0];
+          const timeAgo = Math.round((Date.now() - new Date(firstModel.lastUpdated).getTime()) / 60000);
+          console.log(`📊 Cache verification: ${firstModel.name} updated ${timeAgo}m ago (should be ~1-5m ago)`);
+          
+          if (timeAgo > 10) {
+            console.warn(`⚠️ Cache may not have updated properly - timestamps still old!`);
+            // Force another refresh if timestamps are still old
+            console.log(`🔄 Forcing additional cache refresh due to stale timestamps...`);
+            await refreshAllCache();
+          }
+        }
+      } catch (error) {
+        console.warn('Cache verification failed:', error);
+      }
       
       console.log(`✅ ${new Date().toISOString()} - Hourly benchmark run completed successfully`);
     } catch (error) {
