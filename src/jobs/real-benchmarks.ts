@@ -25,6 +25,16 @@ try {
   // Streaming not available - will be null for regular benchmarks
 }
 
+// Import cache refresh function
+let refreshAllCache: (() => Promise<any>) | null = null;
+try {
+  const cacheModule = require('../cache/dashboard-cache');
+  refreshAllCache = cacheModule.refreshAllCache;
+} catch {
+  // Cache system not available - will be null
+  console.warn('⚠️ Cache refresh not available - dashboard may not update automatically');
+}
+
 // Smart skip system for persistently overloaded models
 const modelFailureTracker = new Map<string, {
   consecutiveFailures: number;
@@ -2207,6 +2217,20 @@ export async function runRealBenchmarks() {
     }
 
     console.log('✅ Enhanced benchmark sweep complete with realistic scoring!');
+    
+    // AUTOMATIC CACHE REFRESH: Refresh frontend cache after benchmark completion
+    if (refreshAllCache) {
+      try {
+        console.log('🔄 Refreshing frontend cache with fresh benchmark data...');
+        const cacheResult = await refreshAllCache();
+        console.log(`✅ Cache refreshed successfully: ${cacheResult.refreshed || 0} combinations updated`);
+      } catch (cacheError) {
+        console.warn('⚠️ Cache refresh failed after benchmarks:', String(cacheError).slice(0, 200));
+        // Don't fail the entire benchmark if cache refresh fails
+      }
+    } else {
+      console.log('⚠️ Cache refresh not available - frontend may not show updated scores immediately');
+    }
   } catch (e) {
     console.error('❌ Benchmark sweep failed:', e);
     throw e; // Re-throw so CLI doesn't claim success on failure

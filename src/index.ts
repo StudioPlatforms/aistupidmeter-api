@@ -9,6 +9,7 @@ import cors from '@fastify/cors';
 import modelsRoutes from './routes/models';
 import benchmarkRoutes from './routes/benchmark';
 import dashboardRoutes from './routes/dashboard';
+import dashboardCachedRoutes from './routes/dashboard-cached';
 import referenceRoutes from './routes/reference';
 import testAdaptersRoutes from './routes/test-adapters';
 import testAdaptersStreamRoutes from './routes/test-adapters-stream';
@@ -135,6 +136,7 @@ app.addHook('onRequest', async (request, reply) => {
 app.register(modelsRoutes, { prefix: '/models' });
 app.register(benchmarkRoutes, { prefix: '/benchmark' });
 app.register(dashboardRoutes, { prefix: '/dashboard' });
+app.register(dashboardCachedRoutes, { prefix: '/dashboard' }); // Adds /dashboard/cached, /dashboard/scores-cached etc.
 app.register(referenceRoutes, { prefix: '/reference' });
 app.register(testAdaptersRoutes, { prefix: '/test-adapters' });
 app.register(testAdaptersStreamRoutes, { prefix: '/test-adapters' });
@@ -275,10 +277,20 @@ app.post('/internal/report', async (req, res) => {
 
 // Import the proper cron-based scheduler
 import { startBenchmarkScheduler } from './scheduler';
+import { initializeCache } from './cache/dashboard-cache';
 
 // Start the server
 app.listen({ port: 4000, host: '0.0.0.0' }, async () => {
   console.log('🚀 Server is running on port 4000');
+  
+  // Initialize the cache system first
+  console.log('🔄 Initializing dashboard cache system...');
+  try {
+    await initializeCache();
+    console.log('✅ Dashboard cache system initialized successfully');
+  } catch (error) {
+    console.error('❌ Failed to initialize cache system:', error);
+  }
   
   // Start the proper cron-based benchmark scheduler
   startBenchmarkScheduler();

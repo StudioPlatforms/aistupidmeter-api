@@ -15,6 +15,16 @@ import { emitBenchmarkProgress } from './test-adapters-stream';
 import { randomUUID } from 'crypto';
 import { benchmarkModel, BENCHMARK_TASKS } from '../jobs/real-benchmarks';
 
+// Import cache refresh function
+let refreshAllCache: (() => Promise<any>) | null = null;
+try {
+  const cacheModule = require('../cache/dashboard-cache');
+  refreshAllCache = cacheModule.refreshAllCache;
+} catch {
+  // Cache system not available - will be null
+  console.warn('⚠️ Cache refresh not available for user key testing - dashboard may not update automatically');
+}
+
 // No longer need custom benchmark tasks - using production system only
 
 export default async function (fastify: FastifyInstance, opts: any) {
@@ -348,6 +358,27 @@ async function runStreamingBenchmark(sessionId: string, provider: Provider, mode
         }
       });
 
+      // AUTOMATIC CACHE REFRESH: Refresh frontend cache after user benchmark completion
+      if (refreshAllCache) {
+        try {
+          emitBenchmarkProgress(sessionId, {
+            type: 'info',
+            message: '🔄 Refreshing frontend cache with fresh user benchmark data...'
+          });
+          const cacheResult = await refreshAllCache();
+          emitBenchmarkProgress(sessionId, {
+            type: 'success',
+            message: `✅ Cache refreshed successfully: ${cacheResult.refreshed || 0} combinations updated`
+          });
+        } catch (cacheError) {
+          emitBenchmarkProgress(sessionId, {
+            type: 'warning',
+            message: '⚠️ Cache refresh failed - frontend may not show updated scores immediately'
+          });
+          console.warn('⚠️ Cache refresh failed after user benchmarks:', String(cacheError).slice(0, 200));
+        }
+      }
+
     } finally {
       // Restore environment
       if (originalKey) {
@@ -591,6 +622,18 @@ async function runTaskWithTrialsStreaming(
         };
         
         console.log(`✅ Production benchmark completed: Model ${testModel}, Score ${latestScore.stupidScore}`);
+        
+        // AUTOMATIC CACHE REFRESH: Refresh frontend cache after user benchmark completion
+        if (refreshAllCache) {
+          try {
+            console.log('🔄 Refreshing frontend cache with fresh user benchmark data...');
+            const cacheResult = await refreshAllCache();
+            console.log(`✅ Cache refreshed successfully: ${cacheResult.refreshed || 0} combinations updated`);
+          } catch (cacheError) {
+            console.warn('⚠️ Cache refresh failed after user benchmarks:', String(cacheError).slice(0, 200));
+            // Don't fail the entire benchmark if cache refresh fails
+          }
+        }
         
         return {
           success: true,

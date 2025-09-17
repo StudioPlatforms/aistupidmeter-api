@@ -16,6 +16,16 @@ import {
 } from '../llm/adapters';
 import * as crypto from 'crypto';
 
+// Import cache refresh function
+let refreshAllCache: (() => Promise<any>) | null = null;
+try {
+  const cacheModule = require('../cache/dashboard-cache');
+  refreshAllCache = cacheModule.refreshAllCache;
+} catch {
+  // Cache system not available - will be null
+  console.warn('⚠️ Cache refresh not available for deep benchmarks - dashboard may not update automatically');
+}
+
 // Track running status for coordination with scheduler
 let isDeepBenchmarkRunning = false;
 let deepBenchmarkProgress = {
@@ -630,6 +640,20 @@ export async function runDeepBenchmarks(): Promise<void> {
     if (deepBenchmarkProgress.errors.length > 0) {
       console.log(`⚠️ ${deepBenchmarkProgress.errors.length} errors encountered:`);
       deepBenchmarkProgress.errors.forEach(err => console.log(`  - ${err.slice(0, 100)}`));
+    }
+    
+    // AUTOMATIC CACHE REFRESH: Refresh frontend cache after deep benchmark completion
+    if (refreshAllCache) {
+      try {
+        console.log('🔄 Refreshing frontend cache with fresh deep benchmark data...');
+        const cacheResult = await refreshAllCache();
+        console.log(`✅ Cache refreshed successfully: ${cacheResult.refreshed || 0} combinations updated`);
+      } catch (cacheError) {
+        console.warn('⚠️ Cache refresh failed after deep benchmarks:', String(cacheError).slice(0, 200));
+        // Don't fail the entire benchmark if cache refresh fails
+      }
+    } else {
+      console.log('⚠️ Cache refresh not available - frontend may not show updated scores immediately');
     }
     
   } catch (error) {

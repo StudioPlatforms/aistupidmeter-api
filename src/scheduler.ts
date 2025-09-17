@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { runRealBenchmarks } from './jobs/real-benchmarks';
 import { runDeepBenchmarks, isDeepBenchmarkActive } from './deepbench/index';
+import { refreshAllCache } from './cache/dashboard-cache';
 
 let isRunning = false;
 let isDeepRunning = false;
@@ -39,6 +40,11 @@ export function startBenchmarkScheduler() {
       await runRealBenchmarks();
       console.log(`✅ Regular benchmarks completed`);
       
+      // Refresh cache after benchmark completion
+      console.log(`🔄 Refreshing dashboard cache after benchmark completion...`);
+      const cacheResult = await refreshAllCache();
+      console.log(`✅ Cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms`);
+      
       console.log(`✅ ${new Date().toISOString()} - Hourly benchmark run completed successfully`);
     } catch (error) {
       console.error(`❌ ${new Date().toISOString()} - Hourly benchmark run failed:`, error);
@@ -72,6 +78,11 @@ export function startBenchmarkScheduler() {
       console.log(`🏗️ Running deep (reasoning) benchmarks...`);
       await runDeepBenchmarks();
       console.log(`✅ Deep benchmarks completed - REASONING mode should now show ~1-2 hours ago`);
+      
+      // Refresh cache after deep benchmark completion
+      console.log(`🔄 Refreshing dashboard cache after deep benchmark completion...`);
+      const cacheResult = await refreshAllCache();
+      console.log(`✅ Cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms`);
       
       console.log(`✅ ${new Date().toISOString()} - Daily deep benchmark run completed successfully`);
     } catch (error) {
@@ -134,6 +145,11 @@ export function startBenchmarkScheduler() {
         isRunning = true;
         await runRealBenchmarks();
         console.log('✅ Test hourly benchmark completed successfully');
+        
+        // Refresh cache after test run
+        console.log('🔄 Refreshing cache after test benchmark...');
+        const cacheResult = await refreshAllCache();
+        console.log(`✅ Cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms`);
       } catch (error) {
         console.error('❌ Test hourly benchmark failed:', error);
       } finally {
