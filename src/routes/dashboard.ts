@@ -313,22 +313,25 @@ async function getCombinedModelScores() {
   }
 }
 
-// Helper function to get real database model scores (hourly only)
+// Add simple in-memory cache for performance
+const modelScoresCache = new Map();
+const CACHE_DURATION = 60 * 1000; // 1 minute cache
+
+// Helper function to get real database model scores (hourly only) - OPTIMIZED
 async function getModelScoresFromDB() {
   try {
-    console.log('🔍 Starting getModelScoresFromDB...');
-    console.log('💾 Current working directory:', process.cwd());
-    console.log('🗄️ Database path should be: ./data/stupid_meter.db');
-    
-    // Test direct SQL access first
-    try {
-      const rawQuery = db.run(sql`SELECT COUNT(*) as count FROM models`);
-      console.log('🧪 Raw SQL result:', rawQuery);
-    } catch (rawError) {
-      console.error('❌ Raw SQL failed:', rawError);
+    // Check cache first
+    const cacheKey = 'model_scores_optimized';
+    const cached = modelScoresCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+      console.log('🚀 Using cached model scores (sub-second response)');
+      return cached.data;
     }
+
+    console.log('🔍 Starting OPTIMIZED getModelScoresFromDB...');
+    const startTime = Date.now();
     
-    // Get only models marked for live rankings (same as other functions)
+    // Get only models marked for live rankings (using raw SQL to avoid type issues)
     const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
     console.log(`📊 Found ${allModels.length} core ranking models:`, allModels.map(m => ({ id: m.id, name: m.name })));
     
@@ -357,7 +360,7 @@ async function getModelScoresFromDB() {
         })
         .from(runs)
         .where(eq(runs.modelId, model.id));
-      
+
       if (latestScore.length > 0 && stats.length > 0) {
         const score = latestScore[0];
         const stat = stats[0];
@@ -595,6 +598,15 @@ async function getModelScoresFromDB() {
         });
       }
     }
+    
+    const endTime = Date.now();
+    console.log(`🎯 OPTIMIZED: Completed in ${endTime - startTime}ms, caching ${modelScores.length} results`);
+    
+    // Cache the results for next time
+    modelScoresCache.set(cacheKey, {
+      data: modelScores,
+      timestamp: Date.now()
+    });
     
     return modelScores;
   } catch (error) {
@@ -1628,7 +1640,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
         
         // Get the most recent update time
         if (modelScores.length > 0) {
-          const mostRecent = modelScores.reduce((latest, current) => 
+          const mostRecent = modelScores.reduce((latest: any, current: any) => 
             current.lastUpdated > latest.lastUpdated ? current : latest
           );
           lastUpdate = mostRecent.lastUpdated;
