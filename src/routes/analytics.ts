@@ -234,25 +234,24 @@ export default async function (fastify: FastifyInstance, opts: any) {
         
         const zScore = calculateZScore(latestRawScore, baselineMean, baselineStdDev);
         
-        // TWO TYPES OF WARNINGS:
-        // 1. DEGRADATION WARNINGS (performance drops from baseline)
-        // 2. LOW PERFORMANCE WARNINGS (current scores under 60)
+        // SIMPLIFIED DUAL WARNING SYSTEM:
+        // 1. DEGRADATION WARNINGS (performance drops from baseline)  
+        // 2. LOW PERFORMANCE WARNINGS (current scores under 60) - ALWAYS SHOW
         
         const scoreDrop = baselineDisplayScore - currentDisplayScore;
-        let warningAdded = false;
+        let degradationWarningAdded = false;
         
-        // TYPE 1: DEGRADATION WARNINGS (existing logic)
-        // Stricter criteria: Must have meaningful baseline (>30) and significant drop
+        // TYPE 1: DEGRADATION WARNINGS - More lenient criteria
         if (baselineDisplayScore >= 30) {
-          // Require significant degradation: 15+ point drop AND statistical significance
-          if (scoreDrop >= 15 && currentDisplayScore < baselineDisplayScore * 0.8 && Math.abs(zScore) > 2) {
+          // Require meaningful degradation: 10+ point drop OR significant statistical change
+          if ((scoreDrop >= 10 && currentDisplayScore < baselineDisplayScore * 0.85) || 
+              (Math.abs(zScore) > 2 && scoreDrop >= 5)) {
             const dropPercentage = Math.round((scoreDrop / Math.max(1, baselineDisplayScore)) * 100);
-            // Use actual calculated percentage, not artificially capped
             const realDropPercentage = Math.max(1, Math.min(90, Math.abs(dropPercentage)));
             
             let severity = 'minor';
-            if (scoreDrop > 30 || currentDisplayScore < 40) severity = 'critical';
-            else if (scoreDrop > 20 || currentDisplayScore < 60) severity = 'major';
+            if (scoreDrop > 25 || currentDisplayScore < 40) severity = 'critical';
+            else if (scoreDrop > 15 || currentDisplayScore < 55) severity = 'major';
             
             degradations.push({
               modelId: model.id,
@@ -267,109 +266,57 @@ export default async function (fastify: FastifyInstance, opts: any) {
               message: `Performance dropped ${realDropPercentage}% from baseline (${baselineDisplayScore} → ${currentDisplayScore})`,
               type: 'degradation'
             });
-            warningAdded = true;
+            degradationWarningAdded = true;
           }
         }
         
-        // TYPE 2: LOW PERFORMANCE WARNINGS (ENHANCED!)
-        // Advanced multi-factor warning system for comprehensive user guidance
-        if (!warningAdded && currentDisplayScore < 60) {
+        // TYPE 2: LOW PERFORMANCE WARNINGS - ALWAYS SHOW (not conditional on degradation warnings)
+        // This ensures users see warnings for ALL poorly performing models
+        if (currentDisplayScore < 60) {
+          // SIMPLIFIED and DIRECT warning system - no complex analysis needed
           let severity = 'minor';
           let message = '';
           let warningType = 'low_performance';
-          let actionableAdvice = '';
-          let alternatives = [];
           
-          // VOLATILITY ANALYSIS - detect unstable models
-          if (validRecentValues.length >= 3) {
-            const recentDisplayScores = validRecentValues.map(raw => {
-              if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
-                return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
-              } else {
-                return Math.max(0, Math.min(100, Math.round(raw)));
-              }
+          // Simple and clear severity classification
+          if (currentDisplayScore < 40) {
+            severity = 'critical';
+            message = `Critical performance: ${currentDisplayScore} points (well below acceptable threshold)`;
+            warningType = 'critical_failure';
+          } else if (currentDisplayScore < 50) {
+            severity = 'major';  
+            message = `Poor performance: ${currentDisplayScore} points (below 50 point threshold)`;
+            warningType = 'poor_performance';
+          } else { // currentDisplayScore < 60
+            severity = 'minor';
+            message = `Below average performance: ${currentDisplayScore} points (below 60 point threshold)`;
+            warningType = 'below_average';
+          }
+          
+          // Add cost context for expensive underperformers
+          const pricing = getModelPricing(model.name, model.vendor);
+          const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
+          if (estimatedCost > 10) {
+            message += ` at $${estimatedCost.toFixed(2)}/1M tokens`;
+            if (severity === 'minor') severity = 'major'; // Upgrade severity for expensive poor performers
+          }
+          
+          // Only add if not already covered by degradation warning
+          if (!degradationWarningAdded) {
+            degradations.push({
+              modelId: model.id,
+              modelName: model.name,
+              provider: model.vendor,
+              currentScore: currentDisplayScore,
+              baselineScore: baselineDisplayScore,
+              dropPercentage: 0, // No drop percentage for low-performance warnings
+              zScore: zScore.toFixed(2),
+              severity,
+              detectedAt: new Date(),
+              message,
+              type: warningType
             });
-            
-            const volatility = calculateStdDev(recentDisplayScores);
-            if (volatility > 15) {
-              warningType = 'high_volatility';
-              severity = volatility > 25 ? 'critical' : 'major';
-              message = `Highly unstable performance: ${currentDisplayScore} points with ${Math.round(volatility)} volatility`;
-              actionableAdvice = 'Consider switching to a more stable alternative';
-            }
           }
-          
-          // COST-PERFORMANCE ANALYSIS - expensive models performing poorly
-          if (warningType === 'low_performance') {
-            const pricing = getModelPricing(model.name, model.vendor);
-            const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
-            
-            if (estimatedCost > 10 && currentDisplayScore < 50) {
-              warningType = 'poor_value';
-              severity = 'major';
-              message = `Expensive model underperforming: ${currentDisplayScore} points at $${estimatedCost.toFixed(2)}/1M tokens`;
-              actionableAdvice = 'Switch to cheaper alternative with similar performance';
-            }
-          }
-          
-          // LATENCY DEGRADATION - response time issues
-          const latestScore = historicalScores[0];
-          if (latestScore.axes && typeof latestScore.axes === 'object') {
-            const efficiency = (latestScore.axes as any).efficiency;
-            if (typeof efficiency === 'number' && efficiency < 0.3 && currentDisplayScore > 40) {
-              warningType = 'latency_degradation';
-              severity = 'major';
-              const estimatedLatency = Math.round(2000 - (efficiency * 1500));
-              message = `Slow response times: ~${estimatedLatency}ms despite ${currentDisplayScore} point performance`;
-              actionableAdvice = 'Consider faster alternatives for time-sensitive tasks';
-            }
-          }
-          
-          // CONSISTENCY WARNINGS - repeated failures
-          if (validRecentValues.length >= 5) {
-            const consistentlyLow = validRecentValues.slice(0, 5).every(raw => {
-              const displayScore = Math.abs(raw) < 1 || Math.abs(raw) > 100 ?
-                Math.max(0, Math.min(100, Math.round(50 - raw * 100))) :
-                Math.max(0, Math.min(100, Math.round(raw)));
-              return displayScore < 45;
-            });
-            
-            if (consistentlyLow) {
-              warningType = 'consistency_failure';
-              severity = 'major';
-              message = `Consistently failing: ${currentDisplayScore} points with repeated poor performance`;
-              actionableAdvice = 'Model may be experiencing systematic issues';
-            }
-          }
-          
-          // Use default low performance message if no specific type detected
-          if (warningType === 'low_performance') {
-            if (currentDisplayScore < 40) {
-              severity = 'critical';
-              message = `Critical performance: ${currentDisplayScore} points (well below acceptable threshold)`;
-            } else if (currentDisplayScore < 50) {
-              severity = 'major';
-              message = `Poor performance: ${currentDisplayScore} points (below 50 point threshold)`;
-            } else { // currentDisplayScore < 60
-              severity = 'minor';
-              message = `Below average performance: ${currentDisplayScore} points (below 60 point threshold)`;
-            }
-          }
-          
-          degradations.push({
-            modelId: model.id,
-            modelName: model.name,
-            provider: model.vendor,
-            currentScore: currentDisplayScore,
-            baselineScore: baselineDisplayScore,
-            dropPercentage: 0, // No drop percentage for low-performance warnings
-            zScore: zScore.toFixed(2),
-            severity,
-            detectedAt: new Date(),
-            message,
-            type: warningType,
-            actionableAdvice
-          });
         }
       }
       
@@ -749,8 +696,8 @@ export default async function (fastify: FastifyInstance, opts: any) {
           stability,
           latency,
           period: period, // Track which period this data represents
-          // ADJUSTED: More sensitive threshold for "Avoid Now" warnings
-          isAvoidNow: currentDisplayScore <= 50 || hasMajorDegradation,
+          // FIXED: Show in "Avoid Now" if currently performing poorly (under 55) regardless of period
+          isAvoidNow: currentDisplayScore <= 55 || hasMajorDegradation,
           hasValidData: true, // Always true since we estimate missing data
           // Separate criteria for different recommendations based on period performance
           isGoodPerformance: periodDisplayScore >= 60,
@@ -805,126 +752,43 @@ export default async function (fastify: FastifyInstance, opts: any) {
         };
       }
       
-      // LOGICAL FIX: Only show "Avoid Now" for LATEST period
-      // Historical periods (24H, 7D, 1M) are for trend analysis, not current actionable warnings
-      if (period === 'latest') {
-        // Find models to avoid - only serious issues with proper baseline comparison
-        const modelsToAvoid = [];
+      // SIMPLIFIED "Avoid Now" logic: Show for ALL periods if models are currently underperforming
+      // Users expect to see current warnings regardless of which historical period they're viewing
+      const modelsToAvoid = [];
+      
+      for (const model of modelAnalysis.filter(m => m.isAvoidNow)) {
+        let reason = '';
         
-        for (const model of modelAnalysis.filter(m => m.isAvoidNow)) {
-          // Get proper historical baseline for comparison (last 7 days vs previous 7 days)
-          const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
-          const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-          
-          try {
-            // Get historical baseline (7-14 days ago)
-            const baselineScores = await db
-              .select()
-              .from(scores)
-              .where(
-                and(
-                  eq(scores.modelId, model.id),
-                  gte(scores.ts, fourteenDaysAgo.toISOString()),
-                  sql`${scores.ts} < ${sevenDaysAgo.toISOString()}`
-                )
-              )
-              .orderBy(desc(scores.ts));
-            
-            // Get recent scores (last 7 days)
-            const recentScores = await db
-              .select()
-              .from(scores)
-              .where(
-                and(
-                  eq(scores.modelId, model.id),
-                  gte(scores.ts, sevenDaysAgo.toISOString())
-                )
-              )
-              .orderBy(desc(scores.ts));
-            
-            // Calculate proper baseline vs current comparison
-            const validBaselineScores = baselineScores.filter(s => 
-              s.stupidScore !== -777 && s.stupidScore !== -888 && s.stupidScore !== -999 && 
-              s.stupidScore !== null && s.stupidScore !== -100 && s.stupidScore >= 0
-            );
-            
-            const validRecentScores = recentScores.filter(s => 
-              s.stupidScore !== -777 && s.stupidScore !== -888 && s.stupidScore !== -999 && 
-              s.stupidScore !== null && s.stupidScore !== -100 && s.stupidScore >= 0
-            );
-            
-            if (validBaselineScores.length >= 3 && validRecentScores.length >= 2) {
-              // Convert baseline scores to display scores
-              const baselineDisplayScores = validBaselineScores.map(s => {
-                const raw = s.stupidScore;
-                if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
-                  return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
-                } else {
-                  return Math.max(0, Math.min(100, Math.round(raw)));
-                }
-              });
-              
-              // Convert recent scores to display scores
-              const recentDisplayScores = validRecentScores.map(s => {
-                const raw = s.stupidScore;
-                if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
-                  return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
-                } else {
-                  return Math.max(0, Math.min(100, Math.round(raw)));
-                }
-              });
-              
-              const baselineAvg = Math.round(baselineDisplayScores.reduce((a, b) => a + b, 0) / baselineDisplayScores.length);
-              const recentAvg = Math.round(recentDisplayScores.reduce((a, b) => a + b, 0) / recentDisplayScores.length);
-              const scoreDrop = baselineAvg - recentAvg;
-              
-              // FIXED: Only show if there's a REAL meaningful degradation (at least 10 point drop)
-              // Don't show degradation message if scores are the same or similar
-              if (scoreDrop >= 10 && recentAvg < baselineAvg * 0.85 && baselineAvg !== recentAvg) {
-                const dropPercentage = Math.round((scoreDrop / Math.max(1, baselineAvg)) * 100);
-                
-                modelsToAvoid.push({
-                  ...model,
-                  reason: `Performance degraded ${dropPercentage}% (${recentAvg} from ${baselineAvg} baseline)`
-                });
-              } else if (recentAvg <= 45 && baselineAvg > recentAvg + 5) {
-                // Include models that degraded to poor performance
-                modelsToAvoid.push({
-                  ...model,
-                  reason: `Performance dropped to ${recentAvg} points (was ${baselineAvg})`
-                });
-              } else if (model.currentDisplayScore <= 40 && !model.hasMajorDegradation) {
-                // Only show currently poor performing models without degradation context
-                modelsToAvoid.push({
-                  ...model,
-                  reason: `Currently performing poorly at ${model.currentDisplayScore} points`
-                });
-              }
-            } else if (model.currentDisplayScore <= 45) {
-              // Fallback for models without enough historical data
-              modelsToAvoid.push({
-                ...model,
-                reason: `Performance critically low at ${model.currentDisplayScore} points`
-              });
-            }
-          } catch (error) {
-            console.error(`Error calculating baseline for model ${model.name}:`, error);
-            // Fallback to simple low performance check
-            if (model.currentDisplayScore <= 45) {
-              modelsToAvoid.push({
-                ...model,
-                reason: `Performance critically low at ${model.currentDisplayScore} points`
-              });
-            }
-          }
+        // Simple and clear reasoning based on current performance
+        if (model.currentDisplayScore <= 40) {
+          reason = `Critical performance: ${model.currentDisplayScore} points (well below 50 threshold)`;
+        } else if (model.currentDisplayScore <= 50) {
+          reason = `Poor performance: ${model.currentDisplayScore} points (below 50 threshold)`;
+        } else if (model.currentDisplayScore <= 55 && model.hasMajorDegradation) {
+          reason = `Recent major degradation detected (${model.currentDisplayScore} points)`;
+        } else {
+          reason = `Below average performance: ${model.currentDisplayScore} points`;
         }
         
-        recommendations.avoidNow = modelsToAvoid.slice(0, 3);
-      } else {
-        // For historical periods (24H, 7D, 1M), don't show current "Avoid Now" warnings
-        // These periods are for analyzing past trends, not current actionable advice
-        recommendations.avoidNow = [];
+        // Add cost context for expensive underperformers
+        const pricing = getModelPricing(model.name, model.provider);
+        const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
+        if (estimatedCost > 10) {
+          reason += ` at $${estimatedCost.toFixed(2)}/1M tokens`;
+        }
+        
+        modelsToAvoid.push({
+          id: model.id,
+          name: model.name,
+          provider: model.provider,
+          score: model.currentDisplayScore,
+          reason
+        });
       }
+      
+      // Sort by severity (lowest scores first)
+      modelsToAvoid.sort((a, b) => a.score - b.score);
+      recommendations.avoidNow = modelsToAvoid.slice(0, 4); // Show up to 4 models to avoid
       
       return {
         success: true,

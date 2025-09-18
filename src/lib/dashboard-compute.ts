@@ -69,17 +69,23 @@ export async function getSingleModelCombinedScore(modelId: number): Promise<numb
       let hourlyDisplay = Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore)));
       
       if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
-        // Has both scores - combine them
+        // Has both scores - combine them normally
         let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
         combinedScore = Math.round(hourlyDisplay * 0.7 + deepDisplay * 0.3);
       } else {
-        // Only hourly score - use it directly
-        combinedScore = hourlyDisplay;
+        // Only hourly score - apply incomplete data penalty
+        // Assume missing deep score is average (50) and apply 15% penalty for incomplete data
+        const assumedDeepScore = 50;
+        const preliminaryScore = Math.round(hourlyDisplay * 0.7 + assumedDeepScore * 0.3);
+        combinedScore = Math.round(preliminaryScore * 0.85); // 15% penalty for incomplete benchmark data
       }
     } else if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
-      // Only deep score - use it directly
+      // Only deep score - apply incomplete data penalty  
+      // Assume missing hourly score is average (50) and apply 15% penalty for incomplete data
+      const assumedHourlyScore = 50;
       let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
-      combinedScore = deepDisplay;
+      const preliminaryScore = Math.round(assumedHourlyScore * 0.7 + deepDisplay * 0.3);
+      combinedScore = Math.round(preliminaryScore * 0.85); // 15% penalty for incomplete benchmark data
     }
     
     return combinedScore;
