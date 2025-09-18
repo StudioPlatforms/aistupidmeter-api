@@ -287,7 +287,7 @@ export class XAIAdapter implements LLMAdapter {
       model: req.model,
       messages,
       temperature: typeof req.temperature === 'number' ? req.temperature : 0.2,
-      max_tokens: req.maxTokens ?? 512,  // canary-friendly
+      max_tokens: req.maxTokens ?? 1500,  // Increased for deep benchmarks
       stream: false
     });
 

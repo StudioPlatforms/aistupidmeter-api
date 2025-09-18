@@ -171,8 +171,12 @@ const MODEL_COSTS = {
   'gemini-2.5-flash': { input: 0.15, output: 0.60 },
   'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
   
-  // xAI Grok (estimated - not tested due to missing API key)
-  'grok-4': { input: 3.0, output: 15.0 },
+  // xAI Grok (official pricing)
+  'grok-3-mini': { input: 0.30, output: 0.50 },
+  'grok-3': { input: 3.0, output: 15.0 },
+  'grok-4-latest': { input: 3.0, output: 15.0 },
+  'grok-4-0709': { input: 3.0, output: 15.0 },
+  'grok-4-0709-eu': { input: 3.0, output: 15.0 },
   'grok-code-fast-1': { input: 0.20, output: 1.50 }
 };
 
