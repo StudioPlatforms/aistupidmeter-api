@@ -2,20 +2,14 @@ import { FastifyInstance } from 'fastify';
 import { db } from '../db/index';
 import { models, scores, deep_sessions } from '../db/schema';
 import { eq, desc, sql, and, gte } from 'drizzle-orm';
-
-// Helper function to calculate z-score for anomaly detection
-function calculateZScore(value: number, mean: number, stdDev: number): number {
-  if (stdDev === 0) return 0;
-  return (value - mean) / stdDev;
-}
-
-// Helper function to calculate standard deviation
-function calculateStdDev(values: number[]): number {
-  if (values.length === 0) return 0;
-  const mean = values.reduce((a, b) => a + b, 0) / values.length;
-  const squaredDiffs = values.map(v => Math.pow(v - mean, 2));
-  return Math.sqrt(squaredDiffs.reduce((a, b) => a + b, 0) / values.length);
-}
+import { 
+  getSingleModelCombinedScore, 
+  getAllCombinedModelScores, 
+  getDateRangeFromPeriod, 
+  calculateStdDev, 
+  calculateZScore,
+  PeriodKey 
+} from '../lib/dashboard-compute';
 
 // Helper function to validate and sanitize data to prevent fake-looking values
 function validateMetric(value: number, min: number = 0, max: number = 100): number | null {
@@ -31,97 +25,6 @@ function validatePercentage(value: number): number | null {
 function validateDropPercentage(value: number): number | null {
   // Cap degradation percentages at realistic maximum of 90%
   return validateMetric(value, 5, 90);
-}
-
-// Helper function to get date range based on period
-function getDateRangeFromPeriod(period: 'latest' | '24h' | '7d' | '1m' = 'latest'): Date {
-  const now = Date.now();
-  switch (period) {
-    case '24h':
-      return new Date(now - 24 * 60 * 60 * 1000);
-    case '7d':
-      return new Date(now - 7 * 24 * 60 * 60 * 1000);
-    case '1m':
-      return new Date(now - 30 * 24 * 60 * 60 * 1000);
-    case 'latest':
-    default:
-      return new Date(now - 7 * 24 * 60 * 60 * 1000); // Default to 7 days for latest
-  }
-}
-
-// Helper function to get combined scores (70% hourly + 30% deep) for a single model
-async function getCombinedScore(modelId: number): Promise<number | null> {
-  try {
-    // Get latest hourly score
-    const latestHourlyScore = await db
-      .select()
-      .from(scores)
-      .where(and(eq(scores.modelId, modelId), eq(scores.suite, 'hourly')))
-      .orderBy(desc(scores.ts))
-      .limit(1);
-
-    // Get latest deep score  
-    const latestDeepScore = await db
-      .select()
-      .from(scores)
-      .where(and(eq(scores.modelId, modelId), eq(scores.suite, 'deep')))
-      .orderBy(desc(scores.ts))
-      .limit(1);
-
-    const hourlyScore = latestHourlyScore[0];
-    const deepScore = latestDeepScore[0];
-    
-    // Combine scores with 70% hourly, 30% deep weighting
-    let combinedScore: number | null = null;
-    
-    if (hourlyScore && hourlyScore.stupidScore !== null && hourlyScore.stupidScore >= 0) {
-      let hourlyDisplay = Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore)));
-      
-      if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
-        // Has both scores - combine them
-        let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
-        combinedScore = Math.round(hourlyDisplay * 0.7 + deepDisplay * 0.3);
-      } else {
-        // Only hourly score - use it directly
-        combinedScore = hourlyDisplay;
-      }
-    } else if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
-      // Only deep score - use it directly
-      let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
-      combinedScore = deepDisplay;
-    }
-    
-    return combinedScore;
-  } catch (error) {
-    console.error(`Error getting combined score for model ${modelId}:`, error);
-    return null;
-  }
-}
-
-// Helper function to get combined scores for all models (same as dashboard)
-async function getAllCombinedModelScores() {
-  try {
-    const allModels = await db.select().from(models);
-    const modelScores = [];
-    
-    for (const model of allModels) {
-      const combinedScore = await getCombinedScore(model.id);
-      
-      if (combinedScore !== null) {
-        modelScores.push({
-          id: model.id,
-          name: model.name,
-          vendor: model.vendor,
-          score: combinedScore
-        });
-      }
-    }
-    
-    return modelScores;
-  } catch (error) {
-    console.error('Error fetching combined model scores:', error);
-    return [];
-  }
 }
 
 // Helper function to get model pricing (cost per 1M tokens)
@@ -274,7 +177,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
         
         if (sortBy === 'combined') {
           // Use combined score for COMBINED mode (70% hourly + 30% deep)
-          const currentCombinedScore = await getCombinedScore(model.id);
+          const currentCombinedScore = await getSingleModelCombinedScore(model.id);
           if (currentCombinedScore !== null) {
             currentDisplayScore = currentCombinedScore;
             console.log(`🔍 Degradation check for ${model.name} in COMBINED mode: ${currentCombinedScore}`);
@@ -709,7 +612,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
         
         if (period === 'latest') {
           // Get combined score for current (latest) performance
-          const combinedScore = await getCombinedScore(model.id);
+          const combinedScore = await getSingleModelCombinedScore(model.id);
           if (combinedScore !== null) {
             currentDisplayScore = combinedScore;
             periodDisplayScore = combinedScore; // For latest, current = period

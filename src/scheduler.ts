@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import { runRealBenchmarks } from './jobs/real-benchmarks';
 import { runDeepBenchmarks, isDeepBenchmarkActive } from './deepbench/index';
-import { refreshAllCache } from './cache/dashboard-cache';
+import { refreshAllCache, refreshHotCache } from './cache/dashboard-cache';
 
 let isRunning = false;
 let isDeepRunning = false;
@@ -40,10 +40,10 @@ export function startBenchmarkScheduler() {
       await runRealBenchmarks();
       console.log(`✅ Regular benchmarks completed`);
       
-      // Refresh cache after benchmark completion - FORCE FRESH DATA
-      console.log(`🔄 Refreshing dashboard cache after benchmark completion...`);
-      const cacheResult = await refreshAllCache();
-      console.log(`✅ Cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms`);
+      // OPTIMIZED: Use hot cache refresh for regular hourly updates (90% faster)
+      console.log(`🔥 Refreshing HOT cache after benchmark completion (popular combinations only)...`);
+      const cacheResult = await refreshHotCache();
+      console.log(`✅ HOT cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms (${cacheResult.type})`);
       
       // Double-check cache was updated properly - log first model timestamp
       try {

@@ -253,51 +253,150 @@ export class OpenAIAdapter implements LLMAdapter {
 // ---------- XAI (Grok) ----------
 export class XAIAdapter implements LLMAdapter {
   constructor(private apiKey: string, private base = 'https://api.x.ai') {}
+
   async listModels() {
     try {
       const r = await fetch(`${this.base}/v1/models`, {
         headers: { Authorization: `Bearer ${this.apiKey}` }
       });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j: any = await r.json();
-      // Filter for current stable Grok models
-      return j.data.map((m: any) => m.id).filter((id: string) => /^(grok-4|grok-code-fast-1)/.test(id));
+      return (j?.data ?? []).map((m: any) => m.id).filter((id: string) => /^grok(-|$)/.test(id));
     } catch {
-      // Fallback if discovery fails
-      return ['grok-4', 'grok-code-fast-1'];
+      return ['grok-4-latest', 'grok-2-latest', 'grok-code-fast-1'];
     }
   }
+
+  private toBlocks(text: string) {
+    return [{ type: 'text', text }];
+  }
+
+  private toOpenAIChat(msgs: ChatMessage[], systemMsg?: string) {
+    const turns = msgs.filter(m => m.role !== 'system');
+    const system = systemMsg ? [{ role: 'system' as const, content: this.toBlocks(systemMsg) }] : [];
+    return [
+      ...system,
+      ...turns.map(m => ({ role: m.role as 'user' | 'assistant', content: this.toBlocks(m.content) }))
+    ];
+  }
+
   async chat(req: ChatRequest): Promise<ChatResponse> {
-    const body: any = {
+    const systemMsg = req.messages.find(m => m.role === 'system')?.content;
+
+    const buildBody = (messages: any[]) => ({
       model: req.model,
-      messages: req.messages,
-      temperature: req.temperature ?? 0.2,
-      max_tokens: req.maxTokens ?? 1200,
-    };
-    if (req.tools?.length) {
-      body.tools = req.tools.map(t => ({
-        type: 'function',
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.parameters || { type: 'object', properties: {} }
-        }
-      }));
-    }
-    const r = await fetch(`${this.base}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(body)
+      messages,
+      temperature: typeof req.temperature === 'number' ? req.temperature : 0.2,
+      max_tokens: req.maxTokens ?? 512,  // canary-friendly
+      stream: false
     });
-    const j: any = await r.json();
-    const msg = j.choices?.[0]?.message;
-    const toolCalls = msg?.tool_calls?.map((t: any) => ({
-      name: t.function?.name,
-      arguments: JSON.parse(t.function?.arguments || '{}')
-    })) || [];
-    return { text: msg?.content ?? '', toolCalls, raw: j };
+
+    const callOnce = async (body: any) => {
+      const r = await fetch(`${this.base}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+      });
+      const rawText = await r.text().catch(()=>'');
+      let j: any = {};
+      try { j = rawText ? JSON.parse(rawText) : {}; } catch {}
+      if (!r.ok) {
+        const msg = (j?.error?.message || j?.message || rawText || `HTTP ${r.status}`).slice(0, 400);
+        throw new Error(`XAI ${r.status}: ${msg}`);
+      }
+
+      const choice = Array.isArray(j?.choices) ? j.choices[0] : undefined;
+      const message = choice?.message ?? {};
+      const mc = message?.content;
+
+      // extract text from string or block-array
+      let content = '';
+      if (typeof mc === 'string') content = mc;
+      else if (Array.isArray(mc)) {
+        content = mc.map((part: any) => {
+          if (typeof part === 'string') return part;
+          if (typeof part?.text === 'string') return part.text;
+          if (typeof part?.content === 'string') return part.content;
+          if (Array.isArray(part?.content)) return part.content.map((pp: any) => pp?.text ?? '').join('');
+          return '';
+        }).join('');
+      } else if (message?.content?.[0]?.text) {
+        content = String(message.content[0].text);
+      }
+      content = (content || '').trim();
+
+      const usage = j?.usage || {};
+      const tokensIn  = usage?.prompt_tokens     ?? usage?.input_tokens     ?? 0;
+      const tokensOut = usage?.completion_tokens ?? usage?.output_tokens    ?? 0;
+
+      const toolCalls = (message?.tool_calls ?? []).map((t: any) => {
+        let args: any = {};
+        if (typeof t?.function?.arguments === 'string') {
+          try { args = JSON.parse(t.function.arguments); } catch {}
+        }
+        return { name: t?.function?.name, arguments: args };
+      });
+
+      return { content, tokensIn, tokensOut, toolCalls, j, rawText };
+    };
+
+    // Attempt A: strict OpenAI blocks + system role
+    const bodyA = buildBody(this.toOpenAIChat(req.messages, systemMsg));
+    try {
+      const { content, tokensIn, tokensOut, toolCalls, j } = await callOnce(bodyA);
+      if (content) return { text: content, tokensIn, tokensOut, toolCalls, raw: j };
+    } catch (e) {
+      // fall through
+    }
+
+    // Attempt B: no system role; prepend system as first user line
+    if (systemMsg) {
+      const merged = [
+        { role: 'user' as const, content: this.toBlocks(`[SYSTEM]\n${systemMsg}`) },
+        ...this.toOpenAIChat(req.messages.filter(m => m.role !== 'system'))
+      ];
+      try {
+        const { content, tokensIn, tokensOut, toolCalls, j } = await callOnce(buildBody(merged));
+        if (content) return { text: content, tokensIn, tokensOut, toolCalls, raw: j };
+      } catch (e) {
+        // fall through
+      }
+    }
+
+    // Attempt C: single-turn fallback (concat tot contextul într-un singur mesaj)
+    const oneTurn = (() => {
+      const parts: string[] = [];
+      if (systemMsg) parts.push(`[SYSTEM]\n${systemMsg}`);
+      for (const m of req.messages.filter(m => m.role !== 'system')) {
+        parts.push(`${m.role.toUpperCase()}: ${m.content}`);
+      }
+      return [{ role: 'user' as const, content: this.toBlocks(parts.join('\n\n')) }];
+    })();
+
+    try {
+      const { content, tokensIn, tokensOut, toolCalls, j } = await callOnce(buildBody(oneTurn));
+      if (content) return { text: content, tokensIn, tokensOut, toolCalls, raw: j };
+    } catch {
+      // fall through
+    }
+
+    // Attempt D: model auto-downgrade (e.g., grok-2-latest)
+    try {
+      const avail = await this.listModels();
+      const alt = avail.find((id: string) => id !== req.model);
+      if (alt) {
+        const bodyAlt = { ...buildBody(this.toOpenAIChat(req.messages, systemMsg)), model: alt };
+        const { content, tokensIn, tokensOut, toolCalls, j } = await callOnce(bodyAlt);
+        if (content) return { text: content, tokensIn, tokensOut, toolCalls, raw: j };
+      }
+    } catch {
+      // ignore
+    }
+
+    throw new Error('XAI adapter: Empty content');
   }
 }
 

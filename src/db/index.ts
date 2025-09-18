@@ -27,7 +27,10 @@ try {
       name TEXT NOT NULL,
       vendor TEXT NOT NULL,
       version TEXT,
-      notes TEXT
+      notes TEXT,
+      created_at TEXT DEFAULT 'CURRENT_TIMESTAMP',
+      display_name TEXT,
+      show_in_rankings INTEGER DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS tasks (
@@ -159,6 +162,33 @@ try {
   } catch (err) {
     // Column probably already exists, ignore error
     console.log('ℹ️ Suite column already exists in scores table');
+  }
+  
+  try {
+    // Add created_at column to existing models table if it doesn't exist
+    sqlite.exec(`ALTER TABLE models ADD COLUMN created_at TEXT DEFAULT 'CURRENT_TIMESTAMP'`);
+    console.log('✅ Added created_at column to models table');
+  } catch (err) {
+    // Column probably already exists, ignore error
+    console.log('ℹ️ created_at column already exists in models table');
+  }
+  
+  try {
+    // Add display_name column to existing models table if it doesn't exist
+    sqlite.exec(`ALTER TABLE models ADD COLUMN display_name TEXT`);
+    console.log('✅ Added display_name column to models table');
+  } catch (err) {
+    // Column probably already exists, ignore error
+    console.log('ℹ️ display_name column already exists in models table');
+  }
+  
+  try {
+    // Add show_in_rankings column to existing models table if it doesn't exist
+    sqlite.exec(`ALTER TABLE models ADD COLUMN show_in_rankings INTEGER DEFAULT 0`);
+    console.log('✅ Added show_in_rankings column to models table');
+  } catch (err) {
+    // Column probably already exists, ignore error
+    console.log('ℹ️ show_in_rankings column already exists in models table');
   }
   
   console.log('✅ Database tables created/verified');

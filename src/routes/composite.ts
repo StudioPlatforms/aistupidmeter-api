@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { db } from '../db/index';
 import { models, scores, runs, metrics, deep_sessions } from '../db/schema';
 import { eq, desc, sql, gte, and } from 'drizzle-orm';
+import { getSingleModelCombinedScore } from '../lib/dashboard-compute';
 
 // Cache for composite dashboard data
 interface CompositeCacheEntry {
@@ -35,54 +36,22 @@ const setCachedData = (key: string, data: any, ttl: number = 3 * 60 * 1000): voi
   });
 };
 
-// Direct function imports from dashboard route
+// Use shared function for model scores - SINGLE SOURCE OF TRUTH
 async function getCombinedModelScores() {
   try {
     const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
     const modelScores = [];
     
     for (const model of allModels) {
-      // Get latest hourly score
-      const latestHourlyScore = await db
-        .select()
-        .from(scores)
-        .where(and(eq(scores.modelId, model.id), eq(scores.suite, 'hourly')))
-        .orderBy(desc(scores.ts))
-        .limit(1);
-
-      // Get latest deep score  
-      const latestDeepScore = await db
-        .select()
-        .from(scores)
-        .where(and(eq(scores.modelId, model.id), eq(scores.suite, 'deep')))
-        .orderBy(desc(scores.ts))
-        .limit(1);
-
-      const hourlyScore = latestHourlyScore[0];
-      const deepScore = latestDeepScore[0];
+      // Use shared function for combined score calculation
+      const combinedScore = await getSingleModelCombinedScore(model.id);
       
-      // Combine scores with 70% hourly, 30% deep weighting
-      let combinedScore: number | 'unavailable' = 'unavailable';
-      let isAvailable = false;
-      
-      if (hourlyScore && hourlyScore.stupidScore !== null && hourlyScore.stupidScore >= 0) {
-        let hourlyDisplay = Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore)));
+      // Skip unavailable models  
+      const isUnavailable = model.version === 'unavailable' || 
+        (model.notes && model.notes.includes('Unavailable')) ||
+        (model.vendor === 'xai' && (!process.env.XAI_API_KEY || process.env.XAI_API_KEY === 'your_xai_key_here'));
         
-        if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
-          let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
-          combinedScore = Math.round(hourlyDisplay * 0.7 + deepDisplay * 0.3);
-          isAvailable = true;
-        } else {
-          combinedScore = hourlyDisplay;
-          isAvailable = true;
-        }
-      } else if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
-        let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
-        combinedScore = deepDisplay;
-        isAvailable = true;
-      }
-      
-      if (!isAvailable) {
+      if (isUnavailable || combinedScore === null) {
         const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
         const createdAt = model.createdAt ? new Date(model.createdAt) : null;
         const isNew = createdAt && createdAt > sevenDaysAgo;
@@ -95,14 +64,14 @@ async function getCombinedModelScores() {
           trend: 'unavailable',
           lastUpdated: new Date(),
           status: 'unavailable',
-          unavailableReason: 'No recent benchmark data',
+          unavailableReason: isUnavailable ? 'No API access' : 'No recent benchmark data',
           history: [],
           isNew: isNew
         });
         continue;
       }
 
-      // Calculate trend using hourly data (more frequent)
+      // Get recent scores for trend calculation
       const recentHourlyScores = await db
         .select()
         .from(scores)
@@ -123,16 +92,14 @@ async function getCombinedModelScores() {
         }
       }
 
-      // Determine status
+      // Determine status based on combined score
       let status = 'excellent';
-      if (typeof combinedScore === 'number') {
-        if (combinedScore < 40) status = 'critical';
-        else if (combinedScore < 65) status = 'warning';
-        else if (combinedScore < 80) status = 'good';
-      }
+      if (combinedScore < 40) status = 'critical';
+      else if (combinedScore < 65) status = 'warning';
+      else if (combinedScore < 80) status = 'good';
 
-      const primaryScore = hourlyScore || deepScore;
-      const lastUpdated = new Date(primaryScore.ts || new Date());
+      const lastUpdated = recentHourlyScores.length > 0 ? 
+        new Date(recentHourlyScores[0].ts || new Date()) : new Date();
       const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
       const createdAt = model.createdAt ? new Date(model.createdAt) : null;
       const isNew = createdAt && createdAt > sevenDaysAgo;

@@ -46,20 +46,23 @@ export function getDeepBenchmarkProgress() {
 
 function getAdapter(provider: Provider): LLMAdapter | null {
   const apiKeys = {
-    openai: process.env.OPENAI_API_KEY,
-    xai: process.env.XAI_API_KEY,
-    anthropic: process.env.ANTHROPIC_API_KEY,
-    google: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
+    openai: [process.env.OPENAI_API_KEY, process.env.OPENAI_API_KEY_2],
+    xai: [process.env.XAI_API_KEY, process.env.XAI_API_KEY_2],
+    anthropic: [process.env.ANTHROPIC_API_KEY, process.env.ANTHROPIC_API_KEY_2],
+    google: [process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY, process.env.GEMINI_API_KEY_2]
   };
   
-  const key = apiKeys[provider];
-  if (!key || key.startsWith('your_')) return null;
+  const keys = apiKeys[provider]?.filter((k): k is string => k !== undefined && k !== null && !k.startsWith('your_')) || [];
+  if (keys.length === 0) return null;
+  
+  // Use first available key for deep benchmarks (could be enhanced to rotate if needed)
+  const selectedKey = keys[0];
   
   switch (provider) {
-    case 'openai': return new OpenAIAdapter(key);
-    case 'xai': return new XAIAdapter(key);
-    case 'anthropic': return new AnthropicAdapter(key);
-    case 'google': return new GoogleAdapter(key);
+    case 'openai': return new OpenAIAdapter(selectedKey);
+    case 'xai': return new XAIAdapter(selectedKey);
+    case 'anthropic': return new AnthropicAdapter(selectedKey);
+    case 'google': return new GoogleAdapter(selectedKey);
     default: return null;
   }
 }

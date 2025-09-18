@@ -413,7 +413,8 @@ export function getKeysForProvider(provider: Provider): string[] {
     ],
     
     xai: [
-      process.env.XAI_API_KEY
+      process.env.XAI_API_KEY,
+      process.env.XAI_API_KEY_2
     ],
     
     anthropic: [

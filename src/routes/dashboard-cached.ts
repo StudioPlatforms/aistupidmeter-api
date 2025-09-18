@@ -1,40 +1,37 @@
 import { FastifyInstance } from 'fastify';
-import { getCachedData, getCacheStats, refreshAllCache } from '../cache/dashboard-cache';
+import { getCachedData, getCacheStats, purgeAllCache } from '../cache/dashboard-cache';
 
 export default async function (fastify: FastifyInstance, opts: any) {
   // Main cached dashboard endpoint - serves all data instantly
-  fastify.get('/cached', async (request) => {
+  fastify.get('/cached', async (request, reply) => {
     const { 
       period = 'latest', 
       sortBy = 'combined', 
       analyticsPeriod = 'latest' 
     } = request.query as { 
       period?: 'latest' | '24h' | '7d' | '1m';
-      sortBy?: 'combined' | 'reasoning' | 'speed' | 'price';
+      sortBy?: 'combined' | 'reasoning' | 'speed' | 'price' | '7axis';
       analyticsPeriod?: 'latest' | '24h' | '7d' | '1m';
     };
 
     try {
-      console.log(`⚡ Cached dashboard request: ${period}/${sortBy}/${analyticsPeriod}`);
-
-      // Get cached data instantly
-      const cachedResult = await getCachedData(period, sortBy, analyticsPeriod);
+      const result = await getCachedData(period, sortBy, analyticsPeriod);
       
-      if (cachedResult) {
-        return cachedResult;
-      }
+      // allow short CDN cache if you want; otherwise keep private
+      reply.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
       
-      // Cache miss - return error instead of computing on-demand
       return {
-        success: false,
-        cached: false,
-        error: 'Cache miss - data not available',
-        message: 'Requested data combination is not cached. Please try again in a few minutes.',
-        details: {
+        success: true,
+        cached: result.cached,
+        data: {
+          modelScores: result.data
+        },
+        meta: {
           period,
           sortBy,
           analyticsPeriod,
-          requestedAt: new Date().toISOString()
+          cachedAt: new Date().toISOString(),
+          cached: result.cached
         }
       };
 
@@ -65,12 +62,11 @@ export default async function (fastify: FastifyInstance, opts: any) {
       // Use latest analytics period for scores-only request
       const cachedResult = await getCachedData(period, sortBy, 'latest');
       
-      if (cachedResult && cachedResult.data && cachedResult.data.modelScores) {
+      if (cachedResult && cachedResult.data) {
         return {
           success: true,
           cached: true,
-          data: cachedResult.data.modelScores,
-          meta: cachedResult.meta
+          data: Array.isArray(cachedResult.data) ? cachedResult.data : cachedResult.data.modelScores || cachedResult.data
         };
       }
       
@@ -138,25 +134,16 @@ export default async function (fastify: FastifyInstance, opts: any) {
     }
   });
 
-  // Force cache refresh endpoint
-  fastify.post('/refresh-cache', async (request) => {
-    try {
-      console.log('🔄 Manual cache refresh triggered');
-      const result = await refreshAllCache();
-      
-      return {
-        success: true,
-        message: 'Cache refreshed successfully',
-        ...result,
-        timestamp: new Date().toISOString()
-      };
-    } catch (error) {
-      console.error('Error refreshing cache:', error);
-      return {
-        success: false,
-        error: 'Failed to refresh cache',
-        details: String(error)
-      };
-    }
+  // Admin: clear and prewarm
+  fastify.post('/cache/purge', async () => { 
+    await purgeAllCache(); 
+    return { ok: true }; 
+  });
+
+  fastify.post('/cache/prewarm', async () => {
+    const periods = ['latest','24h','7d','1m'];
+    const sorts   = ['combined','reasoning','speed','7axis','price'];
+    await Promise.all(periods.flatMap(p => sorts.map(s => getCachedData(p, s, 'latest'))));
+    return { ok: true };
   });
 }
