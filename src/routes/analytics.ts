@@ -29,6 +29,11 @@ function validateDropPercentage(value: number): number | null {
 
 // Helper function to get model pricing (cost per 1M tokens)
 function getModelPricing(modelName: string, provider: string): { input: number; output: number } {
+  // Add null checks to prevent crashes
+  if (!modelName || !provider) {
+    return { input: 2, output: 6 }; // Default fallback pricing
+  }
+  
   const name = modelName.toLowerCase();
   const prov = provider.toLowerCase();
   
@@ -373,8 +378,9 @@ export default async function (fastify: FastifyInstance, opts: any) {
         
         console.log(`Found ${providerModels.length} models for ${provider}`);
         
-        // Get current leaderboard to see how many models are performing well
-        const currentLeaderboard = await getAllCombinedModelScores();
+        // Get current leaderboard to see how many models are performing well - USE CORRECTED DATA SOURCE
+        const { computeDashboardScores } = await import('../lib/dashboard-compute');
+        const currentLeaderboard = await computeDashboardScores('latest', 'combined');
         const providerInLeaderboard = currentLeaderboard?.filter(model => 
           providerModels.some(pm => pm.id === model.id)
         ) || [];
@@ -494,14 +500,15 @@ export default async function (fastify: FastifyInstance, opts: any) {
     try {
       console.log(`🎯 Smart Recommendations: Getting ACTUAL leaderboard data for ${sortBy} mode`);
       
-      // STEP 1: Get ACTUAL current leaderboard rankings - this is what users see!
-      const currentLeaderboard = await getAllCombinedModelScores();
+      // STEP 1: Get ACTUAL current leaderboard rankings - USE SAME DATA AS LIVE RANKINGS!
+      const { computeDashboardScores } = await import('../lib/dashboard-compute');
+      const currentLeaderboard = await computeDashboardScores('latest', sortBy);
       if (!currentLeaderboard || currentLeaderboard.length === 0) {
         console.log('❌ No leaderboard data available');
         return { success: false, error: 'No leaderboard data available' };
       }
       
-      console.log(`📊 Got ${currentLeaderboard.length} models from current leaderboard`);
+      console.log(`📊 Got ${currentLeaderboard.length} models from LIVE RANKINGS data (${sortBy} mode)`);
       
       // STEP 2: Filter to currently active models only (no offline/stale models in recommendations)
       interface ActiveModel {
@@ -672,9 +679,21 @@ export default async function (fastify: FastifyInstance, opts: any) {
                              model.name.toLowerCase().includes('flash');
         
         if (rank <= 5) {
-          const speedEstimate = hasSpeedHints ? 
-            Math.round(500 + Math.random() * 300) : // Fast models: 500-800ms
-            Math.round(800 + Math.random() * 700); // Regular models: 800-1500ms
+          // Deterministic speed estimates based on model characteristics (no random!)
+          let speedEstimate: number;
+          if (hasSpeedHints) {
+            // Fast models get consistent estimates based on name/type
+            if (model.name.toLowerCase().includes('mini')) speedEstimate = 617; // Based on actual gpt-4o-mini data
+            else if (model.name.toLowerCase().includes('flash')) speedEstimate = 720;
+            else if (model.name.toLowerCase().includes('fast')) speedEstimate = 650;
+            else speedEstimate = 680; // Other "fast" models
+          } else {
+            // Regular models - estimate based on provider and size
+            if (model.vendor === 'openai' && model.name.toLowerCase().includes('gpt-5')) speedEstimate = 1200;
+            else if (model.vendor === 'anthropic') speedEstimate = 950;
+            else if (model.vendor === 'google') speedEstimate = 880;
+            else speedEstimate = 1000; // Default for other models
+          }
           
           fastestResponse = {
             ...model,
@@ -688,18 +707,71 @@ export default async function (fastify: FastifyInstance, opts: any) {
       
       recommendations.fastestResponse = fastestResponse;
       
-      // AVOID NOW: Models currently performing poorly (bottom 20% + any with major issues)
-      const totalModels = activeModels.length;
-      const worstModels = activeModels.slice(Math.max(0, totalModels - Math.floor(totalModels * 0.3))); // Bottom 30%
-      
+      // AVOID NOW: Actually smart avoidance based on real performance + cost analysis
       const avoidList = [];
-      for (const model of worstModels.slice(0, 3)) { // Show top 3 to avoid
+      
+      // 1. Find models with poor performance (score < 65) regardless of rank
+      const poorPerformers = activeModels.filter(model => model.displayScore < 65);
+      
+      // 2. Find expensive underperformers (high cost but mediocre performance)
+      const expensiveUnderperformers = activeModels.filter(model => {
+        const pricing = getModelPricing(model.name, model.vendor);
+        const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
+        const rank = activeModels.findIndex(m => m.id === model.id) + 1;
+        
+        // Expensive (>$5/1M tokens) AND not in top 10
+        return estimatedCost > 5 && rank > 10;
+      });
+      
+      // 3. Add models that are explicitly marked as unavailable/offline in database
+      // Don't rely on benchmark timestamps since benchmarks can take 30+ minutes per model
+      const allDbModels = await db.select().from(models);
+      for (const dbModel of allDbModels) {
+        // Check for explicit unavailability indicators
+        const isExplicitlyUnavailable = 
+          dbModel.version === 'unavailable' || 
+          (dbModel.notes && dbModel.notes.toLowerCase().includes('unavailable')) ||
+          (dbModel.notes && dbModel.notes.toLowerCase().includes('offline')) ||
+          // xAI models without API key
+          (dbModel.vendor === 'xai' && (!process.env.XAI_API_KEY || process.env.XAI_API_KEY === 'your_xai_key_here'));
+        
+        if (isExplicitlyUnavailable) {
+          const pricing = getModelPricing(dbModel.name, dbModel.vendor);
+          const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
+          
+          let reason = 'Currently unavailable';
+          if (dbModel.vendor === 'xai' && (!process.env.XAI_API_KEY || process.env.XAI_API_KEY === 'your_xai_key_here')) {
+            reason = 'No API key configured';
+          } else if (dbModel.notes) {
+            reason = 'Marked as unavailable';
+          }
+          
+          if (estimatedCost > 5) {
+            reason += ` • Expensive at $${estimatedCost.toFixed(2)}/1M tokens`;
+          }
+          
+          avoidList.push({
+            id: dbModel.id,
+            name: dbModel.name,
+            provider: dbModel.vendor,
+            rank: 'UNAVAILABLE',
+            score: 'N/A',
+            reason
+          });
+        }
+      }
+      
+      // Add poor performers
+      for (const model of poorPerformers.slice(0, 2)) {
         const rank = activeModels.findIndex(m => m.id === model.id) + 1;
         const pricing = getModelPricing(model.name, model.vendor);
         const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
         
-        let reason = `Ranked #${rank} of ${totalModels} models`;
-        if (estimatedCost > 5) {
+        let reason = `Poor performance: ${model.displayScore} points`;
+        if (rank > activeModels.length * 0.7) {
+          reason += ` • Ranked #${rank} of ${activeModels.length}`;
+        }
+        if (estimatedCost > 3) {
           reason += ` • Expensive at $${estimatedCost.toFixed(2)}/1M tokens`;
         }
         
@@ -712,6 +784,28 @@ export default async function (fastify: FastifyInstance, opts: any) {
           reason
         });
       }
+      
+      // Add expensive underperformers
+      for (const model of expensiveUnderperformers.slice(0, 2)) {
+        // Don't double-add models already in poor performers
+        if (avoidList.some(a => a.id === model.id)) continue;
+        
+        const rank = activeModels.findIndex(m => m.id === model.id) + 1;
+        const pricing = getModelPricing(model.name, model.vendor);
+        const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
+        
+        avoidList.push({
+          id: model.id,
+          name: model.name,
+          provider: model.vendor,
+          rank,
+          score: model.displayScore,
+          reason: `Ranked #${rank} of ${activeModels.length} models • Expensive at $${estimatedCost.toFixed(2)}/1M tokens`
+        });
+      }
+      
+      // Limit to top 3 most problematic
+      avoidList.splice(3);
       
       recommendations.avoidNow = avoidList;
       

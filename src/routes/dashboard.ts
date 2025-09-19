@@ -344,11 +344,14 @@ export async function getModelScoresFromDB() {
     const modelScores = [];
     
     for (const model of allModels) {
-      // Get latest score - this will automatically prioritize user test results due to newer timestamps
+      // Get latest hourly score for 7axis/speed benchmarks
       const latestScore = await db
         .select()
         .from(scores)
-        .where(eq(scores.modelId, model.id))
+        .where(and(
+          eq(scores.modelId, model.id),
+          eq(scores.suite, 'hourly')  // Only get hourly benchmark scores for 7axis/speed
+        ))
         .orderBy(desc(scores.ts))
         .limit(1);
       

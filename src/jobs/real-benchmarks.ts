@@ -1633,16 +1633,8 @@ export async function benchmarkModel(
   }
   
   if (!adapter) {
-    // No API key - record N/A with sentinel values
-    await db.insert(scores).values({
-      modelId: model.id,
-      ts: batchTimestamp || new Date().toISOString(),
-      stupidScore: -999,  // Sentinel value indicates N/A
-      axes: { correctness: -1, complexity: -1, codeQuality: -1, efficiency: -1, stability: -1, edgeCases: -1, debugging: -1 },
-      cusum: 0.0,
-      note: `N/A - ${model.vendor} API not configured`
-    });
-    console.log(`⚠️ ${model.name}: N/A (no ${model.vendor} API key)`);
+    // No API key - preserve old score, don't update timestamp
+    console.log(`⚠️ ${model.name}: API not configured (preserving last known score)`);
     return;
   }
 
@@ -2025,7 +2017,8 @@ export async function benchmarkModel(
     stupidScore: finalScore,
     axes: agg,
     cusum: 0.0,
-    note
+    note,
+    suite: 'hourly'  // Explicitly set suite for dashboard compatibility
   });
 
   // FIX 6: Apply drift detection after inserting the new score
