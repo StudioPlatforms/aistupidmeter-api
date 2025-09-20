@@ -369,9 +369,9 @@ export async function getModelScoresFromDB() {
         const score = latestScore[0];
         const stat = stats[0];
         
-        // FIXED: Check if model is unavailable - properly handle all sentinel values for N/A
+        // FIXED: Check if current score is unavailable due to API issues
         // Note: Calibrating models should still show scores, just with a calibrating note
-        const isUnavailable = score.stupidScore === null || 
+        const isCurrentlyUnavailable = score.stupidScore === null || 
             score.stupidScore === -777 ||  // Adapter failure
             score.stupidScore === -888 ||  // All tasks failed
             score.stupidScore === -999 ||  // No API key
@@ -381,30 +381,84 @@ export async function getModelScoresFromDB() {
             (model.notes && model.notes.includes('Unavailable')) ||
             (score.note && (score.note.includes('N/A') || score.note.includes('unavailable')) && !score.note.includes('Calibrating'));
         
-        if (isUnavailable) {
-          // Calculate isNew field based on createdAt timestamp
-          const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-          const createdAt = model.createdAt ? new Date(model.createdAt) : null;
-          const isNew = createdAt && createdAt > sevenDaysAgo;
+        if (isCurrentlyUnavailable) {
+          // NEW: Instead of showing N/A, try to find the last valid score
+          const lastValidScore = await db
+            .select()
+            .from(scores)
+            .where(and(
+              eq(scores.modelId, model.id),
+              sql`${scores.stupidScore} >= 0`  // Only valid scores
+            ))
+            .orderBy(desc(scores.ts))
+            .limit(1);
 
-          modelScores.push({
-            id: String(model.id),
-            name: model.name,
-            provider: model.vendor,
-            currentScore: 'unavailable',
-            trend: 'unavailable',
-            lastUpdated: (score.ts && score.ts !== 'CURRENT_TIMESTAMP') ? new Date(score.ts) : new Date(),
-            status: 'unavailable',
-            weeklyBest: 'unavailable',
-            weeklyWorst: 'unavailable',
-            avgLatency: 0,
-            tasksCompleted: 0,
-            totalTasks: 0,
-            unavailableReason: score.note || model.notes || 'API key not configured',
-            history: [], // Empty history for unavailable models
-            isNew: isNew
-          });
-          continue;
+          if (lastValidScore.length > 0) {
+            // Found a last valid score - use it but show the actual timestamp
+            const validScore = lastValidScore[0];
+            
+            // Convert the last valid score using same logic
+            let lastValidDisplayScore: number;
+            const isUserTest = validScore.note && validScore.note.includes('User API key test');
+            
+            if (isUserTest) {
+              lastValidDisplayScore = Math.max(0, Math.min(100, Math.round(100 - (validScore.stupidScore / 0.8))));
+            } else if (Math.abs(validScore.stupidScore) < 1 && validScore.stupidScore !== 0) {
+              lastValidDisplayScore = Math.max(0, Math.min(100, Math.round(50 - validScore.stupidScore * 100)));
+            } else {
+              lastValidDisplayScore = Math.max(0, Math.min(100, Math.round(validScore.stupidScore)));
+            }
+
+            // Calculate isNew field based on createdAt timestamp
+            const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+            const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+            const isNew = createdAt && createdAt > sevenDaysAgo;
+
+            // Show last valid score with actual timestamp when it was recorded
+            modelScores.push({
+              id: String(model.id),
+              name: model.name,
+              provider: model.vendor,
+              currentScore: lastValidDisplayScore,  // Show last valid score instead of N/A
+              trend: 'unavailable',  // Can't calculate trend without recent data
+              lastUpdated: new Date(validScore.ts || new Date()),  // Show when last valid score was recorded
+              status: 'warning',  // Show as warning since it's stale data
+              weeklyBest: lastValidDisplayScore,
+              weeklyWorst: lastValidDisplayScore,
+              avgLatency: 0,
+              tasksCompleted: 0,
+              totalTasks: 0,
+              unavailableReason: `Last recorded: ${score.note || 'API temporarily unavailable'}`,
+              history: [], // Empty history for stale models
+              isNew: isNew,
+              isStale: true  // Flag to indicate this is old data
+            });
+            continue;
+          } else {
+            // No valid score found at all - show as truly unavailable
+            const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+            const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+            const isNew = createdAt && createdAt > sevenDaysAgo;
+
+            modelScores.push({
+              id: String(model.id),
+              name: model.name,
+              provider: model.vendor,
+              currentScore: 'unavailable',
+              trend: 'unavailable',
+              lastUpdated: (score.ts && score.ts !== 'CURRENT_TIMESTAMP') ? new Date(score.ts) : new Date(),
+              status: 'unavailable',
+              weeklyBest: 'unavailable',
+              weeklyWorst: 'unavailable',
+              avgLatency: 0,
+              tasksCompleted: 0,
+              totalTasks: 0,
+              unavailableReason: score.note || model.notes || 'No valid scores available',
+              history: [], // Empty history for unavailable models
+              isNew: isNew
+            });
+            continue;
+          }
         }
         
         // Convert score to display format (0-100 where higher is better)
