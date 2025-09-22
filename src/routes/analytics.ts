@@ -533,7 +533,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
         if (latestScore.length > 0) {
           const lastUpdate = new Date(latestScore[0].ts || new Date());
           const minutesAgo = (Date.now() - lastUpdate.getTime()) / (1000 * 60);
-          const isActive = minutesAgo <= 60; // Only recommend models updated in last hour
+          const isActive = minutesAgo <= 360; // Allow models updated in last 6 hours (more realistic for benchmark frequency)
           
           if (isActive) {
             activeModels.push({ 
@@ -707,11 +707,11 @@ export default async function (fastify: FastifyInstance, opts: any) {
       
       recommendations.fastestResponse = fastestResponse;
       
-      // AVOID NOW: Actually smart avoidance based on real performance + cost analysis
+      // AVOID NOW: Consistent with ticker tape logic - show models performing poorly
       const avoidList = [];
       
-      // 1. Find models with poor performance (score < 65) regardless of rank
-      const poorPerformers = activeModels.filter(model => model.displayScore < 65);
+      // 1. Find models with poor performance (score < 55) - SAME THRESHOLD AS TICKER TAPE
+      const poorPerformers = activeModels.filter(model => model.displayScore <= 55);
       
       // 2. Find expensive underperformers (high cost but mediocre performance)
       const expensiveUnderperformers = activeModels.filter(model => {
@@ -719,8 +719,8 @@ export default async function (fastify: FastifyInstance, opts: any) {
         const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
         const rank = activeModels.findIndex(m => m.id === model.id) + 1;
         
-        // Expensive (>$5/1M tokens) AND not in top 10
-        return estimatedCost > 5 && rank > 10;
+        // Expensive (>$3/1M tokens) AND not in top 15 - more lenient to catch more issues
+        return estimatedCost > 3 && rank > 15;
       });
       
       // 3. Add models that are explicitly marked as unavailable/offline in database

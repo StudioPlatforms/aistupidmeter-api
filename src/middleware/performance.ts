@@ -31,7 +31,7 @@ interface PerformanceMetrics {
 class PerformanceMonitor {
   private metrics: PerformanceMetrics;
   private requestTimes: number[] = [];
-  private activeRequests = new Set<string>();
+  private activeRequests = new Map<string, number>(); // Store request ID and timestamp
   
   constructor() {
     this.metrics = {
@@ -62,6 +62,9 @@ class PerformanceMonitor {
 
     // Update metrics every 5 seconds
     setInterval(() => this.updateMetrics(), 5000);
+    
+    // Cleanup stale requests every 30 seconds
+    setInterval(() => this.cleanupStaleRequests(), 30000);
   }
 
   private updateMetrics() {
@@ -93,6 +96,23 @@ class PerformanceMonitor {
       : 0;
   }
 
+  private cleanupStaleRequests() {
+    const now = Date.now();
+    const staleThreshold = 60000; // 60 seconds
+    let cleanedCount = 0;
+
+    for (const [requestId, timestamp] of this.activeRequests.entries()) {
+      if (now - timestamp > staleThreshold) {
+        this.activeRequests.delete(requestId);
+        cleanedCount++;
+      }
+    }
+
+    if (cleanedCount > 0) {
+      console.warn(`🧹 Cleaned up ${cleanedCount} stale requests from active tracking`);
+    }
+  }
+
   recordRequest(responseTime: number, isError: boolean = false) {
     this.metrics.requests.total++;
     this.requestTimes.push(responseTime);
@@ -122,7 +142,7 @@ class PerformanceMonitor {
   }
 
   addActiveRequest(requestId: string) {
-    this.activeRequests.add(requestId);
+    this.activeRequests.set(requestId, Date.now());
   }
 
   removeActiveRequest(requestId: string) {
@@ -154,7 +174,7 @@ class PerformanceMonitor {
 // Global performance monitor instance
 const performanceMonitor = new PerformanceMonitor();
 
-// Request tracking middleware with circuit breaker
+// Request tracking middleware with circuit breaker and improved cleanup
 export async function performanceMiddleware(
   request: FastifyRequest, 
   reply: FastifyReply
@@ -188,8 +208,8 @@ export async function performanceMiddleware(
     return;
   }
 
-  // Add response time tracking
-  reply.raw.on('finish', () => {
+  // Cleanup function to ensure request is always removed
+  const cleanup = () => {
     const responseTime = Date.now() - startTime;
     const isError = reply.statusCode >= 400;
     
@@ -200,7 +220,22 @@ export async function performanceMiddleware(
     if (responseTime > 2000) {
       console.warn(`Slow request: ${request.method} ${request.url} - ${responseTime}ms`);
     }
-  });
+  };
+
+  // Multiple event listeners to ensure cleanup happens
+  reply.raw.on('finish', cleanup);
+  reply.raw.on('close', cleanup);
+  reply.raw.on('error', cleanup);
+  
+  // Timeout-based cleanup as a safety net (30 seconds)
+  const timeoutId = setTimeout(() => {
+    console.warn(`Request timeout cleanup: ${request.method} ${request.url} - ${requestId}`);
+    performanceMonitor.removeActiveRequest(requestId);
+  }, 30000);
+  
+  // Clear timeout when request completes normally
+  reply.raw.on('finish', () => clearTimeout(timeoutId));
+  reply.raw.on('close', () => clearTimeout(timeoutId));
 }
 
 // Cache-aware middleware that tracks cache performance
