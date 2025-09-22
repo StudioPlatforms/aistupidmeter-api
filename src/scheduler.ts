@@ -14,15 +14,15 @@ export function startBenchmarkScheduler() {
   console.log(`🚀 Starting benchmark scheduler at ${new Date().toISOString()}`);
   
   // Validate cron expressions
-  const hourlyValid = cron.validate('0 * * * *');
+  const fourHourlyValid = cron.validate('0 */4 * * *');
   const dailyValid = cron.validate('0 3 * * *');
-  console.log(`📋 Hourly cron expression validation: ${hourlyValid ? '✅ Valid' : '❌ Invalid'}`);
+  console.log(`📋 4-hourly cron expression validation: ${fourHourlyValid ? '✅ Valid' : '❌ Invalid'}`);
   console.log(`📋 Daily cron expression validation: ${dailyValid ? '✅ Valid' : '❌ Invalid'}`);
 
-  // REGULAR (Speed) BENCHMARKS: Run every hour at the top of the hour (:00)
-  hourlyScheduledTask = cron.schedule('0 * * * *', async () => {
+  // REGULAR (Speed) BENCHMARKS: Run every 4 hours at the top of the hour (:00)
+  hourlyScheduledTask = cron.schedule('0 */4 * * *', async () => {
     const now = new Date();
-    console.log(`🔔 Hourly benchmark cron triggered at ${now.toISOString()}`);
+    console.log(`🔔 4-hourly benchmark cron triggered at ${now.toISOString()}`);
     
     if (isRunning) {
       console.log('⏸️ Hourly benchmark already running, skipping this cycle...');
@@ -32,7 +32,7 @@ export function startBenchmarkScheduler() {
     try {
       isRunning = true;
       lastRunTime = now;
-      console.log(`🕐 ${now.toISOString()} - Starting scheduled hourly benchmark run...`);
+      console.log(`🕐 ${now.toISOString()} - Starting scheduled 4-hourly benchmark run...`);
       console.log(`📊 Previous run was: ${lastRunTime ? lastRunTime.toISOString() : 'Never'}`);
       
       // Run regular benchmarks only
@@ -40,7 +40,7 @@ export function startBenchmarkScheduler() {
       await runRealBenchmarks();
       console.log(`✅ Regular benchmarks completed`);
       
-      // OPTIMIZED: Use hot cache refresh for regular hourly updates (90% faster)
+      // OPTIMIZED: Use hot cache refresh for regular 4-hourly updates (90% faster)
       console.log(`🔥 Refreshing HOT cache after benchmark completion (popular combinations only)...`);
       const cacheResult = await refreshHotCache();
       console.log(`✅ HOT cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms (${cacheResult.type})`);
@@ -65,9 +65,9 @@ export function startBenchmarkScheduler() {
         console.warn('Cache verification failed:', error);
       }
       
-      console.log(`✅ ${new Date().toISOString()} - Hourly benchmark run completed successfully`);
+      console.log(`✅ ${new Date().toISOString()} - 4-hourly benchmark run completed successfully`);
     } catch (error) {
-      console.error(`❌ ${new Date().toISOString()} - Hourly benchmark run failed:`, error);
+      console.error(`❌ ${new Date().toISOString()} - 4-hourly benchmark run failed:`, error);
     } finally {
       isRunning = false;
     }
@@ -116,26 +116,34 @@ export function startBenchmarkScheduler() {
   });
 
   console.log('📅 Scheduler started with separate timing:');
-  console.log('   • Regular (speed) benchmarks: Every hour at :00');
+  console.log('   • Regular (speed) benchmarks: Every 4 hours at :00 (00:00, 04:00, 08:00, 12:00, 16:00, 20:00)');
   console.log('   • Deep (reasoning) benchmarks: Daily at 3:00 AM Berlin time');
   console.log(`🌍 Scheduler timezone: Europe/Berlin`);
-  console.log(`⚡ Hourly scheduler active: ${hourlyScheduledTask ? hourlyScheduledTask.getStatus() : 'Unknown'}`);
+  console.log(`⚡ 4-hourly scheduler active: ${hourlyScheduledTask ? hourlyScheduledTask.getStatus() : 'Unknown'}`);
   console.log(`⚡ Daily scheduler active: ${dailyScheduledTask ? dailyScheduledTask.getStatus() : 'Unknown'}`);
   
   // Log next scheduled times for both
   const now = new Date();
+  const currentHour = now.getHours();
   const minutes = now.getMinutes();
-  let nextMinute = 0;
-  let nextHour = now.getHours();
   
-  // If we're past the top of the hour, schedule for next hour
-  if (minutes > 0) {
-    nextHour = (nextHour + 1) % 24;
+  // Calculate next 4-hour interval (0, 4, 8, 12, 16, 20)
+  const fourHourSlots = [0, 4, 8, 12, 16, 20];
+  let nextFourHourSlot = fourHourSlots.find(slot => slot > currentHour || (slot === currentHour && minutes === 0));
+  
+  if (!nextFourHourSlot) {
+    // If no slot found today, use first slot tomorrow
+    nextFourHourSlot = fourHourSlots[0];
   }
   
-  const nextHourlyRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), nextHour, nextMinute, 0, 0);
-  console.log(`⏰ Next hourly run: ${nextHourlyRun.toLocaleString('en-US', { timeZone: 'Europe/Berlin' })}`);
-  console.log(`📊 Time until next hourly: ${Math.ceil((nextHourlyRun.getTime() - now.getTime()) / 60000)} minutes`);
+  const nextFourHourlyRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), nextFourHourSlot, 0, 0, 0);
+  if (nextFourHourSlot <= currentHour) {
+    // Next run is tomorrow
+    nextFourHourlyRun.setDate(nextFourHourlyRun.getDate() + 1);
+  }
+  
+  console.log(`⏰ Next 4-hourly run: ${nextFourHourlyRun.toLocaleString('en-US', { timeZone: 'Europe/Berlin' })}`);
+  console.log(`📊 Time until next 4-hourly: ${Math.ceil((nextFourHourlyRun.getTime() - now.getTime()) / 60000)} minutes`);
   
   // Calculate next daily run (3 AM)
   const nextDailyRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 3, 0, 0, 0);
@@ -181,14 +189,22 @@ export function startBenchmarkScheduler() {
 
 export function getBenchmarkStatus() {
   const now = new Date();
+  const currentHour = now.getHours();
   const minutes = now.getMinutes();
   
-  // Next hourly run
-  let nextHourlyRun: Date;
-  if (minutes === 0) {
-    nextHourlyRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0, 0);
-  } else {
-    nextHourlyRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0, 0);
+  // Calculate next 4-hour interval (0, 4, 8, 12, 16, 20)
+  const fourHourSlots = [0, 4, 8, 12, 16, 20];
+  let nextFourHourSlot = fourHourSlots.find(slot => slot > currentHour || (slot === currentHour && minutes === 0));
+  
+  if (!nextFourHourSlot) {
+    // If no slot found today, use first slot tomorrow
+    nextFourHourSlot = fourHourSlots[0];
+  }
+  
+  const nextFourHourlyRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), nextFourHourSlot, 0, 0, 0);
+  if (nextFourHourSlot <= currentHour) {
+    // Next run is tomorrow
+    nextFourHourlyRun.setDate(nextFourHourlyRun.getDate() + 1);
   }
   
   // Next daily run (3 AM)
@@ -199,12 +215,12 @@ export function getBenchmarkStatus() {
   
   return {
     isRunning: isRunning || isDeepRunning,
-    isHourlyRunning: isRunning,
+    isHourlyRunning: isRunning, // Keep for compatibility (now represents 4-hourly)
     isDeepRunning: isDeepRunning,
-    nextScheduledRun: nextHourlyRun, // Regular benchmarks for compatibility
-    nextHourlyRun: nextHourlyRun,
+    nextScheduledRun: nextFourHourlyRun, // Regular benchmarks for compatibility
+    nextHourlyRun: nextFourHourlyRun, // Keep name for compatibility (now 4-hourly)
     nextDeepRun: nextDailyRun,
-    minutesUntilNext: Math.ceil((nextHourlyRun.getTime() - now.getTime()) / 60000),
+    minutesUntilNext: Math.ceil((nextFourHourlyRun.getTime() - now.getTime()) / 60000),
     hoursUntilDeepRun: Math.ceil((nextDailyRun.getTime() - now.getTime()) / (1000 * 60 * 60))
   };
 }
