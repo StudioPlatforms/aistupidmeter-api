@@ -1,14 +1,18 @@
 import cron from 'node-cron';
 import { runRealBenchmarks } from './jobs/real-benchmarks';
 import { runDeepBenchmarks, isDeepBenchmarkActive } from './deepbench/index';
+import { runToolBenchmarks } from './jobs/tool-benchmarks';
 import { refreshAllCache, refreshHotCache } from './cache/dashboard-cache';
 
 let isRunning = false;
 let isDeepRunning = false;
+let isToolRunning = false;
 let lastRunTime: Date | null = null;
 let lastDeepRunTime: Date | null = null;
+let lastToolRunTime: Date | null = null;
 let hourlyScheduledTask: any = null;
 let dailyScheduledTask: any = null;
+let toolScheduledTask: any = null;
 
 export function startBenchmarkScheduler() {
   console.log(`🚀 Starting benchmark scheduler at ${new Date().toISOString()}`);
@@ -115,12 +119,54 @@ export function startBenchmarkScheduler() {
     timezone: 'Europe/Berlin'
   });
 
+  // TOOL (Tooling) BENCHMARKS: Run daily at 4:00 AM Berlin time (after deep benchmarks)
+  toolScheduledTask = cron.schedule('0 4 * * *', async () => {
+    const now = new Date();
+    const berlinTime = now.toLocaleString('en-US', { timeZone: 'Europe/Berlin' });
+    console.log(`🔔 Daily tool benchmark cron triggered at ${now.toISOString()} (Berlin: ${berlinTime})`);
+    console.log(`🔧 This should create scores with suite='tooling' for TOOLING mode display`);
+    
+    if (isToolRunning) {
+      console.log('⏸️ Tool benchmark already running, skipping this cycle...');
+      return;
+    }
+
+    try {
+      isToolRunning = true;
+      lastToolRunTime = now;
+      console.log(`🕐 ${now.toISOString()} - Starting scheduled daily tool benchmark run...`);
+      console.log(`🔧 Previous tool run was: ${lastToolRunTime ? lastToolRunTime.toISOString() : 'Never'}`);
+      console.log(`📊 TOOLING mode timestamps will update after this completes`);
+      
+      // Run tool benchmarks only
+      console.log(`🔧 Running tool calling benchmarks...`);
+      await runToolBenchmarks();
+      console.log(`✅ Tool benchmarks completed - TOOLING mode should now show ~1-2 hours ago`);
+      
+      // Refresh cache after tool benchmark completion
+      console.log(`🔄 Refreshing dashboard cache after tool benchmark completion...`);
+      const cacheResult = await refreshAllCache();
+      console.log(`✅ Cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms`);
+      
+      console.log(`✅ ${new Date().toISOString()} - Daily tool benchmark run completed successfully`);
+    } catch (error) {
+      console.error(`❌ ${new Date().toISOString()} - Daily tool benchmark run failed:`, error);
+      console.error(`🚨 This will affect TOOLING mode display until next successful run`);
+    } finally {
+      isToolRunning = false;
+    }
+  }, {
+    timezone: 'Europe/Berlin'
+  });
+
   console.log('📅 Scheduler started with separate timing:');
   console.log('   • Regular (speed) benchmarks: Every 4 hours at :00 (00:00, 04:00, 08:00, 12:00, 16:00, 20:00)');
   console.log('   • Deep (reasoning) benchmarks: Daily at 3:00 AM Berlin time');
+  console.log('   • Tool (tooling) benchmarks: Daily at 4:00 AM Berlin time');
   console.log(`🌍 Scheduler timezone: Europe/Berlin`);
   console.log(`⚡ 4-hourly scheduler active: ${hourlyScheduledTask ? hourlyScheduledTask.getStatus() : 'Unknown'}`);
   console.log(`⚡ Daily scheduler active: ${dailyScheduledTask ? dailyScheduledTask.getStatus() : 'Unknown'}`);
+  console.log(`⚡ Tool scheduler active: ${toolScheduledTask ? toolScheduledTask.getStatus() : 'Unknown'}`);
   
   // Log next scheduled times for both
   const now = new Date();

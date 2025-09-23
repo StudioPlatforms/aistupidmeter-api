@@ -53,6 +53,133 @@ async function getCombinedScore(modelId: number): Promise<number | null> {
   }
 }
 
+// Helper function to get tooling scores ONLY (100% tooling, 0% speed/reasoning)
+export async function getToolingScores() {
+  try {
+    // Only get models marked for live rankings (using raw SQL to avoid type issues)
+    const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
+    const modelScores = [];
+    
+    for (const model of allModels) {
+      // STRICT: Get ONLY tooling scores (suite = 'tooling'), never hourly or deep scores
+      const latestToolingScore = await db
+        .select()
+        .from(scores)
+        .where(and(
+          eq(scores.modelId, model.id), 
+          eq(scores.suite, 'tooling')  // CRITICAL: Only tooling benchmarks
+        ))
+        .orderBy(desc(scores.ts))
+        .limit(1);
+
+      const toolingScore = latestToolingScore[0];
+      
+      // STRICT: Use ONLY tooling scores - NO fallback to hourly/deep data
+      let toolingDisplayScore: number | 'unavailable' = 'unavailable';
+      let isAvailable = false;
+      let lastUpdatedTime = new Date(); // Default to current time if no data
+      
+      // Check if we have a valid tooling score
+      if (toolingScore && toolingScore.stupidScore !== null && toolingScore.stupidScore >= 0) {
+        // Pure tooling score
+        toolingDisplayScore = Math.max(0, Math.min(100, Math.round(toolingScore.stupidScore)));
+        isAvailable = true;
+        lastUpdatedTime = new Date(toolingScore.ts || new Date());
+        
+        // VERIFICATION: Log the tooling score timestamp to debug
+        const hoursAgo = (Date.now() - lastUpdatedTime.getTime()) / (1000 * 60 * 60);
+        console.log(`🔧 TOOLING MODE: ${model.name} tooling score from ${hoursAgo.toFixed(1)} hours ago (should be ~1-25 hours if running daily at 4 AM)`);
+      }
+      
+      // If no tooling data available, mark as unavailable
+      if (!isAvailable) {
+        console.log(`❌ TOOLING MODE: ${model.name} has no tooling benchmark data - marking unavailable`);
+        
+        // Calculate isNew field based on createdAt timestamp
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+        const isNew = createdAt && createdAt > sevenDaysAgo;
+
+        modelScores.push({
+          id: String(model.id),
+          name: model.name,
+          provider: model.vendor,
+          currentScore: 'unavailable',
+          trend: 'unavailable',
+          lastUpdated: new Date(), // Use current time for unavailable models
+          status: 'unavailable',
+          unavailableReason: 'No tooling benchmark data available',
+          history: [],
+          isNew: isNew
+        });
+        continue;
+      }
+
+      // Calculate trend using ONLY tooling scores (never hourly/deep)
+      const recentToolingScores = await db
+        .select()
+        .from(scores)
+        .where(and(
+          eq(scores.modelId, model.id), 
+          eq(scores.suite, 'tooling')  // CRITICAL: Only tooling benchmarks
+        ))
+        .orderBy(desc(scores.ts))
+        .limit(10); // Tooling benchmarks are daily, so 10 = ~10 days of data
+
+      let trend = 'stable';
+      if (recentToolingScores.length >= 3) {
+        const validScores = recentToolingScores.filter(s => s.stupidScore !== null && s.stupidScore >= 0);
+        if (validScores.length >= 3) {
+          const latest = Math.round(validScores[0].stupidScore);
+          const oldest = Math.round(validScores[validScores.length - 1].stupidScore);
+          const trendValue = latest - oldest;
+          
+          if (trendValue > 5) trend = 'up';
+          else if (trendValue < -5) trend = 'down';
+        }
+      }
+
+      // Determine status based on tooling score
+      let status = 'excellent';
+      if (typeof toolingDisplayScore === 'number') {
+        if (toolingDisplayScore < 40) status = 'critical';
+        else if (toolingDisplayScore < 65) status = 'warning';
+        else if (toolingDisplayScore < 80) status = 'good';
+      }
+
+      // CRITICAL: Use ONLY the tooling score timestamp - this should be from 4 AM daily run
+      const lastUpdated = lastUpdatedTime;
+
+      // Calculate isNew field based on createdAt timestamp
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+      const isNew = createdAt && createdAt > sevenDaysAgo;
+
+      modelScores.push({
+        id: String(model.id),
+        name: model.name,
+        provider: model.vendor,
+        currentScore: toolingDisplayScore,
+        trend,
+        lastUpdated, // This should show timestamps from daily 4 AM runs, not hourly
+        status,
+        history: recentToolingScores.filter(h => h.stupidScore !== null && h.stupidScore >= 0).slice(0, 10).map(h => ({
+          stupidScore: h.stupidScore,
+          displayScore: Math.max(0, Math.min(100, Math.round(h.stupidScore))),
+          timestamp: h.ts
+        })),
+        isNew: isNew
+      });
+    }
+    
+    console.log(`🔧 TOOLING MODE: Returned ${modelScores.length} models with tooling scores`);
+    return modelScores;
+  } catch (error) {
+    console.error('Error fetching tooling scores:', error);
+    return [];
+  }
+}
+
 // Helper function to get deep reasoning scores ONLY (100% deep reasoning, 0% speed)
 export async function getDeepReasoningScores() {
   try {

@@ -8,7 +8,11 @@ export const models = sqliteTable('models', {
   notes: text('notes'),
   createdAt: text('created_at').default('CURRENT_TIMESTAMP'), // Track when model was first discovered
   displayName: text('display_name'), // Optional friendly display name for confusing model names
-  showInRankings: integer('show_in_rankings', { mode: 'boolean' }).default(false) // Whether to show in live rankings
+  showInRankings: integer('show_in_rankings', { mode: 'boolean' }).default(false), // Whether to show in live rankings
+  // Tool calling capabilities
+  supportsToolCalling: integer('supports_tool_calling', { mode: 'boolean' }).default(false),
+  maxToolsPerCall: integer('max_tools_per_call').default(10),
+  toolCallReliability: real('tool_call_reliability').default(0.0) // 0.0-1.0 based on historical performance
 });
 
 export const tasks = sqliteTable('tasks', {
@@ -81,7 +85,7 @@ export const scores = sqliteTable('scores', {
   axes: text('axes', { mode: 'json' }).$type<Record<string, number>>().notNull(),
   cusum: real('cusum').notNull(),
   note: text('note'),
-  suite: text('suite').default('hourly') // 'hourly' | 'deep'
+  suite: text('suite').default('hourly') // 'hourly' | 'deep' | 'tooling'
 });
 
 // Deep session tracking
@@ -129,4 +133,76 @@ export const visitorStats = sqliteTable('visitor_stats', {
   uniqueVisitors: integer('unique_visitors').notNull().default(0),
   topPages: text('top_pages', { mode: 'json' }).$type<Record<string, number>>().notNull(),
   topCountries: text('top_countries', { mode: 'json' }).$type<Record<string, number>>().notNull()
+});
+
+// Tool calling benchmark tables
+export const tool_tasks = sqliteTable('tool_tasks', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  slug: text('slug').notNull().unique(), // e.g., "file_operations_easy"
+  name: text('name').notNull(), // Human readable name
+  description: text('description').notNull(),
+  difficulty: text('difficulty').notNull(), // 'easy' | 'medium' | 'hard'
+  category: text('category').notNull(), // 'file_ops' | 'code_analysis' | 'system_interaction' | 'web_scraping' | 'data_processing' | 'multi_step'
+  systemPrompt: text('system_prompt').notNull(),
+  initialMessage: text('initial_message').notNull(),
+  successCriteria: text('success_criteria', { mode: 'json' }).$type<Record<string, any>>().notNull(),
+  maxTurns: integer('max_turns').default(10),
+  timeoutMs: integer('timeout_ms').default(300000), // 5 minutes default
+  sandboxConfig: text('sandbox_config', { mode: 'json' }).$type<Record<string, any>>().notNull(),
+  expectedTools: text('expected_tools', { mode: 'json' }).$type<string[]>().notNull(),
+  createdAt: text('created_at').default('CURRENT_TIMESTAMP'),
+  active: integer('active', { mode: 'boolean' }).default(true)
+});
+
+export const tool_sessions = sqliteTable('tool_sessions', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  modelId: integer('model_id').references(() => models.id).notNull(),
+  taskId: integer('task_id').references(() => tool_tasks.id).notNull(),
+  taskSlug: text('task_slug').notNull(), // For efficient per-model+task querying
+  ts: text('ts').default('CURRENT_TIMESTAMP'),
+  status: text('status').notNull(), // 'running' | 'completed' | 'failed' | 'timeout'
+  turns: integer('turns').notNull().default(0),
+  totalLatencyMs: integer('total_latency_ms').notNull().default(0),
+  totalTokensIn: integer('total_tokens_in').notNull().default(0),
+  totalTokensOut: integer('total_tokens_out').notNull().default(0),
+  toolCallsCount: integer('tool_calls_count').notNull().default(0),
+  successfulToolCalls: integer('successful_tool_calls').notNull().default(0),
+  failedToolCalls: integer('failed_tool_calls').notNull().default(0),
+  passed: integer('passed', { mode: 'boolean' }).notNull().default(false),
+  finalScore: real('final_score').notNull().default(0.0),
+  conversationData: text('conversation_data', { mode: 'json' }).$type<any[]>(),
+  toolCallHistory: text('tool_call_history', { mode: 'json' }).$type<any[]>(),
+  errorLog: text('error_log', { mode: 'json' }).$type<string[]>(),
+  sandboxId: text('sandbox_id'), // Docker container ID for cleanup
+  completedAt: text('completed_at')
+});
+
+export const tool_metrics = sqliteTable('tool_metrics', {
+  sessionId: integer('session_id').references(() => tool_sessions.id).primaryKey(),
+  // Core tool calling metrics (0.0-1.0)
+  toolSelection: real('tool_selection').notNull(), // How well model chooses appropriate tools
+  parameterAccuracy: real('parameter_accuracy').notNull(), // Correctness of tool parameters
+  errorHandling: real('error_handling').notNull(), // Recovery from tool failures
+  taskCompletion: real('task_completion').notNull(), // Overall task success
+  efficiency: real('efficiency').notNull(), // Minimal tool calls to achieve goal
+  contextAwareness: real('context_awareness').notNull(), // Using previous tool results effectively
+  safetyCompliance: real('safety_compliance').notNull(), // Avoiding dangerous operations
+  // Derived metrics
+  avgToolLatency: real('avg_tool_latency').notNull().default(0.0),
+  toolDiversity: real('tool_diversity').notNull().default(0.0), // Variety of tools used
+  conversationFlow: real('conversation_flow').notNull().default(0.0) // Natural interaction patterns
+});
+
+// Tool call execution logs for detailed analysis
+export const tool_executions = sqliteTable('tool_executions', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  sessionId: integer('session_id').references(() => tool_sessions.id).notNull(),
+  turnNumber: integer('turn_number').notNull(),
+  toolName: text('tool_name').notNull(),
+  parameters: text('parameters', { mode: 'json' }).$type<Record<string, any>>().notNull(),
+  result: text('result').notNull(),
+  success: integer('success', { mode: 'boolean' }).notNull(),
+  latencyMs: integer('latency_ms').notNull(),
+  errorMessage: text('error_message'),
+  ts: text('ts').default('CURRENT_TIMESTAMP')
 });

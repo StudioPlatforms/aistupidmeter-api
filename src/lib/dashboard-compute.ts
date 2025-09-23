@@ -1,12 +1,12 @@
 // apps/api/src/lib/dashboard-compute.ts
-import { getCombinedModelScores, getDeepReasoningScores, getModelScoresFromDB, getHistoricalModelScores, sortModelScores } from '../routes/dashboard';
+import { getCombinedModelScores, getDeepReasoningScores, getToolingScores, getModelScoresFromDB, getHistoricalModelScores, sortModelScores } from '../routes/dashboard';
 import { db } from '../db/index';
 import { models, scores } from '../db/schema';
 import { eq, desc, sql, and, gte } from 'drizzle-orm';
 
 // single, canonical compute used everywhere
 export type PeriodKey = 'latest' | '24h' | '7d' | '1m';
-export type SortKey = 'combined' | 'reasoning' | 'speed' | '7axis' | 'price';
+export type SortKey = 'combined' | 'reasoning' | 'speed' | '7axis' | 'tooling' | 'price';
 
 export async function computeDashboardScores(period: PeriodKey, sortBy: SortKey) {
   let modelScores: any[];
@@ -22,6 +22,10 @@ export async function computeDashboardScores(period: PeriodKey, sortBy: SortKey)
   } else if (sortBy === 'speed' || sortBy === '7axis') {
     modelScores = period === 'latest'
       ? await getModelScoresFromDB()
+      : await getHistoricalModelScores(period);
+  } else if (sortBy === 'tooling') {
+    modelScores = period === 'latest'
+      ? await getToolingScores()
       : await getHistoricalModelScores(period);
   } else if (sortBy === 'price') {
     // exactly same as raw route: compute first, sort inside sortModelScores
@@ -43,7 +47,7 @@ export async function computeDashboardScores(period: PeriodKey, sortBy: SortKey)
 // Get combined score for a single model (shared across dashboard, analytics, batch)
 export async function getSingleModelCombinedScore(modelId: number): Promise<number | null> {
   try {
-    // Get latest hourly score
+    // Get latest hourly score (7-axis/speed)
     const latestHourlyScore = await db
       .select()
       .from(scores)
@@ -51,7 +55,7 @@ export async function getSingleModelCombinedScore(modelId: number): Promise<numb
       .orderBy(desc(scores.ts))
       .limit(1);
 
-    // Get latest deep score  
+    // Get latest deep score (reasoning)
     const latestDeepScore = await db
       .select()
       .from(scores)
@@ -59,33 +63,48 @@ export async function getSingleModelCombinedScore(modelId: number): Promise<numb
       .orderBy(desc(scores.ts))
       .limit(1);
 
+    // Get latest tooling score
+    const latestToolingScore = await db
+      .select()
+      .from(scores)
+      .where(and(eq(scores.modelId, modelId), eq(scores.suite, 'tooling')))
+      .orderBy(desc(scores.ts))
+      .limit(1);
+
     const hourlyScore = latestHourlyScore[0];
     const deepScore = latestDeepScore[0];
+    const toolingScore = latestToolingScore[0];
     
-    // Combine scores with 70% hourly, 30% deep weighting
+    // Combine scores with 50% hourly, 25% deep, 25% tooling weighting
     let combinedScore: number | null = null;
     
-    if (hourlyScore && hourlyScore.stupidScore !== null && hourlyScore.stupidScore >= 0) {
-      let hourlyDisplay = Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore)));
-      
-      if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
-        // Has both scores - combine them normally
-        let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
-        combinedScore = Math.round(hourlyDisplay * 0.7 + deepDisplay * 0.3);
-      } else {
-        // Only hourly score - apply incomplete data penalty
-        // Assume missing deep score is average (50) and apply 15% penalty for incomplete data
-        const assumedDeepScore = 50;
-        const preliminaryScore = Math.round(hourlyDisplay * 0.7 + assumedDeepScore * 0.3);
-        combinedScore = Math.round(preliminaryScore * 0.85); // 15% penalty for incomplete benchmark data
-      }
-    } else if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
-      // Only deep score - apply incomplete data penalty  
-      // Assume missing hourly score is average (50) and apply 15% penalty for incomplete data
-      const assumedHourlyScore = 50;
-      let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
-      const preliminaryScore = Math.round(assumedHourlyScore * 0.7 + deepDisplay * 0.3);
-      combinedScore = Math.round(preliminaryScore * 0.85); // 15% penalty for incomplete benchmark data
+    // Count how many scores we have
+    const hasHourly = hourlyScore && hourlyScore.stupidScore !== null && hourlyScore.stupidScore >= 0;
+    const hasDeep = deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0;
+    const hasTooling = toolingScore && toolingScore.stupidScore !== null && toolingScore.stupidScore >= 0;
+    
+    const scoreCount = (hasHourly ? 1 : 0) + (hasDeep ? 1 : 0) + (hasTooling ? 1 : 0);
+    
+    if (scoreCount === 0) {
+      return null; // No scores available
+    }
+    
+    // Get display scores (0-100 range)
+    const hourlyDisplay = hasHourly ? Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore))) : 50;
+    const deepDisplay = hasDeep ? Math.max(0, Math.min(100, Math.round(deepScore.stupidScore))) : 50;
+    const toolingDisplay = hasTooling ? Math.max(0, Math.min(100, Math.round(toolingScore.stupidScore))) : 50;
+    
+    if (scoreCount === 3) {
+      // All three scores available - full weighting
+      combinedScore = Math.round(hourlyDisplay * 0.5 + deepDisplay * 0.25 + toolingDisplay * 0.25);
+    } else if (scoreCount === 2) {
+      // Two scores available - apply 10% penalty for incomplete data
+      const preliminaryScore = Math.round(hourlyDisplay * 0.5 + deepDisplay * 0.25 + toolingDisplay * 0.25);
+      combinedScore = Math.round(preliminaryScore * 0.9); // 10% penalty for missing one benchmark
+    } else {
+      // Only one score available - apply 20% penalty for incomplete data
+      const preliminaryScore = Math.round(hourlyDisplay * 0.5 + deepDisplay * 0.25 + toolingDisplay * 0.25);
+      combinedScore = Math.round(preliminaryScore * 0.8); // 20% penalty for missing two benchmarks
     }
     
     return combinedScore;

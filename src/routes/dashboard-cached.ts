@@ -17,6 +17,57 @@ export default async function (fastify: FastifyInstance, opts: any) {
     try {
       const result = await getCachedData(period, sortBy, analyticsPeriod);
       
+      // CRITICAL FIX: Fetch analytics data directly since it's not cached
+      // This ensures Intelligence Center gets real-time degradation data
+      console.log('🔄 Fetching real-time analytics data for Intelligence Center...');
+      
+      let analyticsData = {
+        degradations: [],
+        recommendations: null,
+        transparencyMetrics: null,
+        providerReliability: []
+      };
+      
+      try {
+        // Make direct HTTP calls to analytics endpoints to get real-time data
+        const baseUrl = process.env.NODE_ENV === 'production' ? 'https://aistupidlevel.info' : 'http://localhost:4000';
+        
+        const [degradationsRes, recommendationsRes, reliabilityRes, transparencyRes] = await Promise.all([
+          fetch(`${baseUrl}/analytics/degradations?period=${analyticsPeriod}&sortBy=${sortBy}`),
+          fetch(`${baseUrl}/analytics/recommendations?period=${analyticsPeriod}&sortBy=${sortBy}`),
+          fetch(`${baseUrl}/analytics/provider-reliability?period=${analyticsPeriod}&sortBy=${sortBy}`),
+          fetch(`${baseUrl}/analytics/transparency?period=${analyticsPeriod}`)
+        ]);
+        
+        // Parse responses with proper typing
+        const [degradationsData, recommendationsData, reliabilityData, transparencyData] = await Promise.all([
+          degradationsRes.json().catch(() => ({ success: false })) as Promise<any>,
+          recommendationsRes.json().catch(() => ({ success: false })) as Promise<any>,
+          reliabilityRes.json().catch(() => ({ success: false })) as Promise<any>,
+          transparencyRes.json().catch(() => ({ success: false })) as Promise<any>
+        ]);
+        
+        // Extract successful data with type safety
+        if (degradationsData && degradationsData.success && degradationsData.data) {
+          analyticsData.degradations = degradationsData.data;
+        }
+        if (recommendationsData && recommendationsData.success && recommendationsData.data) {
+          analyticsData.recommendations = recommendationsData.data;
+        }
+        if (reliabilityData && reliabilityData.success && reliabilityData.data) {
+          analyticsData.providerReliability = reliabilityData.data;
+        }
+        if (transparencyData && transparencyData.success && transparencyData.data) {
+          analyticsData.transparencyMetrics = transparencyData.data;
+        }
+        
+        console.log(`✅ Analytics data fetched: ${analyticsData.degradations.length} degradations, ${analyticsData.providerReliability.length} providers`);
+        
+      } catch (analyticsError) {
+        console.error('⚠️ Failed to fetch analytics data:', analyticsError);
+        // Continue with empty analytics data rather than failing the whole request
+      }
+      
       // allow short CDN cache if you want; otherwise keep private
       reply.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
       
@@ -24,14 +75,21 @@ export default async function (fastify: FastifyInstance, opts: any) {
         success: true,
         cached: result.cached,
         data: {
-          modelScores: result.data
+          modelScores: result.data,
+          alerts: [], // TODO: Add alerts if needed
+          globalIndex: null, // TODO: Add global index if needed
+          degradations: analyticsData.degradations,
+          recommendations: analyticsData.recommendations,
+          transparencyMetrics: analyticsData.transparencyMetrics,
+          providerReliability: analyticsData.providerReliability
         },
         meta: {
           period,
           sortBy,
           analyticsPeriod,
           cachedAt: new Date().toISOString(),
-          cached: result.cached
+          cached: result.cached,
+          analyticsRealTime: true
         }
       };
 

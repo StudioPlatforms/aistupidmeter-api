@@ -83,222 +83,92 @@ function getModelPricing(modelName: string, provider: string): { input: number; 
 
 export default async function (fastify: FastifyInstance, opts: any) {
   
-  // Degradation detection endpoint - now supports sortBy for mode-specific degradation detection
+  // Degradation detection endpoint - simplified using leaderboard data
   fastify.get('/degradations', async (request) => {
     const { period = 'latest', sortBy = 'combined' } = request.query as { 
       period?: 'latest' | '24h' | '7d' | '1m';
       sortBy?: 'combined' | 'reasoning' | 'speed' | 'price';
     };
     try {
-      const allModels = await db.select().from(models);
+      console.log(`🚨 Degradation Detection: Using leaderboard data for ${sortBy} mode`);
+      
+      // Get current leaderboard - same data source as dashboard
+      const { computeDashboardScores } = await import('../lib/dashboard-compute');
+      const currentLeaderboard = await computeDashboardScores('latest', sortBy);
+      if (!currentLeaderboard || currentLeaderboard.length === 0) {
+        console.log('❌ No leaderboard data available for degradations');
+        return { success: false, error: 'No leaderboard data available' };
+      }
+      
+      console.log(`📊 Got ${currentLeaderboard.length} models from leaderboard for degradation analysis`);
+      
       const degradations = [];
       
-      for (const model of allModels) {
-        // Skip unavailable models
-        const isUnavailable = model.version === 'unavailable' || 
-          (model.notes && model.notes.includes('Unavailable')) ||
-          (model.vendor === 'xai' && (!process.env.XAI_API_KEY || process.env.XAI_API_KEY === 'your_xai_key_here'));
+      // Historical degradation detection using each model's past performance
+      for (const model of currentLeaderboard) {
+        let currentScore = model.score;
         
-        if (isUnavailable) continue;
-        
-        // ENHANCED LATEST LOGIC: For LATEST period, use 24H degradation detection
-        // This ensures LATEST shows all current issues and warnings
-        let historicalScores, baselineHours, minBaselinePoints, minRecentPoints;
-        
-        if (period === 'latest') {
-          // For LATEST: Use 24H logic to show all current degradations and warnings
-          // Users expect LATEST to be the most comprehensive and actionable view
-          const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-          historicalScores = await db
+        // CRITICAL FIX: Handle null scores from leaderboard
+        if (currentScore === null || currentScore === undefined) {
+          console.log(`⚠️ ${model.name} has null score from leaderboard, trying to get actual score...`);
+          
+          // Try to get the actual latest score from database
+          const latestScore = await db
             .select()
             .from(scores)
-            .where(
-              and(
-                eq(scores.modelId, model.id),
-                gte(scores.ts, twentyFourHoursAgo.toISOString())
-              )
-            )
-            .orderBy(desc(scores.ts));
-          baselineHours = 12; // Same as 24H: Last 12h vs previous 12h
-          minBaselinePoints = 3; // Same requirements as 24H
-          minRecentPoints = 2; // Same requirements as 24H
-        } else {
-          // For specific periods: Use period-appropriate data and baseline logic
-          const periodStartDate = getDateRangeFromPeriod(period);
-          historicalScores = await db
-            .select()
-            .from(scores)
-            .where(
-              and(
-                eq(scores.modelId, model.id),
-                gte(scores.ts, periodStartDate.toISOString())
-              )
-            )
-            .orderBy(desc(scores.ts));
+            .where(eq(scores.modelId, model.id))
+            .orderBy(desc(scores.ts))
+            .limit(1);
           
-          // Period-specific baseline hours
-          if (period === '24h') {
-            baselineHours = 12; // Last 12h vs previous 12h
-            minBaselinePoints = 3;
-            minRecentPoints = 2;
-          } else if (period === '7d') {
-            baselineHours = 24; // Last 24h vs previous days
-            minBaselinePoints = 5;
-            minRecentPoints = 3;
-          } else { // 1m
-            baselineHours = 72; // Last 3 days vs previous weeks
-            minBaselinePoints = 10;
-            minRecentPoints = 5;
-          }
-        }
-        
-        if (historicalScores.length < (minBaselinePoints + minRecentPoints)) continue;
-        
-        // Calculate baseline using period-appropriate logic
-        const baselineThreshold = new Date(Date.now() - baselineHours * 60 * 60 * 1000);
-        const baselineScores = historicalScores.filter(s => 
-          new Date(s.ts || new Date()).getTime() < baselineThreshold.getTime()
-        );
-        const recentScores = historicalScores.filter(s => 
-          new Date(s.ts || new Date()).getTime() >= baselineThreshold.getTime()
-        );
-        
-        // Need substantial baseline and recent data
-        if (baselineScores.length < minBaselinePoints || recentScores.length < minRecentPoints) continue;
-        
-        // Calculate statistics - filter out sentinel values
-        const validBaselineValues = baselineScores
-          .map(s => s.stupidScore)
-          .filter(score => score !== -777 && score !== -888 && score !== -999 && score !== null && score !== -100);
-        const validRecentValues = recentScores
-          .map(s => s.stupidScore)
-          .filter(score => score !== -777 && score !== -888 && score !== -999 && score !== null && score !== -100);
-        
-        if (validBaselineValues.length < 3 || validRecentValues.length < 2) continue;
-        
-        const baselineMean = validBaselineValues.reduce((a, b) => a + b, 0) / validBaselineValues.length;
-        const baselineStdDev = calculateStdDev(validBaselineValues);
-        
-        // CRITICAL FIX: Use mode-specific scores for degradation detection
-        let currentDisplayScore: number;
-        let baselineDisplayScore: number;
-        let latestRawScore = historicalScores[0].stupidScore;
-        
-        if (sortBy === 'combined') {
-          // Use combined score for COMBINED mode (70% hourly + 30% deep)
-          const currentCombinedScore = await getSingleModelCombinedScore(model.id);
-          if (currentCombinedScore !== null) {
-            currentDisplayScore = currentCombinedScore;
-            console.log(`🔍 Degradation check for ${model.name} in COMBINED mode: ${currentCombinedScore}`);
-            
-            // FIXED: Calculate proper baseline from BASELINE PERIOD scores, not recent period
-            const convertedBaselineScores = validBaselineValues.map(raw => {
-              if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
-                return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
-              } else {
-                return Math.max(0, Math.min(100, Math.round(raw)));
-              }
-            });
-            baselineDisplayScore = Math.round(convertedBaselineScores.reduce((sum, s) => sum + s, 0) / convertedBaselineScores.length);
-          } else {
-            // Fallback to converted scores if combined not available
-            currentDisplayScore = (() => {
-              if (Math.abs(latestRawScore) < 1 || Math.abs(latestRawScore) > 100) {
-                return Math.max(0, Math.min(100, Math.round(50 - latestRawScore * 100)));
-              } else {
-                return Math.max(0, Math.min(100, Math.round(latestRawScore)));
-              }
-            })();
-            
-            // FIXED: Use actual baseline period scores, not the same calculation method
-            const convertedBaselineScores = validBaselineValues.map(raw => {
-              if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
-                return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
-              } else {
-                return Math.max(0, Math.min(100, Math.round(raw)));
-              }
-            });
-            baselineDisplayScore = Math.round(convertedBaselineScores.reduce((sum, s) => sum + s, 0) / convertedBaselineScores.length);
-          }
-        } else {
-          // For other modes (reasoning, speed, price), use converted historical scores
-          currentDisplayScore = (() => {
-            if (Math.abs(latestRawScore) < 1 || Math.abs(latestRawScore) > 100) {
-              return Math.max(0, Math.min(100, Math.round(50 - latestRawScore * 100)));
-            } else {
-              return Math.max(0, Math.min(100, Math.round(latestRawScore)));
-            }
-          })();
-          
-          // FIXED: Use actual baseline period scores, not the same conversion of recent scores
-          const convertedBaselineScores = validBaselineValues.map(raw => {
+          if (latestScore.length > 0 && latestScore[0].stupidScore !== null) {
+            const raw = latestScore[0].stupidScore;
+            // Convert raw score to display score
             if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
-              return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
+              currentScore = Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
             } else {
-              return Math.max(0, Math.min(100, Math.round(raw)));
+              currentScore = Math.max(0, Math.min(100, Math.round(raw)));
             }
-          });
-          baselineDisplayScore = Math.round(convertedBaselineScores.reduce((sum, s) => sum + s, 0) / convertedBaselineScores.length);
-        }
-        
-        const zScore = calculateZScore(latestRawScore, baselineMean, baselineStdDev);
-        
-        // SIMPLIFIED DUAL WARNING SYSTEM:
-        // 1. DEGRADATION WARNINGS (performance drops from baseline)  
-        // 2. LOW PERFORMANCE WARNINGS (current scores under 60) - ALWAYS SHOW
-        
-        const scoreDrop = baselineDisplayScore - currentDisplayScore;
-        let degradationWarningAdded = false;
-        
-        // TYPE 1: DEGRADATION WARNINGS - More lenient criteria
-        if (baselineDisplayScore >= 30) {
-          // Require meaningful degradation: 10+ point drop OR significant statistical change
-          if ((scoreDrop >= 10 && currentDisplayScore < baselineDisplayScore * 0.85) || 
-              (Math.abs(zScore) > 2 && scoreDrop >= 5)) {
-            const dropPercentage = Math.round((scoreDrop / Math.max(1, baselineDisplayScore)) * 100);
-            const realDropPercentage = Math.max(1, Math.min(90, Math.abs(dropPercentage)));
-            
-            let severity = 'minor';
-            if (scoreDrop > 25 || currentDisplayScore < 40) severity = 'critical';
-            else if (scoreDrop > 15 || currentDisplayScore < 55) severity = 'major';
-            
-            degradations.push({
-              modelId: model.id,
-              modelName: model.name,
-              provider: model.vendor,
-              currentScore: currentDisplayScore,
-              baselineScore: baselineDisplayScore,
-              dropPercentage: realDropPercentage,
-              zScore: zScore.toFixed(2),
-              severity,
-              detectedAt: new Date(),
-              message: `Performance dropped ${realDropPercentage}% from baseline (${baselineDisplayScore} → ${currentDisplayScore})`,
-              type: 'degradation'
-            });
-            degradationWarningAdded = true;
+            console.log(`✅ ${model.name}: converted raw score ${raw} to display score ${currentScore}`);
+          } else {
+            console.log(`❌ ${model.name}: no valid score found, skipping`);
+            continue;
           }
         }
         
-        // TYPE 2: LOW PERFORMANCE WARNINGS - ALWAYS SHOW (not conditional on degradation warnings)
-        // This ensures users see warnings for ALL poorly performing models
-        if (currentDisplayScore < 60) {
-          // SIMPLIFIED and DIRECT warning system - no complex analysis needed
+        // ENHANCED DEGRADATION DETECTION: Multiple warning types
+        console.log(`🔍 Checking ${model.name}: currentScore=${currentScore}`);
+        
+        // Get historical data for trend analysis
+        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const historicalScores = await db
+          .select()
+          .from(scores)
+          .where(
+            and(
+              eq(scores.modelId, model.id),
+              gte(scores.ts, twentyFourHoursAgo.toISOString())
+            )
+          )
+          .orderBy(desc(scores.ts))
+          .limit(20);
+        
+        // 1. BASIC PERFORMANCE WARNINGS
+        if (currentScore < 60) {
           let severity = 'minor';
           let message = '';
           let warningType = 'low_performance';
           
-          // Simple and clear severity classification
-          if (currentDisplayScore < 40) {
+          if (currentScore < 45) {
             severity = 'critical';
-            message = `Critical performance: ${currentDisplayScore} points (well below acceptable threshold)`;
+            message = `Critical performance: ${currentScore} points (well below acceptable threshold)`;
             warningType = 'critical_failure';
-          } else if (currentDisplayScore < 50) {
-            severity = 'major';  
-            message = `Poor performance: ${currentDisplayScore} points (below 50 point threshold)`;
+          } else if (currentScore < 52) {
+            severity = 'major';
+            message = `Poor performance: ${currentScore} points (below 52 point threshold)`;
             warningType = 'poor_performance';
-          } else { // currentDisplayScore < 60
+          } else {
             severity = 'minor';
-            message = `Below average performance: ${currentDisplayScore} points (below 60 point threshold)`;
+            message = `Below average performance: ${currentScore} points (below 60 point threshold)`;
             warningType = 'below_average';
           }
           
@@ -306,27 +176,154 @@ export default async function (fastify: FastifyInstance, opts: any) {
           const pricing = getModelPricing(model.name, model.vendor);
           const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
           if (estimatedCost > 10) {
-            message += ` at $${estimatedCost.toFixed(2)}/1M tokens`;
-            if (severity === 'minor') severity = 'major'; // Upgrade severity for expensive poor performers
+            message += ` • Expensive at $${estimatedCost.toFixed(2)}/1M tokens`;
+            if (severity === 'minor') severity = 'major';
           }
           
-          // Only add if not already covered by degradation warning
-          if (!degradationWarningAdded) {
+          degradations.push({
+            modelId: model.id,
+            modelName: model.name,
+            provider: model.vendor,
+            currentScore: currentScore,
+            baselineScore: 65,
+            dropPercentage: Math.round(((65 - currentScore) / 65) * 100),
+            zScore: "0.00",
+            severity,
+            detectedAt: new Date(),
+            message,
+            type: warningType
+          });
+        }
+        
+        // 2. PERFORMANCE TREND WARNINGS (24h decline detection)
+        if (historicalScores.length >= 5) {
+          const validScores = historicalScores
+            .filter(s => s.stupidScore !== -777 && s.stupidScore !== -888 && s.stupidScore !== -999 && s.stupidScore !== -100)
+            .map(s => {
+              const raw = s.stupidScore;
+              if (Math.abs(raw) < 1 || Math.abs(raw) > 100) {
+                return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
+              } else {
+                return Math.max(0, Math.min(100, Math.round(raw)));
+              }
+            });
+          
+          if (validScores.length >= 5) {
+            const recentAvg = validScores.slice(0, 3).reduce((a, b) => a + b, 0) / 3;
+            const olderAvg = validScores.slice(-3).reduce((a, b) => a + b, 0) / 3;
+            const trendDrop = olderAvg - recentAvg;
+            const trendDropPct = olderAvg > 0 ? Math.round((trendDrop / olderAvg) * 100) : 0;
+            
+            // Detect significant 24h decline
+            if (trendDrop > 8 && trendDropPct > 12) {
+              degradations.push({
+                modelId: model.id,
+                modelName: model.name,
+                provider: model.vendor,
+                currentScore: Math.round(recentAvg),
+                baselineScore: Math.round(olderAvg),
+                dropPercentage: trendDropPct,
+                zScore: "0.00",
+                severity: trendDropPct > 25 ? 'major' : 'minor',
+                detectedAt: new Date(),
+                message: `⚠️ DECLINING TREND: Score dropped ${trendDropPct}% over last 24h (${Math.round(olderAvg)} → ${Math.round(recentAvg)})`,
+                type: 'declining_trend'
+              });
+            }
+            
+            // Detect unstable performance (high variance)
+            const variance = validScores.reduce((sum, score) => sum + Math.pow(score - recentAvg, 2), 0) / validScores.length;
+            const stdDev = Math.sqrt(variance);
+            
+            if (stdDev > 8) {
+              degradations.push({
+                modelId: model.id,
+                modelName: model.name,
+                provider: model.vendor,
+                currentScore: currentScore,
+                baselineScore: Math.round(recentAvg),
+                dropPercentage: 0,
+                zScore: "0.00",
+                severity: stdDev > 15 ? 'major' : 'minor',
+                detectedAt: new Date(),
+                message: `⚠️ UNSTABLE PERFORMANCE: High variance (±${Math.round(stdDev)} point swings)`,
+                type: 'unstable_performance'
+              });
+            }
+          }
+        }
+        
+        // 3. COST-PERFORMANCE ALERTS
+        const pricing = getModelPricing(model.name, model.vendor);
+        const estimatedCost = (pricing.input * 0.4) + (pricing.output * 0.6);
+        const rank = currentLeaderboard.findIndex(m => m.id === model.id) + 1;
+        
+        // Flag expensive models with poor rankings
+        if (estimatedCost > 15 && rank > 15) {
+          degradations.push({
+            modelId: model.id,
+            modelName: model.name,
+            provider: model.vendor,
+            currentScore: currentScore,
+            baselineScore: 75, // Expected for expensive models
+            dropPercentage: 0,
+            zScore: "0.00",
+            severity: estimatedCost > 50 ? 'major' : 'minor',
+            detectedAt: new Date(),
+            message: `💰 EXPENSIVE UNDERPERFORMER: $${estimatedCost.toFixed(2)}/1M tokens but ranked #${rank}/${currentLeaderboard.length}`,
+            type: 'expensive_underperformer'
+          });
+        }
+        
+        // 4. AVAILABILITY ISSUES (based on recent failed benchmarks)
+        const recentFailures = historicalScores.filter(s => 
+          s.stupidScore === -777 || s.stupidScore === -888 || s.stupidScore === -999 || s.stupidScore === -100
+        ).length;
+        
+        if (recentFailures > 2 && historicalScores.length > 5) {
+          const failureRate = Math.round((recentFailures / historicalScores.length) * 100);
+          degradations.push({
+            modelId: model.id,
+            modelName: model.name,
+            provider: model.vendor,
+            currentScore: currentScore,
+            baselineScore: 100, // Expected availability
+            dropPercentage: failureRate,
+            zScore: "0.00",
+            severity: failureRate > 40 ? 'critical' : 'major',
+            detectedAt: new Date(),
+            message: `🔴 SERVICE DISRUPTION: ${recentFailures} failed requests in last 24h (${failureRate}% failure rate)`,
+            type: 'service_disruption'
+          });
+        }
+        
+        // 5. REGIONAL/VERSION ALERTS (detect EU vs US performance differences)
+        if (model.name.toLowerCase().includes('-eu')) {
+          const usVersion = currentLeaderboard.find(m => 
+            m.name.toLowerCase().replace('-eu', '') === model.name.toLowerCase().replace('-eu', '')
+          );
+          
+          if (usVersion && usVersion.score && currentScore < usVersion.score - 5) {
+            const performanceGap = usVersion.score - currentScore;
+            const gapPercentage = Math.round((performanceGap / usVersion.score) * 100);
+            
             degradations.push({
               modelId: model.id,
               modelName: model.name,
               provider: model.vendor,
-              currentScore: currentDisplayScore,
-              baselineScore: baselineDisplayScore,
-              dropPercentage: 0, // No drop percentage for low-performance warnings
-              zScore: zScore.toFixed(2),
-              severity,
+              currentScore: currentScore,
+              baselineScore: usVersion.score,
+              dropPercentage: gapPercentage,
+              zScore: "0.00",
+              severity: gapPercentage > 15 ? 'major' : 'minor',
               detectedAt: new Date(),
-              message,
-              type: warningType
+              message: `🌍 REGIONAL VARIATION: EU version ${gapPercentage}% slower than US (${currentScore} vs ${usVersion.score})`,
+              type: 'regional_variation'
             });
           }
         }
+        
+        console.log(`🔍 Enhanced analysis complete for ${model.name}`);
       }
       
       // Sort by severity and z-score
@@ -510,7 +507,8 @@ export default async function (fastify: FastifyInstance, opts: any) {
       
       console.log(`📊 Got ${currentLeaderboard.length} models from LIVE RANKINGS data (${sortBy} mode)`);
       
-      // STEP 2: Filter to currently active models only (no offline/stale models in recommendations)
+      // STEP 2: Use all models from leaderboard - they're already filtered by the dashboard logic
+      // The dashboard endpoint already handles freshness and availability, so we don't need to re-filter
       interface ActiveModel {
         id: number;
         name: string;
@@ -520,35 +518,14 @@ export default async function (fastify: FastifyInstance, opts: any) {
         displayScore: number;
       }
       
-      const activeModels: ActiveModel[] = [];
-      for (const model of currentLeaderboard) {
-        // Check actual score timestamps for freshness
-        const latestScore = await db
-          .select()
-          .from(scores)
-          .where(eq(scores.modelId, model.id))
-          .orderBy(desc(scores.ts))
-          .limit(1);
-        
-        if (latestScore.length > 0) {
-          const lastUpdate = new Date(latestScore[0].ts || new Date());
-          const minutesAgo = (Date.now() - lastUpdate.getTime()) / (1000 * 60);
-          const isActive = minutesAgo <= 360; // Allow models updated in last 6 hours (more realistic for benchmark frequency)
-          
-          if (isActive) {
-            activeModels.push({ 
-              id: model.id,
-              name: model.name,
-              vendor: model.vendor,
-              score: model.score,
-              lastUpdate, 
-              displayScore: model.score 
-            });
-          } else {
-            console.log(`⚠️ Skipping ${model.name} - stale data (${Math.round(minutesAgo)}min ago)`);
-          }
-        }
-      }
+      const activeModels: ActiveModel[] = currentLeaderboard.map(model => ({
+        id: model.id,
+        name: model.name,
+        vendor: model.vendor,
+        score: model.score,
+        lastUpdate: new Date(), // Use current time since dashboard already filtered for freshness
+        displayScore: model.score
+      }));
       
       console.log(`✅ ${activeModels.length} active models available for recommendations`);
       
