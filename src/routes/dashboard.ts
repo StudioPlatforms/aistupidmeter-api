@@ -84,7 +84,13 @@ export async function getToolingScores() {
         // Pure tooling score
         toolingDisplayScore = Math.max(0, Math.min(100, Math.round(toolingScore.stupidScore)));
         isAvailable = true;
-        lastUpdatedTime = new Date(toolingScore.ts || new Date());
+        // CRITICAL FIX: Handle both actual timestamps and 'CURRENT_TIMESTAMP' string
+        if (toolingScore.ts && toolingScore.ts !== 'CURRENT_TIMESTAMP') {
+          lastUpdatedTime = new Date(toolingScore.ts);
+        } else {
+          // If timestamp is 'CURRENT_TIMESTAMP' or missing, use current time
+          lastUpdatedTime = new Date();
+        }
         
         // VERIFICATION: Log the tooling score timestamp to debug
         const hoursAgo = (Date.now() - lastUpdatedTime.getTime()) / (1000 * 60 * 60);
@@ -166,7 +172,7 @@ export async function getToolingScores() {
         history: recentToolingScores.filter(h => h.stupidScore !== null && h.stupidScore >= 0).slice(0, 10).map(h => ({
           stupidScore: h.stupidScore,
           displayScore: Math.max(0, Math.min(100, Math.round(h.stupidScore))),
-          timestamp: h.ts
+          timestamp: h.ts && h.ts !== 'CURRENT_TIMESTAMP' ? h.ts : new Date().toISOString()
         })),
         isNew: isNew
       });
@@ -803,7 +809,7 @@ export async function getModelScoresFromDB() {
 // Helper function to get historical model scores for specific time periods
 export async function getHistoricalModelScores(period: string) {
   try {
-    const allModels = await db.select().from(models);
+    const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
     const modelScores = [];
     
     // Calculate time threshold based on period
@@ -1179,7 +1185,7 @@ export function sortModelScores(modelScores: any[], sortBy: string) {
 // FIXED: Helper function to calculate all-time best performing model with strict criteria
 async function calculateAllTimeBestModel() {
   try {
-    const allModels = await db.select().from(models);
+    const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
     const modelRankings = [];
 
     for (const model of allModels) {
