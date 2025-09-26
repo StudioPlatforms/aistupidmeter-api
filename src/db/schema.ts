@@ -206,3 +206,23 @@ export const tool_executions = sqliteTable('tool_executions', {
   errorMessage: text('error_message'),
   ts: text('ts').default('CURRENT_TIMESTAMP')
 });
+
+// Incidents tracking table for service disruptions and performance issues
+export const incidents = sqliteTable('incidents', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  modelId: integer('model_id').references(() => models.id).notNull(),
+  provider: text('provider').notNull(),
+  incidentType: text('incident_type').notNull(), // 'service_disruption', 'performance_degradation', 'availability_issue'
+  severity: text('severity').notNull(), // 'minor', 'major', 'critical'
+  title: text('title').notNull(),
+  description: text('description').notNull(),
+  detectedAt: text('detected_at').notNull().default('CURRENT_TIMESTAMP'),
+  resolvedAt: text('resolved_at'), // NULL if still ongoing
+  durationMinutes: integer('duration_minutes'), // Calculated when resolved
+  failureRate: real('failure_rate'), // Percentage of failed requests
+  affectedRequests: integer('affected_requests').default(0),
+  recoveryTimeMinutes: real('recovery_time_minutes'), // Time to recover performance
+  metadata: text('metadata'), // JSON for additional context
+  createdAt: text('created_at').default('CURRENT_TIMESTAMP'),
+  updatedAt: text('updated_at').default('CURRENT_TIMESTAMP')
+});

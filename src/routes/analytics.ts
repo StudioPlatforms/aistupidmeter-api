@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { db } from '../db/index';
-import { models, scores, deep_sessions } from '../db/schema';
+import { models, scores, deep_sessions, incidents } from '../db/schema';
 import { eq, desc, sql, and, gte } from 'drizzle-orm';
 import { 
   getSingleModelCombinedScore, 
@@ -311,6 +311,9 @@ export default async function (fastify: FastifyInstance, opts: any) {
         
         if (recentFailures > 2 && historicalScores.length > 5) {
           const failureRate = Math.round((recentFailures / historicalScores.length) * 100);
+          const severity = failureRate > 40 ? 'critical' : 'major';
+          const message = `🔴 SERVICE DISRUPTION: ${recentFailures} failed requests in last 24h (${failureRate}% failure rate)`;
+          
           degradations.push({
             modelId: model.id,
             modelName: model.name,
@@ -319,11 +322,54 @@ export default async function (fastify: FastifyInstance, opts: any) {
             baselineScore: 100, // Expected availability
             dropPercentage: failureRate,
             zScore: "0.00",
-            severity: failureRate > 40 ? 'critical' : 'major',
+            severity,
             detectedAt: new Date(),
-            message: `🔴 SERVICE DISRUPTION: ${recentFailures} failed requests in last 24h (${failureRate}% failure rate)`,
+            message,
             type: 'service_disruption'
           });
+          
+          // RECORD AS INCIDENT: Service disruptions should be tracked as incidents
+          try {
+            // Check if we already have a recent incident for this model to avoid duplicates
+            const recentIncident = await db
+              .select()
+              .from(incidents)
+              .where(
+                and(
+                  eq(incidents.modelId, model.id),
+                  eq(incidents.incidentType, 'service_disruption'),
+                  gte(incidents.detectedAt, new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString()) // Last 6 hours
+                )
+              )
+              .limit(1);
+            
+            if (recentIncident.length === 0) {
+              // Create new incident record
+              await db.insert(incidents).values({
+                modelId: model.id,
+                provider: model.vendor,
+                incidentType: 'service_disruption',
+                severity,
+                title: `Service Disruption - ${model.name}`,
+                description: message,
+                detectedAt: new Date().toISOString(),
+                failureRate: failureRate,
+                affectedRequests: recentFailures,
+                metadata: JSON.stringify({
+                  totalRequests: historicalScores.length,
+                  failedRequests: recentFailures,
+                  timeWindow: '24h',
+                  detectionMethod: 'automated_monitoring'
+                })
+              });
+              
+              console.log(`📝 Recorded new service disruption incident for ${model.name} (${failureRate}% failure rate)`);
+            } else {
+              console.log(`ℹ️ Recent incident already exists for ${model.name}, skipping duplicate`);
+            }
+          } catch (error) {
+            console.error(`❌ Failed to record incident for ${model.name}:`, error);
+          }
         }
         
         // 5. REGIONAL/VERSION ALERTS (detect EU vs US performance differences)
@@ -449,23 +495,56 @@ export default async function (fastify: FastifyInstance, opts: any) {
         const performanceBonus = Math.min(15, topPerformingModels.length * 3); // Up to +15 for good models
         const activeBonus = Math.min(10, activeModels.length * 2); // Up to +10 for active models
         
-        // Calculate incidents from recent performance issues (simple approach)
-        let recentIncidents = 0;
-        const avgRecoveryHours = 1.2; // Realistic average
+        // Calculate ACTUAL incidents from database records
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        const actualIncidents = await db
+          .select()
+          .from(incidents)
+          .where(
+            and(
+              eq(incidents.provider, provider),
+              gte(incidents.detectedAt, thirtyDaysAgo.toISOString())
+            )
+          );
         
-        // Check for models that have been consistently underperforming
+        console.log(`📋 Found ${actualIncidents.length} actual incidents for ${provider} in last 30 days`);
+        
+        // Calculate recovery metrics from actual incident data
+        let avgRecoveryHours = 1.2; // Default
+        let totalRecoveryTime = 0;
+        let resolvedIncidents = 0;
+        
+        for (const incident of actualIncidents) {
+          if (incident.resolvedAt && incident.recoveryTimeMinutes) {
+            totalRecoveryTime += incident.recoveryTimeMinutes;
+            resolvedIncidents++;
+          }
+        }
+        
+        if (resolvedIncidents > 0) {
+          avgRecoveryHours = (totalRecoveryTime / resolvedIncidents) / 60; // Convert to hours
+        }
+        
+        // Count recent incidents (last 30 days)
+        let recentIncidents = actualIncidents.length;
+        
+        // Also check for models that have been consistently underperforming (legacy logic)
+        let performanceIncidents = 0;
         for (const model of providerModels.slice(0, 5)) { // Check top 5 models
           if (currentLeaderboard) {
             const modelInLeaderboard = currentLeaderboard.find(lm => lm.id === model.id);
             if (modelInLeaderboard) {
               const rank = currentLeaderboard.findIndex(m => m.id === model.id) + 1;
-              // If a major model is ranked very low, count as incident
+              // If a major model is ranked very low, count as performance incident
               if (rank > 50 && (model.name.includes('gpt-4') || model.name.includes('claude') || model.name.includes('gemini'))) {
-                recentIncidents += 0.2; // Partial incident for underperformance
+                performanceIncidents += 0.2; // Partial incident for underperformance
               }
             }
           }
         }
+        
+        // Combine actual incidents with performance-based incidents
+        const totalIncidents = recentIncidents + performanceIncidents;
         
         // Special handling for xAI if no API key
         let isAvailable = true;
@@ -476,7 +555,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
         }
         
         const finalTrustScore = Math.max(45, Math.min(95, 
-          baseTrustScore + performanceBonus + activeBonus - (recentIncidents * 5)
+          baseTrustScore + performanceBonus + activeBonus - (totalIncidents * 5)
         ));
         
         const incidentsPerMonth = Math.max(0, Math.round(recentIncidents));
