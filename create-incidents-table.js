@@ -3,8 +3,8 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 
-// Connect to the REAL database (same pattern as add-tool-tables.js)
-const dbPath = path.join(__dirname, 'data/stupid_meter.db');
+// Connect to the REAL database (same as health monitoring system)
+const dbPath = path.join(__dirname, 'data/benchmarks.db');
 const db = new Database(dbPath);
 
 console.log('🔧 Adding incidents table to production database...');
@@ -17,20 +17,17 @@ try {
   db.exec(`
     CREATE TABLE IF NOT EXISTS incidents (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      model_id INTEGER NOT NULL REFERENCES models(id),
       provider TEXT NOT NULL,
+      model_name TEXT,
       incident_type TEXT NOT NULL,
       severity TEXT NOT NULL,
-      title TEXT NOT NULL,
       description TEXT NOT NULL,
-      detected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      resolved_at TEXT,
-      duration_minutes INTEGER,
       failure_rate REAL,
-      affected_requests INTEGER DEFAULT 0,
-      recovery_time_minutes REAL,
+      total_requests INTEGER DEFAULT 0,
+      failed_requests INTEGER DEFAULT 0,
       metadata TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      resolved_at TEXT,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
   `);
@@ -38,8 +35,7 @@ try {
 
   // Create indexes for efficient queries
   db.exec('CREATE INDEX IF NOT EXISTS idx_incidents_provider ON incidents(provider);');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_incidents_detected_at ON incidents(detected_at);');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_incidents_model_id ON incidents(model_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_incidents_created_at ON incidents(created_at);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_incidents_type ON incidents(incident_type);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_incidents_severity ON incidents(severity);');
   console.log('✅ Created incidents table indexes');

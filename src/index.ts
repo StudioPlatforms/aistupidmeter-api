@@ -247,6 +247,7 @@ async function startServer() {
   // Register routes dynamically with better error handling
   const routesToTry = [
     { name: 'analytics', prefix: '/analytics' },
+    { name: 'health', prefix: '/health/providers' },
     { name: 'dashboard-cached', prefix: '/dashboard' },
     { name: 'models', prefix: '/models' },
     { name: 'benchmark', prefix: '/benchmark' },

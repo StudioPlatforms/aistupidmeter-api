@@ -3,16 +3,20 @@ import { runRealBenchmarks } from './jobs/real-benchmarks';
 import { runDeepBenchmarks, isDeepBenchmarkActive } from './deepbench/index';
 import { runToolBenchmarks } from './jobs/tool-benchmarks';
 import { refreshAllCache, refreshHotCache } from './cache/dashboard-cache';
+import { runHealthChecks, cleanupOldHealthData } from './jobs/health-monitor';
 
 let isRunning = false;
 let isDeepRunning = false;
 let isToolRunning = false;
+let isHealthRunning = false;
 let lastRunTime: Date | null = null;
 let lastDeepRunTime: Date | null = null;
 let lastToolRunTime: Date | null = null;
+let lastHealthRunTime: Date | null = null;
 let hourlyScheduledTask: any = null;
 let dailyScheduledTask: any = null;
 let toolScheduledTask: any = null;
+let healthScheduledTask: any = null;
 
 export function startBenchmarkScheduler() {
   console.log(`🚀 Starting benchmark scheduler at ${new Date().toISOString()}`);
@@ -20,8 +24,10 @@ export function startBenchmarkScheduler() {
   // Validate cron expressions
   const fourHourlyValid = cron.validate('0 */4 * * *');
   const dailyValid = cron.validate('0 3 * * *');
+  const healthValid = cron.validate('*/10 * * * *');
   console.log(`📋 4-hourly cron expression validation: ${fourHourlyValid ? '✅ Valid' : '❌ Invalid'}`);
   console.log(`📋 Daily cron expression validation: ${dailyValid ? '✅ Valid' : '❌ Invalid'}`);
+  console.log(`📋 Health check cron expression validation: ${healthValid ? '✅ Valid' : '❌ Invalid'}`);
 
   // REGULAR (Speed) BENCHMARKS: Run every 4 hours at the top of the hour (:00)
   hourlyScheduledTask = cron.schedule('0 */4 * * *', async () => {
@@ -159,14 +165,49 @@ export function startBenchmarkScheduler() {
     timezone: 'Europe/Berlin'
   });
 
+  // HEALTH MONITORING: Run every 10 minutes
+  healthScheduledTask = cron.schedule('*/10 * * * *', async () => {
+    const now = new Date();
+    console.log(`🏥 Health check cron triggered at ${now.toISOString()}`);
+    
+    if (isHealthRunning) {
+      console.log('⏸️ Health check already running, skipping this cycle...');
+      return;
+    }
+
+    try {
+      isHealthRunning = true;
+      lastHealthRunTime = now;
+      console.log(`🏥 Starting provider health checks...`);
+      
+      await runHealthChecks();
+      
+      // Cleanup old health data once per day (at midnight)
+      if (now.getHours() === 0 && now.getMinutes() < 10) {
+        console.log(`🧹 Running daily health data cleanup...`);
+        cleanupOldHealthData();
+      }
+      
+      console.log(`✅ Health checks completed successfully`);
+    } catch (error) {
+      console.error(`❌ Health check failed:`, error);
+    } finally {
+      isHealthRunning = false;
+    }
+  }, {
+    timezone: 'Europe/Berlin'
+  });
+
   console.log('📅 Scheduler started with separate timing:');
   console.log('   • Regular (speed) benchmarks: Every 4 hours at :00 (00:00, 04:00, 08:00, 12:00, 16:00, 20:00)');
   console.log('   • Deep (reasoning) benchmarks: Daily at 3:00 AM Berlin time');
   console.log('   • Tool (tooling) benchmarks: Daily at 4:00 AM Berlin time');
+  console.log('   • Health monitoring: Every 10 minutes');
   console.log(`🌍 Scheduler timezone: Europe/Berlin`);
   console.log(`⚡ 4-hourly scheduler active: ${hourlyScheduledTask ? hourlyScheduledTask.getStatus() : 'Unknown'}`);
   console.log(`⚡ Daily scheduler active: ${dailyScheduledTask ? dailyScheduledTask.getStatus() : 'Unknown'}`);
   console.log(`⚡ Tool scheduler active: ${toolScheduledTask ? toolScheduledTask.getStatus() : 'Unknown'}`);
+  console.log(`⚡ Health scheduler active: ${healthScheduledTask ? healthScheduledTask.getStatus() : 'Unknown'}`);
   
   // Log next scheduled times for both
   const now = new Date();
@@ -205,11 +246,31 @@ export function startBenchmarkScheduler() {
     console.log(`🕐 Scheduler status check at ${currentTime.toISOString()}`);
     console.log(`   - Hourly running: ${isRunning}`);
     console.log(`   - Deep running: ${isDeepRunning}`);
+    console.log(`   - Health running: ${isHealthRunning}`);
     console.log(`   - Last hourly run: ${lastRunTime ? lastRunTime.toISOString() : 'Never'}`);
     console.log(`   - Last deep run: ${lastDeepRunTime ? lastDeepRunTime.toISOString() : 'Never'}`);
+    console.log(`   - Last health run: ${lastHealthRunTime ? lastHealthRunTime.toISOString() : 'Never'}`);
     console.log(`   - Hourly scheduler active: ${hourlyScheduledTask ? hourlyScheduledTask.getStatus() : 'Unknown'}`);
     console.log(`   - Daily scheduler active: ${dailyScheduledTask ? dailyScheduledTask.getStatus() : 'Unknown'}`);
+    console.log(`   - Health scheduler active: ${healthScheduledTask ? healthScheduledTask.getStatus() : 'Unknown'}`);
   }, 5 * 60 * 1000);
+  
+  // Run initial health check after 30 seconds
+  setTimeout(async () => {
+    if (!isHealthRunning) {
+      console.log('🧪 Running initial health check to verify system...');
+      try {
+        isHealthRunning = true;
+        lastHealthRunTime = new Date();
+        await runHealthChecks();
+        console.log('✅ Initial health check completed successfully');
+      } catch (error) {
+        console.error('❌ Initial health check failed:', error);
+      } finally {
+        isHealthRunning = false;
+      }
+    }
+  }, 30 * 1000);
   
   // Test run for hourly benchmarks only
   setTimeout(async () => {
