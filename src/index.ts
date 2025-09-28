@@ -254,6 +254,7 @@ async function startServer() {
     { name: 'dashboard', prefix: '/dashboard' },
     { name: 'reference', prefix: '/reference' },
     { name: 'test-adapters', prefix: '/test-adapters' },
+    { name: 'test-adapters-stream', prefix: '/test-adapters' },
     { name: 'visitors', prefix: '/visitors' },
     { name: 'dashboard-batch', prefix: '/dashboard' }
   ];

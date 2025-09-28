@@ -347,7 +347,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
               // Create new incident record
               await db.insert(incidents).values({
                 modelId: model.id,
-                provider: model.vendor,
+                provider: model.vendor || 'unknown', // Handle cases where vendor might be undefined
                 incidentType: 'service_disruption',
                 severity,
                 title: `Service Disruption - ${model.name}`,
