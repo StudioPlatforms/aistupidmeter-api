@@ -1,5 +1,15 @@
 // apps/api/src/lib/dashboard-compute.ts
-import { getCombinedModelScores, getDeepReasoningScores, getToolingScores, getModelScoresFromDB, getHistoricalModelScores, sortModelScores } from '../routes/dashboard';
+import { 
+  getCombinedModelScores, 
+  getDeepReasoningScores, 
+  getToolingScores, 
+  getModelScoresFromDB, 
+  getHistoricalModelScores,
+  getHistoricalReasoningScores,
+  getHistoricalSpeedScores,
+  getHistoricalToolingScores,
+  sortModelScores 
+} from '../routes/dashboard';
 import { db } from '../db/index';
 import { models, scores } from '../db/schema';
 import { eq, desc, sql, and, gte } from 'drizzle-orm';
@@ -16,21 +26,24 @@ export async function computeDashboardScores(period: PeriodKey, sortBy: SortKey)
       ? await getCombinedModelScores()
       : await getHistoricalModelScores(period);
   } else if (sortBy === 'reasoning') {
+    // FIXED: Use mode-specific historical function for reasoning
     modelScores = period === 'latest'
       ? await getDeepReasoningScores()
-      : await getHistoricalModelScores(period);
+      : await getHistoricalReasoningScores(period);
   } else if (sortBy === 'speed' || sortBy === '7axis') {
+    // FIXED: Use mode-specific historical function for speed/7axis
     modelScores = period === 'latest'
       ? await getModelScoresFromDB()
-      : await getHistoricalModelScores(period);
+      : await getHistoricalSpeedScores(period);
   } else if (sortBy === 'tooling') {
+    // FIXED: Use mode-specific historical function for tooling
     modelScores = period === 'latest'
       ? await getToolingScores()
-      : await getHistoricalModelScores(period);
+      : await getHistoricalToolingScores(period);
   } else if (sortBy === 'price') {
     // exactly same as raw route: compute first, sort inside sortModelScores
     modelScores = period === 'latest'
-      ? await getCombinedModelScores() // or whatever the raw route currently does before price-sort
+      ? await getCombinedModelScores()
       : await getHistoricalModelScores(period);
   } else {
     modelScores = period === 'latest'

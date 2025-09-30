@@ -806,6 +806,379 @@ export async function getModelScoresFromDB() {
   }
 }
 
+// Helper function to get historical REASONING scores for specific time periods
+export async function getHistoricalReasoningScores(period: string) {
+  try {
+    const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
+    const modelScores = [];
+    
+    // Calculate time threshold based on period
+    let timeThreshold: Date;
+    let dataPoints: number;
+    
+    switch (period) {
+      case '24h':
+        timeThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        dataPoints = 24;
+        break;
+      case '7d':
+        timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        dataPoints = 168;
+        break;
+      case '1m':
+        timeThreshold = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        dataPoints = 720;
+        break;
+      default:
+        return await getDeepReasoningScores();
+    }
+
+    for (const model of allModels) {
+      // Get ONLY deep reasoning scores
+      const historicalScores = await db
+        .select()
+        .from(scores)
+        .where(and(
+          eq(scores.modelId, model.id),
+          eq(scores.suite, 'deep'),  // ONLY deep reasoning
+          gte(scores.ts, timeThreshold.toISOString())
+        ))
+        .orderBy(desc(scores.ts))
+        .limit(dataPoints);
+
+      const validHistoricalScores = historicalScores.filter(s => 
+        s.stupidScore !== null && s.stupidScore >= 0
+      );
+      
+      if (validHistoricalScores.length === 0) {
+        continue;
+      }
+
+      const convertedScores = validHistoricalScores.map(score => {
+        return Math.max(0, Math.min(100, Math.round(score.stupidScore)));
+      });
+
+      const periodAvg = Math.round(
+        convertedScores.reduce((sum, score) => sum + score, 0) / convertedScores.length
+      );
+      
+      let stability = 75;
+      if (convertedScores.length >= 3) {
+        const avgScore = convertedScores.reduce((sum, score) => sum + score, 0) / convertedScores.length;
+        const variance = convertedScores.reduce((sum, score) => {
+          const diff = score - avgScore;
+          return sum + (diff * diff);
+        }, 0) / convertedScores.length;
+        const stdDev = Math.sqrt(variance);
+        
+        if (stdDev <= 2) stability = Math.max(90, Math.min(95, Math.round(95 - (stdDev * 2.5))));
+        else if (stdDev <= 5) stability = Math.max(75, Math.min(90, Math.round(90 - ((stdDev - 2) * 5))));
+        else if (stdDev <= 10) stability = Math.max(45, Math.min(75, Math.round(75 - ((stdDev - 5) * 6))));
+        else if (stdDev <= 20) stability = Math.max(25, Math.min(45, Math.round(45 - ((stdDev - 10) * 2))));
+        else stability = Math.max(0, Math.min(25, Math.round(25 - ((stdDev - 20) * 0.5))));
+      }
+
+      const latest = convertedScores[0];
+      const oldest = convertedScores[convertedScores.length - 1];
+      const trendValue = latest - oldest;
+      
+      let trend = 'stable';
+      if (trendValue > 5) trend = 'up';
+      else if (trendValue < -5) trend = 'down';
+
+      const midIndex = Math.floor(convertedScores.length / 2);
+      const midScore = convertedScores.length > 1 ? convertedScores[midIndex] : latest;
+      const changeFromPrevious = Math.round(latest - midScore);
+
+      let status = 'excellent';
+      if (periodAvg < 40) status = 'critical';
+      else if (periodAvg < 65) status = 'warning';
+      else if (periodAvg < 80) status = 'good';
+
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+      const isNew = createdAt && createdAt > sevenDaysAgo;
+
+      modelScores.push({
+        id: String(model.id),
+        name: model.name,
+        provider: model.vendor,
+        currentScore: periodAvg,
+        trend,
+        lastUpdated: new Date(historicalScores[0].ts || new Date()),
+        status,
+        weeklyBest: Math.max(...convertedScores),
+        weeklyWorst: Math.min(...convertedScores),
+        avgLatency: 1000,
+        tasksCompleted: historicalScores.length,
+        totalTasks: historicalScores.length,
+        history: validHistoricalScores.slice(0, 24).map(h => ({
+          stupidScore: h.stupidScore,
+          timestamp: h.ts
+        })),
+        periodAvg,
+        stability: Math.round(stability),
+        changeFromPrevious,
+        dataPoints: validHistoricalScores.length,
+        isNew
+      });
+    }
+
+    return modelScores;
+  } catch (error) {
+    console.error('Error fetching historical reasoning scores:', error);
+    return await getDeepReasoningScores();
+  }
+}
+
+// Helper function to get historical SPEED/7AXIS scores for specific time periods
+export async function getHistoricalSpeedScores(period: string) {
+  try {
+    const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
+    const modelScores = [];
+    
+    let timeThreshold: Date;
+    let dataPoints: number;
+    
+    switch (period) {
+      case '24h':
+        timeThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        dataPoints = 24;
+        break;
+      case '7d':
+        timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        dataPoints = 168;
+        break;
+      case '1m':
+        timeThreshold = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        dataPoints = 720;
+        break;
+      default:
+        return await getModelScoresFromDB();
+    }
+
+    for (const model of allModels) {
+      // Get ONLY hourly/speed scores
+      const historicalScores = await db
+        .select()
+        .from(scores)
+        .where(and(
+          eq(scores.modelId, model.id),
+          eq(scores.suite, 'hourly'),  // ONLY hourly/speed
+          gte(scores.ts, timeThreshold.toISOString())
+        ))
+        .orderBy(desc(scores.ts))
+        .limit(dataPoints);
+
+      const validHistoricalScores = historicalScores.filter(s => 
+        s.stupidScore !== null && s.stupidScore >= 0
+      );
+      
+      if (validHistoricalScores.length === 0) {
+        continue;
+      }
+
+      const convertedScores = validHistoricalScores.map(score => {
+        return Math.max(0, Math.min(100, Math.round(score.stupidScore)));
+      });
+
+      const periodAvg = Math.round(
+        convertedScores.reduce((sum, score) => sum + score, 0) / convertedScores.length
+      );
+      
+      let stability = 75;
+      if (convertedScores.length >= 3) {
+        const avgScore = convertedScores.reduce((sum, score) => sum + score, 0) / convertedScores.length;
+        const variance = convertedScores.reduce((sum, score) => {
+          const diff = score - avgScore;
+          return sum + (diff * diff);
+        }, 0) / convertedScores.length;
+        const stdDev = Math.sqrt(variance);
+        
+        if (stdDev <= 2) stability = Math.max(90, Math.min(95, Math.round(95 - (stdDev * 2.5))));
+        else if (stdDev <= 5) stability = Math.max(75, Math.min(90, Math.round(90 - ((stdDev - 2) * 5))));
+        else if (stdDev <= 10) stability = Math.max(45, Math.min(75, Math.round(75 - ((stdDev - 5) * 6))));
+        else if (stdDev <= 20) stability = Math.max(25, Math.min(45, Math.round(45 - ((stdDev - 10) * 2))));
+        else stability = Math.max(0, Math.min(25, Math.round(25 - ((stdDev - 20) * 0.5))));
+      }
+
+      const latest = convertedScores[0];
+      const oldest = convertedScores[convertedScores.length - 1];
+      const trendValue = latest - oldest;
+      
+      let trend = 'stable';
+      if (trendValue > 5) trend = 'up';
+      else if (trendValue < -5) trend = 'down';
+
+      const midIndex = Math.floor(convertedScores.length / 2);
+      const midScore = convertedScores.length > 1 ? convertedScores[midIndex] : latest;
+      const changeFromPrevious = Math.round(latest - midScore);
+
+      let status = 'excellent';
+      if (periodAvg < 40) status = 'critical';
+      else if (periodAvg < 65) status = 'warning';
+      else if (periodAvg < 80) status = 'good';
+
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+      const isNew = createdAt && createdAt > sevenDaysAgo;
+
+      modelScores.push({
+        id: String(model.id),
+        name: model.name,
+        provider: model.vendor,
+        currentScore: periodAvg,
+        trend,
+        lastUpdated: new Date(historicalScores[0].ts || new Date()),
+        status,
+        weeklyBest: Math.max(...convertedScores),
+        weeklyWorst: Math.min(...convertedScores),
+        avgLatency: 1000,
+        tasksCompleted: historicalScores.length,
+        totalTasks: historicalScores.length,
+        history: validHistoricalScores.slice(0, 24).map(h => ({
+          stupidScore: h.stupidScore,
+          timestamp: h.ts
+        })),
+        periodAvg,
+        stability: Math.round(stability),
+        changeFromPrevious,
+        dataPoints: validHistoricalScores.length,
+        isNew
+      });
+    }
+
+    return modelScores;
+  } catch (error) {
+    console.error('Error fetching historical speed scores:', error);
+    return await getModelScoresFromDB();
+  }
+}
+
+// Helper function to get historical TOOLING scores for specific time periods
+export async function getHistoricalToolingScores(period: string) {
+  try {
+    const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
+    const modelScores = [];
+    
+    let timeThreshold: Date;
+    let dataPoints: number;
+    
+    switch (period) {
+      case '24h':
+        timeThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        dataPoints = 24;
+        break;
+      case '7d':
+        timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        dataPoints = 168;
+        break;
+      case '1m':
+        timeThreshold = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        dataPoints = 720;
+        break;
+      default:
+        return await getToolingScores();
+    }
+
+    for (const model of allModels) {
+      // Get ONLY tooling scores
+      const historicalScores = await db
+        .select()
+        .from(scores)
+        .where(and(
+          eq(scores.modelId, model.id),
+          eq(scores.suite, 'tooling'),  // ONLY tooling
+          gte(scores.ts, timeThreshold.toISOString())
+        ))
+        .orderBy(desc(scores.ts))
+        .limit(dataPoints);
+
+      const validHistoricalScores = historicalScores.filter(s => 
+        s.stupidScore !== null && s.stupidScore >= 0
+      );
+      
+      if (validHistoricalScores.length === 0) {
+        continue;
+      }
+
+      const convertedScores = validHistoricalScores.map(score => {
+        return Math.max(0, Math.min(100, Math.round(score.stupidScore)));
+      });
+
+      const periodAvg = Math.round(
+        convertedScores.reduce((sum, score) => sum + score, 0) / convertedScores.length
+      );
+      
+      let stability = 75;
+      if (convertedScores.length >= 3) {
+        const avgScore = convertedScores.reduce((sum, score) => sum + score, 0) / convertedScores.length;
+        const variance = convertedScores.reduce((sum, score) => {
+          const diff = score - avgScore;
+          return sum + (diff * diff);
+        }, 0) / convertedScores.length;
+        const stdDev = Math.sqrt(variance);
+        
+        if (stdDev <= 2) stability = Math.max(90, Math.min(95, Math.round(95 - (stdDev * 2.5))));
+        else if (stdDev <= 5) stability = Math.max(75, Math.min(90, Math.round(90 - ((stdDev - 2) * 5))));
+        else if (stdDev <= 10) stability = Math.max(45, Math.min(75, Math.round(75 - ((stdDev - 5) * 6))));
+        else if (stdDev <= 20) stability = Math.max(25, Math.min(45, Math.round(45 - ((stdDev - 10) * 2))));
+        else stability = Math.max(0, Math.min(25, Math.round(25 - ((stdDev - 20) * 0.5))));
+      }
+
+      const latest = convertedScores[0];
+      const oldest = convertedScores[convertedScores.length - 1];
+      const trendValue = latest - oldest;
+      
+      let trend = 'stable';
+      if (trendValue > 5) trend = 'up';
+      else if (trendValue < -5) trend = 'down';
+
+      const midIndex = Math.floor(convertedScores.length / 2);
+      const midScore = convertedScores.length > 1 ? convertedScores[midIndex] : latest;
+      const changeFromPrevious = Math.round(latest - midScore);
+
+      let status = 'excellent';
+      if (periodAvg < 40) status = 'critical';
+      else if (periodAvg < 65) status = 'warning';
+      else if (periodAvg < 80) status = 'good';
+
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const createdAt = model.createdAt ? new Date(model.createdAt) : null;
+      const isNew = createdAt && createdAt > sevenDaysAgo;
+
+      modelScores.push({
+        id: String(model.id),
+        name: model.name,
+        provider: model.vendor,
+        currentScore: periodAvg,
+        trend,
+        lastUpdated: new Date(historicalScores[0].ts || new Date()),
+        status,
+        weeklyBest: Math.max(...convertedScores),
+        weeklyWorst: Math.min(...convertedScores),
+        avgLatency: 1000,
+        tasksCompleted: historicalScores.length,
+        totalTasks: historicalScores.length,
+        history: validHistoricalScores.slice(0, 24).map(h => ({
+          stupidScore: h.stupidScore,
+          timestamp: h.ts
+        })),
+        periodAvg,
+        stability: Math.round(stability),
+        changeFromPrevious,
+        dataPoints: validHistoricalScores.length,
+        isNew
+      });
+    }
+
+    return modelScores;
+  } catch (error) {
+    console.error('Error fetching historical tooling scores:', error);
+    return await getToolingScores();
+  }
+}
+
 // Helper function to get historical model scores for specific time periods
 export async function getHistoricalModelScores(period: string) {
   try {
