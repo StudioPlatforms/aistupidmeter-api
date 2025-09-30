@@ -23,6 +23,7 @@ const REFERENCE_MODELS = [
 
   // Anthropic - Latest Claude 4 family with dated IDs
   { provider: 'anthropic' as Provider, model: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4' },
+  { provider: 'anthropic' as Provider, model: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5' },
   { provider: 'anthropic' as Provider, model: 'claude-opus-4-20250514', name: 'Claude Opus 4' },
   { provider: 'anthropic' as Provider, model: 'claude-opus-4-1-20250805', name: 'Claude Opus 4.1' },
 
