@@ -1940,6 +1940,20 @@ export default async function (fastify: FastifyInstance, opts: any) {
           ))
           .orderBy(desc(scores.ts))
           .limit(dataLimit);
+      } else if (sortBy === 'tooling') {
+        // For tooling mode, get ONLY tool-calling benchmark scores
+        // ALWAYS respect time periods
+        console.log(`🔧 TOOLING: Getting tool-calling scores for model ${modelId} (period: ${period})`);
+        historyQuery = db
+          .select()
+          .from(scores)
+          .where(and(
+            eq(scores.modelId, parseInt(modelId)),
+            eq(scores.suite, 'tooling'),  // CRITICAL: Only tooling benchmarks
+            gte(scores.ts, timeThreshold.toISOString())
+          ))
+          .orderBy(desc(scores.ts))
+          .limit(dataLimit);
       } else {
         // For combined/speed modes, get hourly scores (most data available)
         // ALWAYS respect time periods

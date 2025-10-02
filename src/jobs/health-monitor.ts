@@ -15,8 +15,8 @@ const insertHealthCheck = db.prepare(`
 const insertIncident = db.prepare(`
   INSERT OR IGNORE INTO incidents (
     provider, model_name, incident_type, severity, description, 
-    failure_rate, total_requests, failed_requests, metadata, created_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    failure_rate, total_requests, failed_requests, metadata
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 interface HealthCheckResult {
