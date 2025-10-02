@@ -103,6 +103,15 @@ const SLEEP_MS_RANGE = [200, 400];   // jitter between trials
 const MIN_HISTORY_FOR_BASELINE = 10; // Minimum historical scores needed for baseline
 const STD_EPS = 1e-6;                // avoid div-by-zero
 
+// --- FAIRNESS MODE: Unified parameters for all models ---
+const FAIR_MODE = true;
+const UNIFIED_MAX_TOKENS = 1500;     // Hard cap for everyone
+const UNIFIED_TEMPERATURE = 0.1;
+const ALLOWED_PARAMS = new Set(['model', 'messages', 'temperature', 'max_tokens', 'maxTokens']);
+const FORBIDDEN_PARAMS = ['reasoning_effort', 'thinking', 'thinkingConfig', 'top_p', 'stop', 
+                         'tool_choice', 'response_format', 'logprobs', 'frequency_penalty', 
+                         'presence_penalty', 'logit_bias', 'seed'];
+
 // --- Simple global score calibration (rank-preserving) ---
 const SCORE_SCALE = Number(process.env.SCORE_SCALE ?? '1');  // multiplicative
 const SCORE_LIFT  = Number(process.env.SCORE_LIFT  ?? '0');  // additive
@@ -114,6 +123,106 @@ function calibrateScore(s: number): number {
   if (s < 0) return s;
   const y = SCORE_SCALE * s + SCORE_LIFT;
   return Math.max(SCORE_MIN, Math.min(SCORE_MAX, Math.round(y)));
+}
+
+// ---------- Deterministic PRNG for fairness ----------
+function makePRNG(seed: string) {
+  let h = [...Buffer.from(seed)].reduce((s, b) => (s * 33 + b) >>> 0, 5381);
+  return () => (h = (h * 1103515245 + 12345) >>> 0) / 0xFFFFFFFF;
+}
+
+// Hash to integer for Python seeding
+function hashToInt(seed: string): number {
+  let h = 2166136261 >>> 0;
+  for (const c of seed) {
+    h ^= c.charCodeAt(0);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+// Pick from array deterministically
+function pick<T>(rand: () => number, arr: T[]): T {
+  return arr[Math.floor(rand() * arr.length)];
+}
+
+// Deterministic alias generation per batch
+function aliasFor(batchSeed: string, base: string): string {
+  const r = makePRNG(`${batchSeed}:${base}`)();
+  const suffix = Math.floor(r * 1e9).toString(36);
+  return `${base}_${suffix}`;
+}
+
+// Parameter sanitization for fairness
+function sanitizeParams(req: any): any {
+  const out: any = {};
+  Object.keys(req).forEach(k => {
+    if (ALLOWED_PARAMS.has(k)) out[k] = req[k];
+  });
+
+  // Normalize maxTokens → max_tokens for snake_case APIs
+  if (out.maxTokens != null && out.max_tokens == null) {
+    out.max_tokens = out.maxTokens;
+    delete out.maxTokens;
+  }
+
+  // Force-null hidden defaults
+  for (const k of FORBIDDEN_PARAMS) delete out[k];
+
+  return out;
+}
+
+// Fairness assertion - fails loudly if violated
+function assertFairRequest(req: any, modelName: string) {
+  // Check for forbidden parameters
+  for (const k of FORBIDDEN_PARAMS) {
+    if (k in req) {
+      throw new Error(`FAIRNESS VIOLATION: ${k} present for ${modelName}`);
+    }
+  }
+
+  // Verify token limit
+  const mt = req.max_tokens ?? req.maxTokens;
+  if (mt !== UNIFIED_MAX_TOKENS) {
+    throw new Error(`FAIRNESS VIOLATION: max_tokens=${mt}, expected ${UNIFIED_MAX_TOKENS} for ${modelName}`);
+  }
+
+  // Verify temperature
+  if (req.temperature !== UNIFIED_TEMPERATURE) {
+    throw new Error(`FAIRNESS VIOLATION: temperature=${req.temperature}, expected ${UNIFIED_TEMPERATURE} for ${modelName}`);
+  }
+}
+
+// Unified prompt generator with deterministic envelope rotation
+function makeUnifiedPrompt(instancePrompt: string, expected: string, batchSeed: string, taskId: string): string {
+  const rand = makePRNG(`${batchSeed}:${taskId}:env`);
+
+  const ruleLists = [
+    [
+      `Rules:`,
+      `- Output ONLY Python code.`,
+      `- No markdown/backticks/prose.`,
+      `- First line MUST be: def ${expected}(`,
+      `- Pure stdlib; deterministic behavior.`
+    ],
+    [
+      `Contract:`,
+      `• Return only Python.`,
+      `• No fences, no commentary.`,
+      `• Signature starts exactly: def ${expected}(`,
+      `• Use stdlib only; deterministic.`
+    ]
+  ];
+
+  const rules = pick(rand, ruleLists).join('\n');
+
+  const shapes = [
+    (core: string) => `${core}\n\n${rules}`,
+    (core: string) => `### Task\n${core}\n\n### IO\n${rules}`,
+    (core: string) => `${rules}\n\n${core}`
+  ];
+
+  return pick(rand, shapes)(instancePrompt);
 }
 
 const AXIS_WEIGHTS = {
@@ -815,22 +924,20 @@ for case in edge_cases[:3]:  # Limit to avoid too many tests
 
   const debugging = task.id.includes('debug') ? correctness : Math.min(correctness + 0.05, 1);
   
-  // FIX 4: Implement real format and safety axes using raw model output
-  // Format: reward plain code (no fences), tolerate single fenced block, penalize prose/mixed.
+  // FAIRNESS FIX: Format scoring - don't penalize fenced code blocks
   let format = 1.0;
   const raw = rawText.trim();
   const hasFence = /```/.test(raw);
   const onlyFence = /^```(?:python|py)?\s*[\s\S]*?\s*```$/.test(raw);
   const looksLikeCode = /^(?:\s*(?:def|class)\s+|\s*from\s+\w+|\s*import\s+\w+)/m.test(raw);
 
-  // best: plain code, no fences, no chatter
+  // Best: plain code OR clean fenced block (both get full credit)
   if (!hasFence && looksLikeCode) format = 1.0;
-  // acceptable: exactly one fenced block and nothing else
-  else if (hasFence && onlyFence) format = 0.9;
-  // mixed: fences + extra prose
-  else if (hasFence && !onlyFence) format = 0.6;
-  // worst: no fences and doesn't look like code (we had to guess)
-  else format = 0.2;
+  else if (hasFence && onlyFence) format = 1.0;  // ✅ Fixed: No penalty for fenced code
+  // Mixed: fences + extra prose
+  else if (hasFence && !onlyFence) format = 0.8;  // Gentler penalty
+  // Worst: no fences and doesn't look like code
+  else format = 0.3;
   
   // Safety (basic for code tasks): detect dangerous calls/imports, allow harmless os.path usage
   const unsafe = /\b(exec|eval|__import__|subprocess|socket|urllib|requests|ftplib|smtplib)\b|(?<!\bos\.)(\bos\.(?!path\b|name\b|urandom\b))/;
@@ -946,106 +1053,40 @@ async function runSingleBenchmarkStreaming(
   const maxRetries = 2; // Allow up to 2 retries per trial
 
   try {
-    // Enhanced token limits and parameters for different model types
-    let maxTokens = task.maxTokens;
-    let temperature = 0.1;
-    let reasoning_effort: string | undefined = undefined;
+    // FAIRNESS MODE: Unified parameters for all models
+    const maxTokens = UNIFIED_MAX_TOKENS;
+    const temperature = UNIFIED_TEMPERATURE;
     
-    // GPT-5 OPTIMIZATION: Model-specific token limits and configuration
-    if (model.vendor === 'openai') {
-      if (model.name === 'gpt-5-2025-08-07') {
-        // Reasoning variant: Much higher token limit, optimized for quality
-        maxTokens = Math.max(task.maxTokens * 5, 3000);  // 3000+ tokens for reasoning
-        temperature = 0.05; // Lower temperature for more focused reasoning
-        reasoning_effort = 'medium'; // Use medium reasoning effort
-        streamLog && streamLog('info', `      🧠 GPT-5 Reasoning: maxTokens=${maxTokens}, reasoning_effort=medium`);
-      } else if (model.name === 'gpt-5-auto') {
-        // Router variant: Balanced approach, let router decide
-        maxTokens = Math.max(task.maxTokens * 3, 2000);  // 2000 tokens for router
-        temperature = 0.1;
-        reasoning_effort = 'low'; // Let router decide, minimal reasoning
-        streamLog && streamLog('info', `      🔄 GPT-5 Router: maxTokens=${maxTokens}, reasoning_effort=low`);
-      } else if (/^o\d|^o-mini|^o-/.test(model.name)) {
-        // o-series models: Also reasoning-focused
-        maxTokens = Math.max(task.maxTokens * 4, 2500);
-        temperature = 0.1;
-        reasoning_effort = 'low'; // Keep low for speed vs accuracy balance
-        streamLog && streamLog('info', `      🔮 ${model.name}: maxTokens=${maxTokens}, reasoning_effort=low`);
-      } else {
-        // Standard OpenAI models (GPT-4o, etc.)
-        maxTokens = Math.min(task.maxTokens * 3, 1200);
-      }
-    } else {
-      // Non-OpenAI models: Keep existing limits
-      maxTokens = Math.min(task.maxTokens * 3, 1200);
-    }
+    // Get batch timestamp for deterministic operations
+    const batchTimestamp = process.env.BATCH_TIMESTAMP || new Date().toISOString();
     
-    // Smart retry strategy: apply boosts after base calculation
-    if (retryAttempt > 0) {
-      // Retry 1: Increase token limit significantly
-      if (retryAttempt === 1) {
-        maxTokens = Math.max(maxTokens, 1500);
-        streamLog('info', `      🔧 Retry ${retryAttempt}: Boosting maxTokens to ${maxTokens}`);
-      }
-      // Retry 2: Increase token limit even more and adjust temperature
-      else if (retryAttempt >= 2) {
-        maxTokens = Math.max(maxTokens, 2000);
-        temperature = 0.2; // Slightly higher temperature for more variety
-        streamLog('info', `      🔧 Retry ${retryAttempt}: Boosting maxTokens to ${maxTokens}, temperature to ${temperature}`);
-      }
-      
-      // Optional hard cap if needed
-      maxTokens = Math.min(maxTokens, 2000);
-    }
+    // CACHE-BUSTING: Apply deterministic symbol renaming per batch
+    const alias = aliasFor(batchTimestamp, task.id);
+    const aliasedTask = applyCacheBustingToTask(task, alias);
+    const activeTask = aliasedTask;
+    streamLog('info', `      🎯 Fair cache-busting: Renamed '${task.expectedCode}' to '${activeTask.expectedCode}'`);
     
-    // Only apply reasoning effort for models that absolutely require it, with latency budget consideration
-    if (model.vendor === 'openai' && /^o\d|^o-mini|^o-/.test(model.name)) {
-      reasoning_effort = 'low'; // Use minimal reasoning to avoid excessive latency penalty
-    }
-
-    // ANTI-CACHING: Generate unique identifiers for this request
-    const sessionNonce = generateNonce();
-    const trialId = `T${trialNumber || 1}_R${retryAttempt}_${Date.now().toString(36)}`;
-    
-    // CACHE-BUSTING: Apply real symbol renaming to kill provider caching
-    const cacheBustingNonce = generateNonce();
-    const cacheBustedTask = applyCacheBustingToTask(task, cacheBustingNonce);
-    const activeTask = cacheBustedTask;  // FIX 1: Use consistent variable
-    streamLog('info', `      🎯 Cache-busting: Renamed '${task.expectedCode}' to '${activeTask.expectedCode}'`);
-    
-    // ANTI-CACHING: Create varied system message with salt for Gemini 2.5
-    // Use different system message variations on retries
-    let baseSystemMessage = getVariedSystemMessage();
-    if (retryAttempt > 0) {
-      const retrySystemMessages = [
-        'You are a helpful Python programming assistant. Write clean, working code. Return only the requested function or class.',
-        'Write Python code only. Provide the complete, working function or class as requested. No explanations needed.',
-        'Generate correct Python code. Return the function or class definition requested. Keep it simple and functional.',
-        'Create Python code that works. Write only the requested function or class. Make it concise but complete.'
-      ];
-      baseSystemMessage = retrySystemMessages[retryAttempt % retrySystemMessages.length];
-      streamLog('info', `      🔧 Retry ${retryAttempt}: Using alternative system message approach`);
-    }
-    const systemMessage = getSaltedSystemMessage(baseSystemMessage, model);
-    
-    // ANTI-CACHING: Add no-op nonce to user prompt to ensure unique payload
-    const enhancedPrompt = addAntiCachingNonce(activeTask.prompt, `${sessionNonce}_${trialId}`);
+    // FAIRNESS: Generate unified prompt with deterministic envelope
+    const unifiedPrompt = makeUnifiedPrompt(
+      activeTask.prompt,
+      activeTask.expectedCode,
+      batchTimestamp,
+      activeTask.id
+    );
 
     const chatRequest: ChatRequest = {
       model: model.name,
       messages: [
-        { role: 'system', content: systemMessage },
-        { role: 'user', content: enhancedPrompt }
+        { role: 'system', content: 'Return only Python code for the requested symbol. No markdown, no prose.' },
+        { role: 'user', content: unifiedPrompt }
       ],
       temperature,
       maxTokens
     };
     
-    // Add reasoning effort for reasoning models
-    if (reasoning_effort) {
-      (chatRequest as any).reasoning_effort = reasoning_effort;
-      streamLog('info', `      🧠 Using reasoning_effort: ${reasoning_effort}`);
-    }
+    // FAIRNESS CHECK: Assert no forbidden parameters
+    assertFairRequest(chatRequest, model.name);
+    const cleanRequest = sanitizeParams(chatRequest);
 
     // Log the exact request being sent
     streamLog('info', `      📝 Sending prompt to ${model.vendor}/${model.name}:`);
@@ -1476,15 +1517,15 @@ async function getHistoricalBaseline(modelId: number): Promise<{
   return { hasBaseline: true, means, stds, sampleCount: validRows.length };
 }
 
-// Bayesian shrinkage function to regularize scores with small sample sizes
-function shrinkTo(x: number, n: number, target: number, k: number = 8): number { 
-  // k ≈ how many tasks to trust
+// FAIRNESS FIX: Minimal Bayesian shrinkage (k=1 instead of k=8)
+function shrinkTo(x: number, n: number, target: number, k: number = 1): number { 
+  // k=1: Much gentler shrinkage, only affects models with <5 samples significantly
   const λ = n / (n + k);
-  return λ * x + (1 - λ) * target; // Shrink toward cohort center, not 50
+  return λ * x + (1 - λ) * target;
 }
 
 function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasBaseline: boolean = true, successfulTasks: number = 1): number {
-  // SOFTENED PROFESSOR MODE: More balanced scoring that's still rigorous but fairer
+  // FAIR SCORING: Performance-based, minimal historical bias
   let weightedSum = 0;
   let totalWeight = 0;
   
@@ -1492,18 +1533,17 @@ function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasB
     let performance = axesNow[k] || 0;
     const weight = AXIS_WEIGHTS[k];
     
-    // SOFTENED: Apply more gentle exponential decay for imperfections
+    // Gentle exponential decay for imperfections
     if (performance < 1.0) {
-      // Milder exponential penalty: 0.9 -> 0.85, 0.8 -> 0.70, etc.
-      performance = Math.pow(performance, 1.4); // Was 1.8, now 1.4
+      performance = Math.pow(performance, 1.4);
     }
     
-    // SOFTENED: Reduced axis-specific penalties
+    // Reduced axis-specific penalties
     if (k === 'correctness' && performance < 0.95) {
-      performance *= 0.85; // Was 0.7, now 0.85 - less harsh
+      performance *= 0.85;
     }
     if (k === 'codeQuality' && performance < 0.6) {
-      performance *= 0.95; // Was 0.9, now 0.95 - even gentler nudge
+      performance *= 0.95;
     }
     
     weightedSum += performance * weight * 100;
@@ -1514,48 +1554,47 @@ function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasB
   
   let baseScore = weightedSum / totalWeight;
   
-  // SOFTENED: Make base scoring less demanding
-  // Apply gentler "professor curve" - less harsh shift
-  baseScore = Math.pow(baseScore / 100, 1.2) * 100; // Was 1.4, now 1.2 - less harsh curve
+  // Gentle professor curve
+  baseScore = Math.pow(baseScore / 100, 1.2) * 100;
   
-  // SOFTENED: Reduced variance penalties
+  // FAIRNESS FIX: Reduced variance penalties (only for established models)
   let varianceAdjustment = 0;
   if (hasBaseline && baseline.means.correctness !== undefined) {
     (Object.keys(AXIS_WEIGHTS) as AxisKey[]).forEach(k => {
       const deviation = (axesNow[k] || 0) - (baseline.means[k] || 0.5);
       const normalizedDev = deviation / (baseline.stds[k] || 0.15);
-      varianceAdjustment += normalizedDev * AXIS_WEIGHTS[k] * 1.5; // Was 2, now 1.5 - reduced impact
+      varianceAdjustment += normalizedDev * AXIS_WEIGHTS[k] * 1.0; // Reduced from 1.5 to 1.0
     });
     
-    // SOFTENED: Smaller penalty range
-    varianceAdjustment = Math.max(-6, Math.min(4, varianceAdjustment)); // Was -8/+3, now -6/+4 - more balanced
+    varianceAdjustment = Math.max(-4, Math.min(3, varianceAdjustment)); // Reduced from -6/+4
   }
   
   let finalScore = baseScore + varianceAdjustment;
   
-  // SOFTENED: Smaller calibration penalty for unproven models
-  if (!hasBaseline) {
-    finalScore -= 5; // Was 8, now 5 - less harsh penalty
-  }
+  // FAIRNESS FIX: NO penalty for new models - let performance speak
+  // Removed: if (!hasBaseline) finalScore -= 5;
   
-  // SOFTENED: Less harsh quality gates with smaller penalties
+  // Quality gates with smaller penalties
   const correctness = axesNow.correctness || 0;
   const codeQuality = axesNow.codeQuality || 0;
   const complexity = axesNow.complexity || 0;
   
   const gates = {
-    correctness_minor: correctness < 0.90 ? -5 : 0,  // Was -8, now -5
-    correctness_major: correctness < 0.70 ? -6 : 0,  // Was -8, now -6  
-    correctness_fail : correctness < 0.50 ? -8 : 0,  // Was -10, now -8
-    quality_minor    : codeQuality < 0.60 ? -6 : 0,  // Was -10, now -6
-    quality_major    : codeQuality < 0.40 ? -12: 0,  // Was -20, now -12
-    task_understood  : complexity  < 0.30 ? -8 : 0,  // Was -12, now -8
+    correctness_minor: correctness < 0.90 ? -5 : 0,
+    correctness_major: correctness < 0.70 ? -6 : 0,
+    correctness_fail : correctness < 0.50 ? -8 : 0,
+    quality_minor    : codeQuality < 0.60 ? -6 : 0,
+    quality_major    : codeQuality < 0.40 ? -12: 0,
+    task_understood  : complexity  < 0.30 ? -8 : 0,
   };
   finalScore += Object.values(gates).reduce((a,b)=>a+b,0);
 
-  // Apply Bayesian shrinkage by number of successful tasks
-  const cohortCenter = 70; // Shrink toward cohort center, not 50
-  finalScore = Math.round(shrinkTo(finalScore, successfulTasks, cohortCenter));
+  // FAIRNESS FIX: Minimal shrinkage (k=1 instead of k=8)
+  // Only affects models with very few samples (<5)
+  const cohortCenter = 70;
+  if (successfulTasks < 5) {
+    finalScore = Math.round(shrinkTo(finalScore, successfulTasks, cohortCenter, 1));
+  }
   
   return Math.round(Math.max(0, Math.min(100, finalScore)));
 }
