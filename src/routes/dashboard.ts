@@ -1894,7 +1894,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
           break;
       }
 
-      // Get historical data based on sort mode - FIXED for proper suite filtering with time periods
+      // Get historical data based on sort mode - FIXED to include CI fields
       let historyQuery;
       
       if (sortBy === 'reasoning') {
@@ -1905,7 +1905,15 @@ export default async function (fastify: FastifyInstance, opts: any) {
         if (period === 'latest') {
           // For latest, get all available deep scores (should be very few anyway)
           historyQuery = db
-            .select()
+            .select({
+              stupidScore: scores.stupidScore,
+              ts: scores.ts,
+              axes: scores.axes,
+              suite: scores.suite,
+              note: scores.note,
+              confidence_lower: scores.confidenceLower,
+              confidence_upper: scores.confidenceUpper
+            })
             .from(scores)
             .where(and(
               eq(scores.modelId, parseInt(modelId)),
@@ -1916,7 +1924,15 @@ export default async function (fastify: FastifyInstance, opts: any) {
         } else {
           // For specific periods (24h, 7d, 1m), filter deep scores by time period
           historyQuery = db
-            .select()
+            .select({
+              stupidScore: scores.stupidScore,
+              ts: scores.ts,
+              axes: scores.axes,
+              suite: scores.suite,
+              note: scores.note,
+              confidence_lower: scores.confidenceLower,
+              confidence_upper: scores.confidenceUpper
+            })
             .from(scores)
             .where(and(
               eq(scores.modelId, parseInt(modelId)),
@@ -1931,7 +1947,15 @@ export default async function (fastify: FastifyInstance, opts: any) {
         // ALWAYS respect time periods - this should show lots of data for 7d
         console.log(`📊 7AXIS: Getting hourly/real-benchmark scores for model ${modelId} (period: ${period})`);
         historyQuery = db
-          .select()
+          .select({
+            stupidScore: scores.stupidScore,
+            ts: scores.ts,
+            axes: scores.axes,
+            suite: scores.suite,
+            note: scores.note,
+            confidence_lower: scores.confidenceLower,
+            confidence_upper: scores.confidenceUpper
+          })
           .from(scores)
           .where(and(
             eq(scores.modelId, parseInt(modelId)),
@@ -1945,7 +1969,15 @@ export default async function (fastify: FastifyInstance, opts: any) {
         // ALWAYS respect time periods
         console.log(`🔧 TOOLING: Getting tool-calling scores for model ${modelId} (period: ${period})`);
         historyQuery = db
-          .select()
+          .select({
+            stupidScore: scores.stupidScore,
+            ts: scores.ts,
+            axes: scores.axes,
+            suite: scores.suite,
+            note: scores.note,
+            confidence_lower: scores.confidenceLower,
+            confidence_upper: scores.confidenceUpper
+          })
           .from(scores)
           .where(and(
             eq(scores.modelId, parseInt(modelId)),
@@ -1959,7 +1991,15 @@ export default async function (fastify: FastifyInstance, opts: any) {
         // ALWAYS respect time periods
         console.log(`⚡ ${sortBy.toUpperCase()}: Getting hourly scores for model ${modelId} (period: ${period})`);
         historyQuery = db
-          .select()
+          .select({
+            stupidScore: scores.stupidScore,
+            ts: scores.ts,
+            axes: scores.axes,
+            suite: scores.suite,
+            note: scores.note,
+            confidence_lower: scores.confidenceLower,
+            confidence_upper: scores.confidenceUpper
+          })
           .from(scores)
           .where(and(
             eq(scores.modelId, parseInt(modelId)),
@@ -2005,7 +2045,9 @@ export default async function (fastify: FastifyInstance, opts: any) {
           score: displayScore,
           axes: score.axes,
           stupidScore: rawScore, // Include raw score for debugging
-          suite: score.suite // Include suite info
+          suite: score.suite, // Include suite info
+          confidence_lower: score.confidence_lower, // Include CI data
+          confidence_upper: score.confidence_upper  // Include CI data
         };
       });
 

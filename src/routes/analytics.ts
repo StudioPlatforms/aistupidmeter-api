@@ -195,7 +195,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
           });
         }
         
-        // 2. PERFORMANCE TREND WARNINGS (24h decline detection)
+        // 2. PERFORMANCE TREND WARNINGS (24h decline detection) - NOW WITH CI FILTERING
         if (historicalScores.length >= 5) {
           const validScores = historicalScores
             .filter(s => s.stupidScore !== -777 && s.stupidScore !== -888 && s.stupidScore !== -999 && s.stupidScore !== -100)
@@ -214,8 +214,29 @@ export default async function (fastify: FastifyInstance, opts: any) {
             const trendDrop = olderAvg - recentAvg;
             const trendDropPct = olderAvg > 0 ? Math.round((trendDrop / olderAvg) * 100) : 0;
             
-            // Detect significant 24h decline
-            if (trendDrop > 8 && trendDropPct > 12) {
+            // **CI-BASED FILTERING**: Check if drop exceeds confidence intervals
+            const recentScoresWithCI = historicalScores.slice(0, 3).filter(s => 
+              s.confidenceLower !== null && s.confidenceUpper !== null
+            );
+            
+            let dropExceedsCI = false;
+            if (recentScoresWithCI.length > 0) {
+              // Calculate average CI width for recent scores
+              const avgCIWidth = recentScoresWithCI.reduce((sum, s) => 
+                sum + (s.confidenceUpper! - s.confidenceLower!), 0
+              ) / recentScoresWithCI.length;
+              
+              // Drop is significant if it exceeds 2x the typical CI width (2 standard deviations)
+              dropExceedsCI = trendDrop > (avgCIWidth * 2);
+              
+              console.log(`📊 ${model.name}: Drop=${trendDrop.toFixed(1)}, CI width=${avgCIWidth.toFixed(1)}, Exceeds CI=${dropExceedsCI}`);
+            } else {
+              // No CI data - fall back to original threshold
+              dropExceedsCI = true;
+            }
+            
+            // Detect significant 24h decline - NOW REQUIRES CI VALIDATION
+            if (trendDrop > 8 && trendDropPct > 12 && dropExceedsCI) {
               degradations.push({
                 modelId: model.id,
                 modelName: model.name,

@@ -15,6 +15,7 @@ import { db } from '../db/index';
 import { models, scores, runs, metrics, tasks as tasksTable } from '../db/schema';
 import { desc, eq } from 'drizzle-orm';
 import * as crypto from 'crypto';
+import { calculateConfidenceInterval, calculateStdDev } from '../lib/statistical-tests';
 
 // Import streaming function for detailed user logs
 let emitBenchmarkProgress: ((sessionId: string, data: any) => void) | null = null;
@@ -2049,7 +2050,24 @@ export async function benchmarkModel(
     note = (note ? note + ' | ' : '') + `~$${batchCost.toFixed(3)}`;
   }
 
-  // Save score (finalScore is always a number now)
+  // Calculate confidence intervals from task-level scores
+  const taskScores = perTaskAxes.map(axes => {
+    // Calculate weighted score for each task using same formula as final score
+    let taskScore = 0;
+    let totalWeight = 0;
+    (Object.keys(AXIS_WEIGHTS) as AxisKey[]).forEach(k => {
+      const performance = axes[k] || 0;
+      taskScore += performance * AXIS_WEIGHTS[k] * 100;
+      totalWeight += AXIS_WEIGHTS[k];
+    });
+    return totalWeight > 0 ? taskScore / totalWeight : 0;
+  });
+
+  // Calculate 95% confidence interval using t-distribution
+  const ci = calculateConfidenceInterval(taskScores);
+  const modelVariance = calculateStdDev(taskScores);
+
+  // Save score with statistical metadata
   await db.insert(scores).values({
     modelId: model.id,
     ts: batchTimestamp || new Date().toISOString(),
@@ -2057,7 +2075,12 @@ export async function benchmarkModel(
     axes: agg,
     cusum: 0.0,
     note,
-    suite: 'hourly'  // Explicitly set suite for dashboard compatibility
+    suite: 'hourly',  // Explicitly set suite for dashboard compatibility
+    confidenceLower: ci.lower,
+    confidenceUpper: ci.upper,
+    standardError: ci.standardError,
+    sampleSize: taskScores.length,
+    modelVariance: modelVariance
   });
 
   // FIX 6: Apply drift detection after inserting the new score

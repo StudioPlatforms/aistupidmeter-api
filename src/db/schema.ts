@@ -85,7 +85,13 @@ export const scores = sqliteTable('scores', {
   axes: text('axes', { mode: 'json' }).$type<Record<string, number>>().notNull(),
   cusum: real('cusum').notNull(),
   note: text('note'),
-  suite: text('suite').default('hourly') // 'hourly' | 'deep' | 'tooling'
+  suite: text('suite').default('hourly'), // 'hourly' | 'deep' | 'tooling'
+  // Statistical confidence interval fields
+  confidenceLower: real('confidence_lower'), // Lower bound of 95% CI
+  confidenceUpper: real('confidence_upper'), // Upper bound of 95% CI
+  standardError: real('standard_error'), // Standard error of the mean
+  sampleSize: integer('sample_size').default(5), // Number of trials
+  modelVariance: real('model_variance') // Historical variance for drift detection
 });
 
 // Deep session tracking
