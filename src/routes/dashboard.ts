@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { db } from '../db/index';
-import { models, scores, runs, metrics, deep_sessions } from '../db/schema';
+import { models, scores, runs, metrics, deep_sessions, incidents } from '../db/schema';
 import { eq, desc, sql, gte, and } from 'drizzle-orm';
 import { computeDashboardScores } from '../lib/dashboard-compute';
 
@@ -2383,6 +2383,80 @@ export default async function (fastify: FastifyInstance, opts: any) {
       };
     } catch (error) {
       console.error('Error fetching batch status:', error);
+      return {
+        success: false,
+        error: String(error)
+      };
+    }
+  });
+
+  // Get drift incidents for Intelligence Center
+  fastify.get('/incidents', async (req: any) => {
+    try {
+      const { period = '7d', limit = 50 } = req.query;
+      
+      // Calculate time threshold based on period
+      let timeThreshold: Date;
+      switch (period) {
+        case '24h':
+          timeThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
+          break;
+        case '7d':
+          timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+          break;
+        case '1m':
+          timeThreshold = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+          break;
+        default:
+          timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      }
+      
+      // Get recent incidents
+      const recentIncidents = await db
+        .select({
+          id: incidents.id,
+          modelId: incidents.modelId,
+          provider: incidents.provider,
+          incidentType: incidents.incidentType,
+          severity: incidents.severity,
+          title: incidents.title,
+          description: incidents.description,
+          detectedAt: incidents.detectedAt,
+          resolvedAt: incidents.resolvedAt,
+          metadata: incidents.metadata
+        })
+        .from(incidents)
+        .where(gte(incidents.detectedAt, timeThreshold.toISOString()))
+        .orderBy(desc(incidents.detectedAt))
+        .limit(parseInt(limit));
+      
+      // Get model names for the incidents
+      const incidentsWithModelNames = await Promise.all(
+        recentIncidents.map(async (incident) => {
+          const model = await db
+            .select({ name: models.name })
+            .from(models)
+            .where(eq(models.id, incident.modelId))
+            .limit(1);
+          
+          return {
+            ...incident,
+            modelName: model[0]?.name || 'Unknown Model',
+            detectedAt: new Date(incident.detectedAt),
+            resolvedAt: incident.resolvedAt ? new Date(incident.resolvedAt) : null,
+            metadata: incident.metadata ? JSON.parse(incident.metadata) : null
+          };
+        })
+      );
+      
+      return {
+        success: true,
+        data: incidentsWithModelNames,
+        period,
+        totalIncidents: incidentsWithModelNames.length
+      };
+    } catch (error) {
+      console.error('Error fetching drift incidents:', error);
       return {
         success: false,
         error: String(error)

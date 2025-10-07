@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { runRealBenchmarks } from './jobs/real-benchmarks';
 import { runDeepBenchmarks, isDeepBenchmarkActive } from './deepbench/index';
 import { runToolBenchmarks } from './jobs/tool-benchmarks';
+import { runCanaryBenchmarks } from './jobs/canary-benchmarks';
 import { refreshAllCache, refreshHotCache } from './cache/dashboard-cache';
 import { runHealthChecks, cleanupOldHealthData } from './jobs/health-monitor';
 
@@ -165,6 +166,39 @@ export function startBenchmarkScheduler() {
     timezone: 'Europe/Berlin'
   });
 
+  // CANARY BENCHMARKS: Run every hour for fast drift detection
+  let isCanaryRunning = false;
+  let lastCanaryRunTime: Date | null = null;
+  const canaryScheduledTask = cron.schedule('0 * * * *', async () => {
+    const now = new Date();
+    console.log(`🐤 Hourly canary benchmark cron triggered at ${now.toISOString()}`);
+    
+    if (isCanaryRunning) {
+      console.log('⏸️ Canary benchmark already running, skipping this cycle...');
+      return;
+    }
+
+    try {
+      isCanaryRunning = true;
+      lastCanaryRunTime = now;
+      console.log(`🕐 ${now.toISOString()} - Starting scheduled hourly canary benchmark run...`);
+      console.log(`🐤 Previous canary run was: ${lastCanaryRunTime ? lastCanaryRunTime.toISOString() : 'Never'}`);
+      
+      // Run canary benchmarks (fast, 12 tasks, 2 trials each)
+      console.log(`🐤 Running canary benchmarks (12 tasks, 2 trials each)...`);
+      await runCanaryBenchmarks();
+      console.log(`✅ Canary benchmarks completed`);
+      
+      console.log(`✅ ${new Date().toISOString()} - Hourly canary benchmark run completed successfully`);
+    } catch (error) {
+      console.error(`❌ ${new Date().toISOString()} - Hourly canary benchmark run failed:`, error);
+    } finally {
+      isCanaryRunning = false;
+    }
+  }, {
+    timezone: 'Europe/Berlin'
+  });
+
   // HEALTH MONITORING: Run every 10 minutes
   healthScheduledTask = cron.schedule('*/10 * * * *', async () => {
     const now = new Date();
@@ -199,11 +233,13 @@ export function startBenchmarkScheduler() {
   });
 
   console.log('📅 Scheduler started with separate timing:');
+  console.log('   • Canary benchmarks: Every hour at :00 (12 tasks, 2 trials) - FAST DRIFT DETECTION');
   console.log('   • Regular (speed) benchmarks: Every 4 hours at :00 (00:00, 04:00, 08:00, 12:00, 16:00, 20:00)');
   console.log('   • Deep (reasoning) benchmarks: Daily at 3:00 AM Berlin time');
   console.log('   • Tool (tooling) benchmarks: Daily at 4:00 AM Berlin time');
   console.log('   • Health monitoring: Every 10 minutes');
   console.log(`🌍 Scheduler timezone: Europe/Berlin`);
+  console.log(`⚡ Canary scheduler active: ${canaryScheduledTask ? canaryScheduledTask.getStatus() : 'Unknown'}`);
   console.log(`⚡ 4-hourly scheduler active: ${hourlyScheduledTask ? hourlyScheduledTask.getStatus() : 'Unknown'}`);
   console.log(`⚡ Daily scheduler active: ${dailyScheduledTask ? dailyScheduledTask.getStatus() : 'Unknown'}`);
   console.log(`⚡ Tool scheduler active: ${toolScheduledTask ? toolScheduledTask.getStatus() : 'Unknown'}`);

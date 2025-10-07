@@ -2203,7 +2203,11 @@ export async function runRealBenchmarks() {
     // Create synchronized timestamp for batch
     const batchTimestamp = new Date().toISOString();
     console.log(`📅 Batch timestamp: ${batchTimestamp}`);
-    console.log(`📝 Running ${BENCHMARK_TASKS.length} diverse benchmark tasks`);
+    
+    // Check if we're in canary mode (will use different task set)
+    const isCanaryMode = process.env.CANARY_MODE === 'true';
+    const taskCount = isCanaryMode ? 'canary tasks' : `${BENCHMARK_TASKS.length} diverse benchmark tasks`;
+    console.log(`📝 Running ${taskCount}`);
     
     // Randomize the order of models for each benchmark run
     const shuffledModels = [...allModels as any[]].sort(() => Math.random() - 0.5);
