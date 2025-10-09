@@ -189,6 +189,16 @@ export function startBenchmarkScheduler() {
       await runCanaryBenchmarks();
       console.log(`✅ Canary benchmarks completed`);
       
+      // Update router model rankings after canary benchmarks
+      console.log(`🔄 Updating router model rankings...`);
+      try {
+        const { updateModelRankings } = await import('./router/jobs/ranking-updater');
+        const result = await updateModelRankings();
+        console.log(`✅ Router rankings updated: ${result.totalRankings} rankings across ${result.categories} categories`);
+      } catch (error) {
+        console.error(`❌ Failed to update router rankings:`, error);
+      }
+      
       console.log(`✅ ${new Date().toISOString()} - Hourly canary benchmark run completed successfully`);
     } catch (error) {
       console.error(`❌ ${new Date().toISOString()} - Hourly canary benchmark run failed:`, error);

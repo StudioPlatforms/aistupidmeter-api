@@ -189,7 +189,7 @@ async function startServer() {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-user-api-key'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-user-api-key', 'x-user-id'],
     maxAge: 86400 // Cache preflight for 24 hours
   });
 
@@ -246,6 +246,9 @@ async function startServer() {
 
   // Register routes dynamically with better error handling
   const routesToTry = [
+    { name: 'router', prefix: '' }, // AI Router - OpenAI-compatible endpoints at /v1/*
+    { name: 'router-keys', prefix: '' }, // AI Router Key Management - /router/*
+    { name: 'router-analytics', prefix: '' }, // AI Router Analytics - /router/analytics/*
     { name: 'analytics', prefix: '/analytics' },
     { name: 'health', prefix: '/providers' },
     { name: 'dashboard-cached', prefix: '/dashboard' },
@@ -288,7 +291,7 @@ async function startServer() {
           const { visitors } = await import('./db/schema');
           await db.insert(visitors).values({
             ip,
-            userAgent,
+            userAgent, // This maps to user_agent column in database
             referer,
             path,
             timestamp,

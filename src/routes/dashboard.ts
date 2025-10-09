@@ -1857,7 +1857,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
     }
   });
 
-  // Get historical data for a specific model - FIXED for 7axis and period support
+  // Get historical data for a specific model - FIXED for combined mode support
   fastify.get('/history/:modelId', async (req: any) => {
     const { modelId } = req.params;
     const { period = 'latest', sortBy = 'combined' } = req.query;
@@ -1892,6 +1892,138 @@ export default async function (fastify: FastifyInstance, opts: any) {
             dataLimit = 168;
           }
           break;
+      }
+
+      // FIXED: Handle combined mode by fetching and combining scores from all suites
+      if (sortBy === 'combined') {
+        // For combined mode, we need to fetch hourly and deep scores and combine them
+        // Get hourly scores (70% weight)
+        const hourlyScores = await db
+          .select({
+            stupidScore: scores.stupidScore,
+            ts: scores.ts,
+            axes: scores.axes,
+            suite: scores.suite,
+            note: scores.note,
+            confidence_lower: scores.confidenceLower,
+            confidence_upper: scores.confidenceUpper
+          })
+          .from(scores)
+          .where(and(
+            eq(scores.modelId, parseInt(modelId)),
+            eq(scores.suite, 'hourly'),
+            gte(scores.ts, timeThreshold.toISOString())
+          ))
+          .orderBy(desc(scores.ts))
+          .limit(dataLimit);
+
+        // Get deep scores (30% weight)
+        const deepScores = await db
+          .select({
+            stupidScore: scores.stupidScore,
+            ts: scores.ts,
+            axes: scores.axes,
+            suite: scores.suite,
+            note: scores.note,
+            confidence_lower: scores.confidenceLower,
+            confidence_upper: scores.confidenceUpper
+          })
+          .from(scores)
+          .where(and(
+            eq(scores.modelId, parseInt(modelId)),
+            eq(scores.suite, 'deep'),
+            gte(scores.ts, timeThreshold.toISOString())
+          ))
+          .orderBy(desc(scores.ts))
+          .limit(dataLimit);
+
+        // Create a map of timestamps to combine scores
+        const combinedScoresMap = new Map<string, any>();
+
+        // Process hourly scores (70% weight)
+        hourlyScores.forEach(score => {
+          if (score.stupidScore !== null && score.stupidScore >= 0 && score.ts) {
+            const timestamp = score.ts;
+            const hourlyDisplay = Math.max(0, Math.min(100, Math.round(score.stupidScore)));
+            
+            combinedScoresMap.set(timestamp, {
+              timestamp,
+              hourlyScore: hourlyDisplay,
+              deepScore: null,
+              axes: score.axes,
+              confidence_lower: score.confidence_lower,
+              confidence_upper: score.confidence_upper
+            });
+          }
+        });
+
+        // Add deep scores (30% weight) - match by closest timestamp
+        deepScores.forEach(deepScore => {
+          if (deepScore.stupidScore !== null && deepScore.stupidScore >= 0 && deepScore.ts) {
+            const deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
+            const deepTimestamp = new Date(deepScore.ts).getTime();
+            
+            // Find the closest hourly score within 1 hour
+            let closestEntry: any = null;
+            let minDiff = Infinity;
+            
+            for (const [timestamp, entry] of combinedScoresMap.entries()) {
+              const entryTime = new Date(timestamp).getTime();
+              const diff = Math.abs(entryTime - deepTimestamp);
+              
+              if (diff < minDiff && diff < 60 * 60 * 1000) { // Within 1 hour
+                minDiff = diff;
+                closestEntry = entry;
+              }
+            }
+            
+            if (closestEntry) {
+              closestEntry.deepScore = deepDisplay;
+            }
+          }
+        });
+
+        // Calculate combined scores (70% hourly + 30% deep)
+        const formattedHistory = Array.from(combinedScoresMap.values())
+          .map(entry => {
+            let combinedScore: number;
+            
+            if (entry.hourlyScore !== null && entry.deepScore !== null) {
+              // Both scores available - full combination
+              combinedScore = Math.round(entry.hourlyScore * 0.7 + entry.deepScore * 0.3);
+            } else if (entry.hourlyScore !== null) {
+              // Only hourly score - use it directly
+              combinedScore = entry.hourlyScore;
+            } else {
+              // Shouldn't happen, but fallback
+              combinedScore = 50;
+            }
+
+            return {
+              timestamp: new Date(entry.timestamp),
+              score: combinedScore,
+              axes: entry.axes,
+              stupidScore: combinedScore,
+              suite: 'combined',
+              confidence_lower: entry.confidence_lower,
+              confidence_upper: entry.confidence_upper
+            };
+          })
+          .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()); // Most recent first
+
+        console.log(`📊 Combined history for model ${modelId} (${period}): ${formattedHistory.length} data points`);
+        
+        return {
+          success: true,
+          data: formattedHistory,
+          period,
+          sortBy: 'combined',
+          dataPoints: formattedHistory.length,
+          timeRange: {
+            from: timeThreshold.toISOString(),
+            to: new Date().toISOString()
+          }
+        };
       }
 
       // Get historical data based on sort mode - FIXED to include CI fields

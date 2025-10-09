@@ -32,13 +32,24 @@ export default async function (fastify: FastifyInstance, opts: any) {
   });
 
   // Get model details with period-specific score
-  fastify.get('/:id', async (req: any) => {
+  fastify.get('/:id', async (req: any, reply: any) => {
     const modelId = parseInt(req.params.id);
+    
+    // Validate modelId
+    if (isNaN(modelId) || modelId <= 0) {
+      reply.code(400);
+      return { error: 'Invalid model ID' };
+    }
+    
     const period = req.query?.period as string || 'latest';
     
     try {
       const model = await db.select().from(models).where(eq(models.id, modelId)).limit(1);
-      if (model.length === 0) return null;
+      
+      if (model.length === 0) {
+        reply.code(404);
+        return { error: 'Model not found' };
+      }
 
       let latestScore;
       
@@ -116,7 +127,11 @@ export default async function (fastify: FastifyInstance, opts: any) {
       };
     } catch (error) {
       console.error('Error fetching model:', error);
-      return null;
+      reply.code(500);
+      return { 
+        error: 'Internal server error while fetching model details',
+        message: error instanceof Error ? error.message : 'Unknown error'
+      };
     }
   });
 
@@ -420,16 +435,33 @@ export default async function (fastify: FastifyInstance, opts: any) {
   fastify.get('/:id/stats', async (req: any) => {
     const modelId = parseInt(req.params.id);
     const period = req.query?.period as string || 'latest';
+    const sortBy = req.query?.sortBy as string || 'combined'; // FIXED: Respect scoring mode
     
     try {
-      // Determine date filter based on period
+      // FIXED: Use the SAME logic as dashboard to respect both period AND sortBy
+      // Determine date filter and suite based on period and sortBy
       let whereClauseRuns, whereClauseScores;
       let dataPoints: number;
+      let suiteFilter: string;
+      
+      // Determine suite based on sortBy (same as dashboard)
+      if (sortBy === 'reasoning') {
+        suiteFilter = 'deep';
+      } else if (sortBy === 'tooling') {
+        suiteFilter = 'tooling';
+      } else if (sortBy === '7axis' || sortBy === 'speed') {
+        suiteFilter = 'hourly';
+      } else { // combined
+        suiteFilter = 'hourly'; // For combined, we'll handle it specially below
+      }
       
       if (period === 'latest') {
         // Get recent data for latest view
         whereClauseRuns = eq(runs.modelId, modelId);
-        whereClauseScores = eq(scores.modelId, modelId);
+        whereClauseScores = and(
+          eq(scores.modelId, modelId),
+          eq(scores.suite, suiteFilter)
+        );
         dataPoints = 24; // Last 24 data points like dashboard
       } else {
         // Filter by period - use same logic as dashboard
@@ -444,43 +476,132 @@ export default async function (fastify: FastifyInstance, opts: any) {
         );
         whereClauseScores = and(
           eq(scores.modelId, modelId),
+          eq(scores.suite, suiteFilter),
           gte(scores.ts, sinceStr)
         );
         dataPoints = period === '24h' ? 48 : period === '7d' ? 336 : 1440;
       }
 
-      // Get ALL scores within period (not just latest) - matching dashboard approach
-      const allScoresInPeriod = await db
-        .select()
-        .from(scores)
-        .where(whereClauseScores)
-        .orderBy(desc(scores.ts))
-        .limit(dataPoints);
-
-      // Filter out null scores like dashboard does
-      const validScores = allScoresInPeriod.filter(s => s.stupidScore !== null);
-
-      // Calculate period average score (matching dashboard logic)
+      // FIXED: Handle combined mode specially (70% hourly + 30% deep)
       let currentDisplayScore = 0;
-      if (validScores.length > 0) {
-        // Convert all scores to display format and average them
-        const convertedScores = validScores.map(score => {
-          const rawScore = score.stupidScore;
+      
+      // Calculate the timestamp threshold for period filtering
+      let timestampThreshold: string | null = null;
+      if (period !== 'latest') {
+        const days = period === '24h' ? 1 : period === '7d' ? 7 : period === '1m' ? 30 : 1;
+        const since = new Date();
+        since.setDate(since.getDate() - days);
+        timestampThreshold = since.toISOString();
+      }
+      
+      if (sortBy === 'combined') {
+        // Get both hourly and deep scores for combined mode
+        const hourlyScores = await db
+          .select()
+          .from(scores)
+          .where(
+            timestampThreshold
+              ? and(
+                  eq(scores.modelId, modelId),
+                  eq(scores.suite, 'hourly'),
+                  gte(scores.ts, timestampThreshold)
+                )
+              : and(
+                  eq(scores.modelId, modelId),
+                  eq(scores.suite, 'hourly')
+                )
+          )
+          .orderBy(desc(scores.ts))
+          .limit(dataPoints);
+        
+        const deepScores = await db
+          .select()
+          .from(scores)
+          .where(
+            timestampThreshold
+              ? and(
+                  eq(scores.modelId, modelId),
+                  eq(scores.suite, 'deep'),
+                  gte(scores.ts, timestampThreshold)
+                )
+              : and(
+                  eq(scores.modelId, modelId),
+                  eq(scores.suite, 'deep')
+                )
+          )
+          .orderBy(desc(scores.ts))
+          .limit(dataPoints);
+        
+        // Filter valid scores
+        const validHourly = hourlyScores.filter(s => s.stupidScore !== null && s.stupidScore >= 0);
+        const validDeep = deepScores.filter(s => s.stupidScore !== null && s.stupidScore >= 0);
+        
+        if (validHourly.length > 0 || validDeep.length > 0) {
+          // Convert scores
+          const hourlyConverted = validHourly.map(s => {
+            const raw = s.stupidScore;
+            return Math.abs(raw) < 1 || Math.abs(raw) > 100 ?
+              Math.max(0, Math.min(100, Math.round(50 - raw * 100))) :
+              Math.max(0, Math.min(100, Math.round(raw)));
+          });
           
-          // Use same robust detection logic as dashboard
-          if (Math.abs(rawScore) < 1 || Math.abs(rawScore) > 100) {
-            // Raw format (e.g., 0.123, -0.456)
-            return Math.max(0, Math.min(100, Math.round(50 - rawScore * 100)));
+          const deepConverted = validDeep.map(s => {
+            const raw = s.stupidScore;
+            return Math.abs(raw) < 1 || Math.abs(raw) > 100 ?
+              Math.max(0, Math.min(100, Math.round(50 - raw * 100))) :
+              Math.max(0, Math.min(100, Math.round(raw)));
+          });
+          
+          // Calculate averages
+          const hourlyAvg = hourlyConverted.length > 0 ?
+            hourlyConverted.reduce((sum, s) => sum + s, 0) / hourlyConverted.length : 0;
+          const deepAvg = deepConverted.length > 0 ?
+            deepConverted.reduce((sum, s) => sum + s, 0) / deepConverted.length : 0;
+          
+          // Combine with 70% hourly + 30% deep weighting
+          if (hourlyConverted.length > 0 && deepConverted.length > 0) {
+            currentDisplayScore = Math.round(hourlyAvg * 0.7 + deepAvg * 0.3);
+          } else if (hourlyConverted.length > 0) {
+            currentDisplayScore = Math.round(hourlyAvg);
           } else {
-            // Already in percentage-like format
-            return Math.max(0, Math.min(100, Math.round(rawScore)));
+            currentDisplayScore = Math.round(deepAvg);
           }
-        });
+        }
+      } else {
+        // For non-combined modes, get scores from the specific suite
+        const allScoresInPeriod = await db
+          .select()
+          .from(scores)
+          .where(whereClauseScores)
+          .orderBy(desc(scores.ts))
+          .limit(dataPoints);
 
-        // Calculate period average - this is what makes periods different!
-        currentDisplayScore = Math.round(
-          convertedScores.reduce((sum, score) => sum + score, 0) / convertedScores.length
+        // Filter out null scores like dashboard does
+        const validScores = allScoresInPeriod.filter(s => 
+          s.stupidScore !== null && s.stupidScore >= 0
         );
+
+        // Calculate period average score (matching dashboard logic)
+        if (validScores.length > 0) {
+          // Convert all scores to display format and average them
+          const convertedScores = validScores.map(score => {
+            const rawScore = score.stupidScore;
+            
+            // Use same robust detection logic as dashboard
+            if (Math.abs(rawScore) < 1 || Math.abs(rawScore) > 100) {
+              // Raw format (e.g., 0.123, -0.456)
+              return Math.max(0, Math.min(100, Math.round(50 - rawScore * 100)));
+            } else {
+              // Already in percentage-like format
+              return Math.max(0, Math.min(100, Math.round(rawScore)));
+            }
+          });
+
+          // Calculate period average - this is what makes periods different!
+          currentDisplayScore = Math.round(
+            convertedScores.reduce((sum, score) => sum + score, 0) / convertedScores.length
+          );
+        }
       }
 
       // Get total runs within period
@@ -512,7 +633,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
 
       return {
         modelId,
-        currentScore: currentDisplayScore, // Now period-specific average!
+        currentScore: currentDisplayScore, // Now period-specific AND mode-specific average!
         totalRuns: totalRunCount,
         successfulRuns: successCount,
         successRate: Math.round(successRate * 100),
@@ -521,8 +642,9 @@ export default async function (fastify: FastifyInstance, opts: any) {
         // Add debug info to understand the calculation
         debug: {
           period,
-          validScoresCount: validScores.length,
-          calculationMethod: 'period-average'
+          sortBy,
+          suite: suiteFilter,
+          calculationMethod: sortBy === 'combined' ? 'combined-average' : 'period-average'
         }
       };
     } catch (error) {
