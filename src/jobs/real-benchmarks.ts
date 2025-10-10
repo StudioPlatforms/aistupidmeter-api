@@ -2152,7 +2152,10 @@ async function ensureAllModelsInDatabase() {
     { name: 'openai', adapter: getAdapter('openai') },
     { name: 'xai', adapter: getAdapter('xai') },
     { name: 'anthropic', adapter: getAdapter('anthropic') },
-    { name: 'google', adapter: getAdapter('google') }
+    { name: 'google', adapter: getAdapter('google') },
+    { name: 'deepseek', adapter: getAdapter('deepseek') },
+    { name: 'kimi', adapter: getAdapter('kimi') },
+    { name: 'glm', adapter: getAdapter('glm') }
   ];
   
   let newModelsAdded = 0;

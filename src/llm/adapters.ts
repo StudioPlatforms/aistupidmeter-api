@@ -662,24 +662,11 @@ export class DeepSeekAdapter implements LLMAdapter {
   constructor(private apiKey: string, private base = 'https://api.deepseek.com') {}
   
   async listModels() {
-    try {
-      const r = await fetch(`${this.base}/v1/models`, {
-        headers: { Authorization: `Bearer ${this.apiKey}` }
-      });
-      const j: any = await r.json();
-      return (j?.data ?? [])
-        .map((m: any) => m.id)
-        .filter((id: string) => /^deepseek/.test(id));
-    } catch {
-      // Fallback to known models
-      return [
-        'deepseek-chat',
-        'deepseek-reasoner', 
-        'deepseek-r1-0528',
-        'deepseek-v3.1',
-        'deepseek-vl2'
-      ];
-    }
+    // DeepSeek doesn't have a models endpoint, return known models
+    return [
+      'deepseek-chat',
+      'deepseek-reasoner'
+    ];
   }
   
   async chat(req: ChatRequest): Promise<ChatResponse> {
@@ -691,8 +678,8 @@ export class DeepSeekAdapter implements LLMAdapter {
       stream: req.stream ?? false
     };
 
-    // Add tools if provided
-    if (req.tools?.length) {
+    // Add tools if provided (but note: deepseek-reasoner doesn't support tools)
+    if (req.tools?.length && req.model !== 'deepseek-reasoner') {
       body.tools = req.tools.map(t => ({
         type: 'function',
         function: {
@@ -703,7 +690,7 @@ export class DeepSeekAdapter implements LLMAdapter {
       }));
     }
 
-    if (req.toolChoice) {
+    if (req.toolChoice && req.model !== 'deepseek-reasoner') {
       body.tool_choice = req.toolChoice;
     }
 
@@ -735,7 +722,11 @@ export class DeepSeekAdapter implements LLMAdapter {
     
     const choice = j?.choices?.[0];
     const message = choice?.message;
-    const text = message?.content || '';
+    // Handle reasoning models that put content in reasoning_content field
+    let text = message?.content || '';
+    if (!text && message?.reasoning_content) {
+      text = message.reasoning_content;
+    }
     
     // Extract tool calls if present
     const toolCalls = (message?.tool_calls ?? []).map((t: any) => ({
@@ -764,16 +755,17 @@ export class KimiAdapter implements LLMAdapter {
       const r = await fetch(`${this.base}/v1/models`, {
         headers: { Authorization: `Bearer ${this.apiKey}` }
       });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j: any = await r.json();
       return (j?.data ?? [])
         .map((m: any) => m.id)
         .filter((id: string) => /^kimi/.test(id));
     } catch {
-      // Fallback to known models
+      // Fallback to known working models
       return [
-        'kimi-k2-instruct-0905',
-        'kimi-vl-thinking',
-        'kimi-k1.5'
+        'kimi-k2-0905-preview',
+        'kimi-latest',
+        'kimi-thinking-preview'
       ];
     }
   }
@@ -831,7 +823,11 @@ export class KimiAdapter implements LLMAdapter {
     
     const choice = j?.choices?.[0];
     const message = choice?.message;
-    const text = message?.content || '';
+    // Handle reasoning models that put content in reasoning_content field
+    let text = message?.content || '';
+    if (!text && message?.reasoning_content) {
+      text = message.reasoning_content;
+    }
     
     // Extract tool calls if present
     const toolCalls = (message?.tool_calls ?? []).map((t: any) => ({
@@ -856,24 +852,20 @@ export class GLMAdapter implements LLMAdapter {
   constructor(private apiKey: string, private base = 'https://api.z.ai/api/paas/v4') {}
   
   async listModels() {
-    try {
-      // GLM doesn't have a models endpoint, so return known models
-      return ['glm-4.6'];
-    } catch {
-      return ['glm-4.6'];
-    }
+    // GLM doesn't have a models endpoint, return known models
+    return ['glm-4.6'];
   }
   
   async chat(req: ChatRequest): Promise<ChatResponse> {
     const body: any = {
       model: req.model,
       messages: req.messages,
-      temperature: req.temperature ?? 1.0, // GLM default is 1.0
+      temperature: req.temperature ?? 1.0, // GLM-4.6 default is 1.0
       max_tokens: req.maxTokens ?? 4096,
       stream: req.stream ?? false
     };
 
-    // Enable thinking mode for GLM-4.6 reasoning capabilities
+    // Enable thinking mode for GLM-4.6 reasoning capabilities (as per docs)
     if (req.model === 'glm-4.6') {
       body.thinking = { type: 'enabled' };
     }
@@ -894,6 +886,12 @@ export class GLMAdapter implements LLMAdapter {
       body.tool_choice = req.toolChoice;
     }
 
+    if (req.jsonSchema) {
+      body.response_format = {
+        type: "json_object"
+      };
+    }
+
     const r = await fetch(`${this.base}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -910,10 +908,13 @@ export class GLMAdapter implements LLMAdapter {
 
     const j: any = await r.json();
     
-    // Handle both streaming and non-streaming responses
     const choice = j?.choices?.[0];
     const message = choice?.message;
-    const text = message?.content || '';
+    // Handle reasoning models that put content in reasoning_content field
+    let text = message?.content || '';
+    if (!text && message?.reasoning_content) {
+      text = message.reasoning_content;
+    }
     
     // Extract tool calls if present
     const toolCalls = (message?.tool_calls ?? []).map((t: any) => ({
