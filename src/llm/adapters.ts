@@ -1,5 +1,5 @@
 // LLM Adapter Layer for Multiple AI Providers
-export type Provider = 'openai' | 'xai' | 'anthropic' | 'google';
+export type Provider = 'openai' | 'xai' | 'anthropic' | 'google' | 'glm' | 'deepseek' | 'kimi';
 
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string; }
 export interface ToolDef {
@@ -654,5 +654,295 @@ export class GoogleAdapter implements LLMAdapter {
       toolCalls,
       raw: j
     };
+  }
+}
+
+// ---------- DEEPSEEK ----------
+export class DeepSeekAdapter implements LLMAdapter {
+  constructor(private apiKey: string, private base = 'https://api.deepseek.com') {}
+  
+  async listModels() {
+    try {
+      const r = await fetch(`${this.base}/v1/models`, {
+        headers: { Authorization: `Bearer ${this.apiKey}` }
+      });
+      const j: any = await r.json();
+      return (j?.data ?? [])
+        .map((m: any) => m.id)
+        .filter((id: string) => /^deepseek/.test(id));
+    } catch {
+      // Fallback to known models
+      return [
+        'deepseek-chat',
+        'deepseek-reasoner', 
+        'deepseek-r1-0528',
+        'deepseek-v3.1',
+        'deepseek-vl2'
+      ];
+    }
+  }
+  
+  async chat(req: ChatRequest): Promise<ChatResponse> {
+    const body: any = {
+      model: req.model,
+      messages: req.messages,
+      temperature: req.temperature ?? 1.0, // DeepSeek default is 1.0
+      max_tokens: req.maxTokens ?? 4096,
+      stream: req.stream ?? false
+    };
+
+    // Add tools if provided
+    if (req.tools?.length) {
+      body.tools = req.tools.map(t => ({
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters || { type: 'object', properties: {} }
+        }
+      }));
+    }
+
+    if (req.toolChoice) {
+      body.tool_choice = req.toolChoice;
+    }
+
+    if (req.jsonSchema) {
+      body.response_format = {
+        type: "json_schema",
+        json_schema: {
+          name: req.jsonSchemaName || 'Result',
+          schema: req.jsonSchema
+        }
+      };
+    }
+
+    const r = await fetch(`${this.base}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!r.ok) {
+      const errTxt = await r.text().catch(() => '');
+      throw new Error(`DeepSeek ${r.status}: ${errTxt}`);
+    }
+
+    const j: any = await r.json();
+    
+    const choice = j?.choices?.[0];
+    const message = choice?.message;
+    const text = message?.content || '';
+    
+    // Extract tool calls if present
+    const toolCalls = (message?.tool_calls ?? []).map((t: any) => ({
+      name: t.function?.name,
+      arguments: typeof t.function?.arguments === 'string' 
+        ? JSON.parse(t.function.arguments) 
+        : t.function?.arguments
+    }));
+
+    return {
+      text,
+      tokensIn: j?.usage?.prompt_tokens ?? 0,
+      tokensOut: j?.usage?.completion_tokens ?? 0,
+      toolCalls,
+      raw: j
+    };
+  }
+}
+
+// ---------- KIMI (Moonshot AI) ----------
+export class KimiAdapter implements LLMAdapter {
+  constructor(private apiKey: string, private base = 'https://api.moonshot.ai') {}
+  
+  async listModels() {
+    try {
+      const r = await fetch(`${this.base}/v1/models`, {
+        headers: { Authorization: `Bearer ${this.apiKey}` }
+      });
+      const j: any = await r.json();
+      return (j?.data ?? [])
+        .map((m: any) => m.id)
+        .filter((id: string) => /^kimi/.test(id));
+    } catch {
+      // Fallback to known models
+      return [
+        'kimi-k2-instruct-0905',
+        'kimi-vl-thinking',
+        'kimi-k1.5'
+      ];
+    }
+  }
+  
+  async chat(req: ChatRequest): Promise<ChatResponse> {
+    const body: any = {
+      model: req.model,
+      messages: req.messages,
+      temperature: req.temperature ?? 0.6, // Kimi recommended default
+      max_tokens: req.maxTokens ?? 4096,
+      stream: req.stream ?? false
+    };
+
+    // Add tools if provided
+    if (req.tools?.length) {
+      body.tools = req.tools.map(t => ({
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters || { type: 'object', properties: {} }
+        }
+      }));
+    }
+
+    if (req.toolChoice) {
+      body.tool_choice = req.toolChoice;
+    }
+
+    if (req.jsonSchema) {
+      body.response_format = {
+        type: "json_schema",
+        json_schema: {
+          name: req.jsonSchemaName || 'Result',
+          schema: req.jsonSchema
+        }
+      };
+    }
+
+    const r = await fetch(`${this.base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!r.ok) {
+      const errTxt = await r.text().catch(() => '');
+      throw new Error(`Kimi ${r.status}: ${errTxt}`);
+    }
+
+    const j: any = await r.json();
+    
+    const choice = j?.choices?.[0];
+    const message = choice?.message;
+    const text = message?.content || '';
+    
+    // Extract tool calls if present
+    const toolCalls = (message?.tool_calls ?? []).map((t: any) => ({
+      name: t.function?.name,
+      arguments: typeof t.function?.arguments === 'string' 
+        ? JSON.parse(t.function.arguments) 
+        : t.function?.arguments
+    }));
+
+    return {
+      text,
+      tokensIn: j?.usage?.prompt_tokens ?? 0,
+      tokensOut: j?.usage?.completion_tokens ?? 0,
+      toolCalls,
+      raw: j
+    };
+  }
+}
+
+// ---------- GLM (Z.AI) ----------
+export class GLMAdapter implements LLMAdapter {
+  constructor(private apiKey: string, private base = 'https://api.z.ai/api/paas/v4') {}
+  
+  async listModels() {
+    try {
+      // GLM doesn't have a models endpoint, so return known models
+      return ['glm-4.6'];
+    } catch {
+      return ['glm-4.6'];
+    }
+  }
+  
+  async chat(req: ChatRequest): Promise<ChatResponse> {
+    const body: any = {
+      model: req.model,
+      messages: req.messages,
+      temperature: req.temperature ?? 1.0, // GLM default is 1.0
+      max_tokens: req.maxTokens ?? 4096,
+      stream: req.stream ?? false
+    };
+
+    // Enable thinking mode for GLM-4.6 reasoning capabilities
+    if (req.model === 'glm-4.6') {
+      body.thinking = { type: 'enabled' };
+    }
+
+    // Add tools if provided
+    if (req.tools?.length) {
+      body.tools = req.tools.map(t => ({
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters || { type: 'object', properties: {} }
+        }
+      }));
+    }
+
+    if (req.toolChoice) {
+      body.tool_choice = req.toolChoice;
+    }
+
+    const r = await fetch(`${this.base}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!r.ok) {
+      const errTxt = await r.text().catch(() => '');
+      throw new Error(`GLM ${r.status}: ${errTxt}`);
+    }
+
+    const j: any = await r.json();
+    
+    // Handle both streaming and non-streaming responses
+    const choice = j?.choices?.[0];
+    const message = choice?.message;
+    const text = message?.content || '';
+    
+    // Extract tool calls if present
+    const toolCalls = (message?.tool_calls ?? []).map((t: any) => ({
+      name: t.function?.name,
+      arguments: typeof t.function?.arguments === 'string' 
+        ? JSON.parse(t.function.arguments) 
+        : t.function?.arguments
+    }));
+
+    return {
+      text,
+      tokensIn: j?.usage?.prompt_tokens ?? 0,
+      tokensOut: j?.usage?.completion_tokens ?? 0,
+      toolCalls,
+      raw: j
+    };
+  }
+}
+
+// Factory function to create adapters
+export function createAdapter(provider: Provider, apiKey: string): LLMAdapter {
+  switch (provider) {
+    case 'openai': return new OpenAIAdapter(apiKey);
+    case 'xai': return new XAIAdapter(apiKey);
+    case 'anthropic': return new AnthropicAdapter(apiKey);
+    case 'google': return new GoogleAdapter(apiKey);
+    case 'glm': return new GLMAdapter(apiKey);
+    case 'deepseek': return new DeepSeekAdapter(apiKey);
+    case 'kimi': return new KimiAdapter(apiKey);
+    default: throw new Error(`Unknown provider: ${provider}`);
   }
 }

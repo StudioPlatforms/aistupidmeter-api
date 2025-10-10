@@ -449,7 +449,10 @@ function getAdapter(provider: Provider): any {
     openai: process.env.OPENAI_API_KEY,
     xai: process.env.XAI_API_KEY,
     anthropic: process.env.ANTHROPIC_API_KEY,
-    google: process.env.GOOGLE_API_KEY,
+    google: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
+    glm: process.env.GLM_API_KEY,
+    deepseek: process.env.DEEPSEEK_API_KEY,
+    kimi: process.env.KIMI_API_KEY
   };
 
   const key = keys[provider];

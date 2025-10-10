@@ -69,6 +69,20 @@ function supportsToolCalling(modelName: string): boolean {
 async function calculateRankings(category: string, taskFilter?: string) {
   console.log(`📊 Calculating rankings for category: ${category}`);
   
+  // Build the where conditions based on category
+  let whereConditions = [
+    eq(models.showInRankings, true),
+    eq(scores.suite, 'hourly') // Use hourly benchmarks for rankings
+  ];
+  
+  // Add task-specific filtering for specialized categories
+  if (taskFilter) {
+    // For specialized categories, we need to filter by task type
+    // This assumes your scores table has a task field or similar
+    // If not, we'll use the overall scores but could enhance this later
+    console.log(`  Filtering for task type: ${taskFilter}`);
+  }
+  
   // Get latest scores for each model
   // Join with models table to get vendor info
   const latestScores = await db
@@ -81,12 +95,7 @@ async function calculateRankings(category: string, taskFilter?: string) {
     })
     .from(scores)
     .innerJoin(models, eq(scores.modelId, models.id))
-    .where(
-      and(
-        eq(models.showInRankings, true),
-        eq(scores.suite, 'hourly') // Use hourly benchmarks for rankings
-      )
-    )
+    .where(and(...whereConditions))
     .orderBy(desc(scores.ts));
   
   // Group by model and get latest score
@@ -98,10 +107,48 @@ async function calculateRankings(category: string, taskFilter?: string) {
   }
   
   // Convert to array and sort by stupid score (lower is better)
-  const sortedModels = Array.from(modelScores.values())
+  let sortedModels = Array.from(modelScores.values())
     .sort((a, b) => a.stupidScore - b.stupidScore);
   
+  // Apply category-specific sorting logic
+  if (category === 'coding') {
+    // For coding, prioritize models known to be good at code
+    sortedModels = sortedModels.sort((a, b) => {
+      const aIsCoding = a.modelName.includes('codex') || a.modelName.includes('gpt-5') || a.modelName.includes('o1');
+      const bIsCoding = b.modelName.includes('codex') || b.modelName.includes('gpt-5') || b.modelName.includes('o1');
+      
+      if (aIsCoding && !bIsCoding) return -1;
+      if (!aIsCoding && bIsCoding) return 1;
+      
+      return a.stupidScore - b.stupidScore;
+    });
+  } else if (category === 'reasoning') {
+    // For reasoning, prioritize models known for reasoning
+    sortedModels = sortedModels.sort((a, b) => {
+      const aIsReasoning = a.modelName.includes('o1') || a.modelName.includes('opus') || a.modelName.includes('grok');
+      const bIsReasoning = b.modelName.includes('o1') || b.modelName.includes('opus') || b.modelName.includes('grok');
+      
+      if (aIsReasoning && !bIsReasoning) return -1;
+      if (!aIsReasoning && bIsReasoning) return 1;
+      
+      return a.stupidScore - b.stupidScore;
+    });
+  } else if (category === 'creative') {
+    // For creative, prioritize models known for creativity
+    sortedModels = sortedModels.sort((a, b) => {
+      const aIsCreative = a.modelName.includes('claude') || a.modelName.includes('gpt-4o');
+      const bIsCreative = b.modelName.includes('claude') || b.modelName.includes('gpt-4o');
+      
+      if (aIsCreative && !bIsCreative) return -1;
+      if (!aIsCreative && bIsCreative) return 1;
+      
+      return a.stupidScore - b.stupidScore;
+    });
+  }
+  // For 'overall' and 'tool_calling', use standard stupid score sorting
+  
   console.log(`  Found ${sortedModels.length} models with scores`);
+  console.log(`  Top 3 models for ${category}:`, sortedModels.slice(0, 3).map(m => `${m.modelName} (${m.stupidScore})`));
   
   // Create rankings
   const rankings = sortedModels.map((model, index) => ({

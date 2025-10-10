@@ -227,6 +227,16 @@ async function calculateAggregateScores(results: any[]): Promise<void> {
     const name = rows[0]?.modelName ?? `Model ${modelId}`;
     console.log(`📈 ${name}: Stupid Score = ${stupidScore.toFixed(3)}`);
   }
+
+  // AUTOMATIC ROUTER CACHE INVALIDATION: Invalidate router cache after tool benchmark completion
+  try {
+    const { invalidateRouterCache } = await import('../router/selector');
+    invalidateRouterCache('tooling'); // Invalidate tooling suite cache
+    console.log('🗑️ Router cache invalidated for tooling suite');
+  } catch (routerCacheError) {
+    console.warn('⚠️ Router cache invalidation failed:', String(routerCacheError).slice(0, 200));
+    // Don't fail the entire benchmark if router cache invalidation fails
+  }
 }
 
 function calculateModelMetrics(benchmarks: any[]): Record<string, number> {

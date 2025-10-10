@@ -11,6 +11,9 @@ import {
   AnthropicAdapter, 
   GoogleAdapter,
   XAIAdapter,
+  GLMAdapter,
+  DeepSeekAdapter,
+  KimiAdapter,
   Provider,
   LLMAdapter
 } from '../llm/adapters';
@@ -49,7 +52,10 @@ function getAdapter(provider: Provider): LLMAdapter | null {
     openai: [process.env.OPENAI_API_KEY, process.env.OPENAI_API_KEY_2],
     xai: [process.env.XAI_API_KEY, process.env.XAI_API_KEY_2],
     anthropic: [process.env.ANTHROPIC_API_KEY, process.env.ANTHROPIC_API_KEY_2],
-    google: [process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY, process.env.GEMINI_API_KEY_2]
+    google: [process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY, process.env.GEMINI_API_KEY_2],
+    glm: [process.env.GLM_API_KEY, process.env.GLM_API_KEY_2],
+    deepseek: [process.env.DEEPSEEK_API_KEY, process.env.DEEPSEEK_API_KEY_2],
+    kimi: [process.env.KIMI_API_KEY, process.env.KIMI_API_KEY_2]
   };
   
   const keys = apiKeys[provider]?.filter((k): k is string => k !== undefined && k !== null && !k.startsWith('your_')) || [];
@@ -63,6 +69,9 @@ function getAdapter(provider: Provider): LLMAdapter | null {
     case 'xai': return new XAIAdapter(selectedKey);
     case 'anthropic': return new AnthropicAdapter(selectedKey);
     case 'google': return new GoogleAdapter(selectedKey);
+    case 'glm': return new GLMAdapter(selectedKey);
+    case 'deepseek': return new DeepSeekAdapter(selectedKey);
+    case 'kimi': return new KimiAdapter(selectedKey);
     default: return null;
   }
 }
@@ -662,6 +671,16 @@ export async function runDeepBenchmarks(): Promise<void> {
       }
     } else {
       console.log('⚠️ Cache refresh not available - frontend may not show updated scores immediately');
+    }
+
+    // AUTOMATIC ROUTER CACHE INVALIDATION: Invalidate router cache after deep benchmark completion
+    try {
+      const { invalidateRouterCache } = await import('../router/selector');
+      invalidateRouterCache('deep'); // Invalidate deep suite cache
+      console.log('🗑️ Router cache invalidated for deep suite');
+    } catch (routerCacheError) {
+      console.warn('⚠️ Router cache invalidation failed:', String(routerCacheError).slice(0, 200));
+      // Don't fail the entire benchmark if router cache invalidation fails
     }
     
   } catch (error) {

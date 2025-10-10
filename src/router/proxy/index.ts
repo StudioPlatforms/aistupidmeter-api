@@ -4,7 +4,7 @@ import { routerApiKeys, routerProviderKeys, routerRequests, routerUsage } from '
 import { eq, and } from 'drizzle-orm';
 import { hashApiKey, decryptProviderKey } from '../keys/encryption';
 import { selectBestModel } from '../selector';
-import { OpenAIAdapter, AnthropicAdapter, XAIAdapter, GoogleAdapter } from '../../llm/adapters';
+import { OpenAIAdapter, AnthropicAdapter, XAIAdapter, GoogleAdapter, GLMAdapter, DeepSeekAdapter, KimiAdapter } from '../../llm/adapters';
 import type { ChatMessage } from '../../llm/adapters';
 
 interface ChatCompletionRequest {
@@ -89,6 +89,12 @@ function createAdapter(provider: string, apiKey: string) {
       return new XAIAdapter(apiKey);
     case 'google':
       return new GoogleAdapter(apiKey);
+    case 'glm':
+      return new GLMAdapter(apiKey);
+    case 'deepseek':
+      return new DeepSeekAdapter(apiKey);
+    case 'kimi':
+      return new KimiAdapter(apiKey);
     default:
       throw new Error(`Unsupported provider: ${provider}`);
   }
@@ -115,6 +121,18 @@ function estimateCost(provider: string, model: string, tokensIn: number, tokensO
     'google': {
       'gemini-2.5-pro': { input: 0.00125, output: 0.005 },
       'gemini-2.5-flash': { input: 0.000075, output: 0.0003 },
+    },
+    'glm': {
+      'glm-4-6': { input: 0.00055, output: 0.00219 },
+    },
+    'deepseek': {
+      'deepseek-chat': { input: 0.00055, output: 0.00219 },
+      'deepseek-coder': { input: 0.00055, output: 0.00219 },
+    },
+    'kimi': {
+      'moonshot-v1-8k': { input: 0.00015, output: 0.0025 },
+      'moonshot-v1-32k': { input: 0.00015, output: 0.0025 },
+      'moonshot-v1-128k': { input: 0.00015, output: 0.0025 },
     }
   };
   

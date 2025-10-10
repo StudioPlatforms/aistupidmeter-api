@@ -7,6 +7,9 @@ import {
   XAIAdapter,
   AnthropicAdapter,
   GoogleAdapter,
+  GLMAdapter,
+  DeepSeekAdapter,
+  KimiAdapter,
   Provider,
   ChatRequest,
   LLMAdapter
@@ -243,7 +246,10 @@ const PROVIDER_COSTS = {
   openai: { input: 0.03, output: 0.06 },     // per 1k tokens (GPT-4 pricing)
   anthropic: { input: 0.03, output: 0.15 },  // Claude pricing
   google: { input: 0.0125, output: 0.0375 }, // Gemini Pro pricing
-  xai: { input: 0.002, output: 0.002 }       // Grok pricing
+  xai: { input: 0.002, output: 0.002 },      // Grok pricing
+  glm: { input: 0.001, output: 0.002 },      // GLM pricing (estimated)
+  deepseek: { input: 0.0014, output: 0.0028 }, // DeepSeek pricing
+  kimi: { input: 0.0015, output: 0.003 }     // Kimi pricing (estimated)
 } as const;
 
 // Drift detection parameters
@@ -535,6 +541,21 @@ export function getKeysForProvider(provider: Provider): string[] {
     google: [
       process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
       process.env.GEMINI_API_KEY_2
+    ],
+    
+    glm: [
+      process.env.GLM_API_KEY,
+      process.env.GLM_API_KEY_2
+    ],
+    
+    deepseek: [
+      process.env.DEEPSEEK_API_KEY,
+      process.env.DEEPSEEK_API_KEY_2
+    ],
+    
+    kimi: [
+      process.env.KIMI_API_KEY,
+      process.env.KIMI_API_KEY_2
     ]
   };
   
@@ -555,6 +576,9 @@ export function getAdapter(provider: Provider, keyIndex: number = 0): LLMAdapter
     case 'xai': return new XAIAdapter(selectedKey);
     case 'anthropic': return new AnthropicAdapter(selectedKey);
     case 'google': return new GoogleAdapter(selectedKey);
+    case 'glm': return new GLMAdapter(selectedKey);
+    case 'deepseek': return new DeepSeekAdapter(selectedKey);
+    case 'kimi': return new KimiAdapter(selectedKey);
     default: return null;
   }
 }
@@ -2290,6 +2314,16 @@ export async function runRealBenchmarks() {
       }
     } else {
       console.log('⚠️ Cache refresh not available - frontend may not show updated scores immediately');
+    }
+
+    // AUTOMATIC ROUTER CACHE INVALIDATION: Invalidate router cache after benchmark completion
+    try {
+      const { invalidateRouterCache } = await import('../router/selector');
+      invalidateRouterCache('hourly'); // Invalidate hourly suite cache
+      console.log('🗑️ Router cache invalidated for hourly suite');
+    } catch (routerCacheError) {
+      console.warn('⚠️ Router cache invalidation failed:', String(routerCacheError).slice(0, 200));
+      // Don't fail the entire benchmark if router cache invalidation fails
     }
   } catch (e) {
     console.error('❌ Benchmark sweep failed:', e);
