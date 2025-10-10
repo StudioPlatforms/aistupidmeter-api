@@ -610,7 +610,7 @@ export async function runDeepBenchmarks(): Promise<void> {
     console.log(`📊 Found ${allModels.length} whitelisted models in database`);
     
     // Filter for supported providers
-    const supportedProviders: Provider[] = ['openai', 'anthropic', 'google', 'xai'];
+    const supportedProviders: Provider[] = ['openai', 'anthropic', 'google', 'xai', 'deepseek', 'glm', 'kimi'];
     const deepModels = allModels.filter(m => 
       supportedProviders.includes(m.vendor as Provider)
     ) as Array<ModelInfo>;
