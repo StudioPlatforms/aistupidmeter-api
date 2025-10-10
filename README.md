@@ -368,4 +368,4 @@ npm run test:coverage
 - **Live API**: [https://aistupidlevel.info](https://aistupidlevel.info)
 - **Frontend**: [https://github.com/StudioPlatforms/aistupidmeter-web](https://github.com/StudioPlatforms/aistupidmeter-web)
 
-*Last Updated: January 2025*
+*Last Updated: October 2025*
