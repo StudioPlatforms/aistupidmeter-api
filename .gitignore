@@ -61,3 +61,13 @@ check-*.js
 trigger-*.js
 production-init.js
 run-seed.js
+enable-*.js
+add-tool-tables.js
+backfill-confidence-intervals.js
+create-health-table.js
+create-incidents-table.js
+update-rankings.js
+
+# Keep essential scripts (exceptions to above patterns):
+# ecosystem.config.js - PM2 configuration
+# run-*-migration.js - Database migrations
