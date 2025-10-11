@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import path from 'path';
-import { OpenAIAdapter, XAIAdapter, AnthropicAdapter, GoogleAdapter } from '../llm/adapters';
+import { OpenAIAdapter, XAIAdapter, AnthropicAdapter, GoogleAdapter, DeepSeekAdapter, GLMAdapter, KimiAdapter } from '../llm/adapters';
 
 // Database connection
 const dbPath = path.join(__dirname, '../../data/benchmarks.db');
@@ -47,6 +47,18 @@ function getAdapters() {
     adapters.google = new GoogleAdapter(geminiApiKey);
   }
   
+  if (process.env.DEEPSEEK_API_KEY) {
+    adapters.deepseek = new DeepSeekAdapter(process.env.DEEPSEEK_API_KEY);
+  }
+  
+  if (process.env.GLM_API_KEY) {
+    adapters.glm = new GLMAdapter(process.env.GLM_API_KEY);
+  }
+  
+  if (process.env.KIMI_API_KEY) {
+    adapters.kimi = new KimiAdapter(process.env.KIMI_API_KEY);
+  }
+  
   return adapters;
 }
 
@@ -69,6 +81,15 @@ async function checkProviderHealth(provider: string, adapter: any): Promise<Heal
         break;
       case 'xai':
         testModel = 'grok-4'; // Latest Grok 4
+        break;
+      case 'deepseek':
+        testModel = 'deepseek-chat'; // Fast DeepSeek model
+        break;
+      case 'glm':
+        testModel = 'glm-4.6'; // GLM-4.6
+        break;
+      case 'kimi':
+        testModel = 'kimi-latest'; // Latest Kimi model
         break;
       default:
         // Fallback to listModels for unknown providers
