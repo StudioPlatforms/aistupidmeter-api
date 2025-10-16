@@ -482,125 +482,83 @@ export default async function (fastify: FastifyInstance, opts: any) {
         dataPoints = period === '24h' ? 48 : period === '7d' ? 336 : 1440;
       }
 
-      // FIXED: Handle combined mode specially (70% hourly + 30% deep)
+      // FIXED: Use LATEST score logic to match dashboard (not period average)
+      // Include tooling in combined score: 50% hourly + 25% deep + 25% tooling
       let currentDisplayScore = 0;
       
-      // Calculate the timestamp threshold for period filtering
-      let timestampThreshold: string | null = null;
-      if (period !== 'latest') {
-        const days = period === '24h' ? 1 : period === '7d' ? 7 : period === '1m' ? 30 : 1;
-        const since = new Date();
-        since.setDate(since.getDate() - days);
-        timestampThreshold = since.toISOString();
-      }
-      
       if (sortBy === 'combined') {
-        // Get both hourly and deep scores for combined mode
-        const hourlyScores = await db
+        // Get LATEST hourly, deep, and tooling scores
+        const latestHourlyScore = await db
           .select()
           .from(scores)
-          .where(
-            timestampThreshold
-              ? and(
-                  eq(scores.modelId, modelId),
-                  eq(scores.suite, 'hourly'),
-                  gte(scores.ts, timestampThreshold)
-                )
-              : and(
-                  eq(scores.modelId, modelId),
-                  eq(scores.suite, 'hourly')
-                )
-          )
+          .where(and(
+            eq(scores.modelId, modelId),
+            eq(scores.suite, 'hourly')
+          ))
           .orderBy(desc(scores.ts))
-          .limit(dataPoints);
+          .limit(1);
         
-        const deepScores = await db
+        const latestDeepScore = await db
           .select()
           .from(scores)
-          .where(
-            timestampThreshold
-              ? and(
-                  eq(scores.modelId, modelId),
-                  eq(scores.suite, 'deep'),
-                  gte(scores.ts, timestampThreshold)
-                )
-              : and(
-                  eq(scores.modelId, modelId),
-                  eq(scores.suite, 'deep')
-                )
-          )
+          .where(and(
+            eq(scores.modelId, modelId),
+            eq(scores.suite, 'deep')
+          ))
           .orderBy(desc(scores.ts))
-          .limit(dataPoints);
+          .limit(1);
         
-        // Filter valid scores
-        const validHourly = hourlyScores.filter(s => s.stupidScore !== null && s.stupidScore >= 0);
-        const validDeep = deepScores.filter(s => s.stupidScore !== null && s.stupidScore >= 0);
+        const latestToolingScore = await db
+          .select()
+          .from(scores)
+          .where(and(
+            eq(scores.modelId, modelId),
+            eq(scores.suite, 'tooling')
+          ))
+          .orderBy(desc(scores.ts))
+          .limit(1);
         
-        if (validHourly.length > 0 || validDeep.length > 0) {
-          // Convert scores
-          const hourlyConverted = validHourly.map(s => {
-            const raw = s.stupidScore;
-            return Math.abs(raw) < 1 || Math.abs(raw) > 100 ?
-              Math.max(0, Math.min(100, Math.round(50 - raw * 100))) :
-              Math.max(0, Math.min(100, Math.round(raw)));
-          });
+        const hourlyScore = latestHourlyScore[0];
+        const deepScore = latestDeepScore[0];
+        const toolingScore = latestToolingScore[0];
+        
+        // Check which scores are available
+        const hasHourly = hourlyScore && hourlyScore.stupidScore !== null && hourlyScore.stupidScore >= 0;
+        const hasDeep = deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0;
+        const hasTooling = toolingScore && toolingScore.stupidScore !== null && toolingScore.stupidScore >= 0;
+        
+        if (hasHourly || hasDeep || hasTooling) {
+          // Get display scores (0-100 range)
+          const hourlyDisplay = hasHourly ? Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore))) : 50;
+          const deepDisplay = hasDeep ? Math.max(0, Math.min(100, Math.round(deepScore.stupidScore))) : 50;
+          const toolingDisplay = hasTooling ? Math.max(0, Math.min(100, Math.round(toolingScore.stupidScore))) : 50;
           
-          const deepConverted = validDeep.map(s => {
-            const raw = s.stupidScore;
-            return Math.abs(raw) < 1 || Math.abs(raw) > 100 ?
-              Math.max(0, Math.min(100, Math.round(50 - raw * 100))) :
-              Math.max(0, Math.min(100, Math.round(raw)));
-          });
-          
-          // Calculate averages
-          const hourlyAvg = hourlyConverted.length > 0 ?
-            hourlyConverted.reduce((sum, s) => sum + s, 0) / hourlyConverted.length : 0;
-          const deepAvg = deepConverted.length > 0 ?
-            deepConverted.reduce((sum, s) => sum + s, 0) / deepConverted.length : 0;
-          
-          // Combine with 70% hourly + 30% deep weighting
-          if (hourlyConverted.length > 0 && deepConverted.length > 0) {
-            currentDisplayScore = Math.round(hourlyAvg * 0.7 + deepAvg * 0.3);
-          } else if (hourlyConverted.length > 0) {
-            currentDisplayScore = Math.round(hourlyAvg);
-          } else {
-            currentDisplayScore = Math.round(deepAvg);
-          }
+          // Combine LATEST scores with 50% hourly + 25% deep + 25% tooling weighting (matching dashboard)
+          currentDisplayScore = Math.round(hourlyDisplay * 0.5 + deepDisplay * 0.25 + toolingDisplay * 0.25);
         }
       } else {
-        // For non-combined modes, get scores from the specific suite
-        const allScoresInPeriod = await db
+        // For non-combined modes, get LATEST score from the specific suite
+        const latestScore = await db
           .select()
           .from(scores)
-          .where(whereClauseScores)
+          .where(and(
+            eq(scores.modelId, modelId),
+            eq(scores.suite, suiteFilter)
+          ))
           .orderBy(desc(scores.ts))
-          .limit(dataPoints);
+          .limit(1);
 
-        // Filter out null scores like dashboard does
-        const validScores = allScoresInPeriod.filter(s => 
-          s.stupidScore !== null && s.stupidScore >= 0
-        );
-
-        // Calculate period average score (matching dashboard logic)
-        if (validScores.length > 0) {
-          // Convert all scores to display format and average them
-          const convertedScores = validScores.map(score => {
-            const rawScore = score.stupidScore;
-            
-            // Use same robust detection logic as dashboard
-            if (Math.abs(rawScore) < 1 || Math.abs(rawScore) > 100) {
-              // Raw format (e.g., 0.123, -0.456)
-              return Math.max(0, Math.min(100, Math.round(50 - rawScore * 100)));
-            } else {
-              // Already in percentage-like format
-              return Math.max(0, Math.min(100, Math.round(rawScore)));
-            }
-          });
-
-          // Calculate period average - this is what makes periods different!
-          currentDisplayScore = Math.round(
-            convertedScores.reduce((sum, score) => sum + score, 0) / convertedScores.length
-          );
+        if (latestScore.length > 0 && latestScore[0].stupidScore !== null && latestScore[0].stupidScore >= 0) {
+          const rawScore = latestScore[0].stupidScore;
+          
+          // Use same robust detection logic as dashboard
+          if (Math.abs(rawScore) < 1 || Math.abs(rawScore) > 100) {
+            // Raw format (e.g., 0.123, -0.456)
+            currentDisplayScore = Math.max(0, Math.min(100, Math.round(50 - rawScore * 100)));
+          } else {
+            // Already in percentage-like format
+            currentDisplayScore = Math.max(0, Math.min(100, Math.round(rawScore)));
+          }
         }
       }
 

@@ -7,7 +7,7 @@ import { computeDashboardScores } from '../lib/dashboard-compute';
 // Helper function to get combined score for a single model (same as analytics)
 async function getCombinedScore(modelId: number): Promise<number | null> {
   try {
-    // Get latest hourly score
+    // Get latest hourly score (7-axis/speed)
     const latestHourlyScore = await db
       .select()
       .from(scores)
@@ -15,7 +15,7 @@ async function getCombinedScore(modelId: number): Promise<number | null> {
       .orderBy(desc(scores.ts))
       .limit(1);
 
-    // Get latest deep score  
+    // Get latest deep score (reasoning)
     const latestDeepScore = await db
       .select()
       .from(scores)
@@ -23,29 +23,36 @@ async function getCombinedScore(modelId: number): Promise<number | null> {
       .orderBy(desc(scores.ts))
       .limit(1);
 
+    // Get latest tooling score
+    const latestToolingScore = await db
+      .select()
+      .from(scores)
+      .where(and(eq(scores.modelId, modelId), eq(scores.suite, 'tooling')))
+      .orderBy(desc(scores.ts))
+      .limit(1);
+
     const hourlyScore = latestHourlyScore[0];
     const deepScore = latestDeepScore[0];
-    
-    // Combine scores with 70% hourly, 30% deep weighting
+    const toolingScore = latestToolingScore[0];
+
+    // Combine scores with 50% hourly, 25% deep, 25% tooling weighting
     let combinedScore: number | null = null;
-    
-    if (hourlyScore && hourlyScore.stupidScore !== null && hourlyScore.stupidScore >= 0) {
-      let hourlyDisplay = Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore)));
-      
-      if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
-        // Has both scores - combine them
-        let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
-        combinedScore = Math.round(hourlyDisplay * 0.7 + deepDisplay * 0.3);
-      } else {
-        // Only hourly score - use it directly
-        combinedScore = hourlyDisplay;
-      }
-    } else if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
-      // Only deep score - use it directly
-      let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
-      combinedScore = deepDisplay;
+
+    // Check which scores are available
+    const hasHourly = hourlyScore && hourlyScore.stupidScore !== null && hourlyScore.stupidScore >= 0;
+    const hasDeep = deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0;
+    const hasTooling = toolingScore && toolingScore.stupidScore !== null && toolingScore.stupidScore >= 0;
+
+    if (hasHourly || hasDeep || hasTooling) {
+      // Get display scores (0-100 range)
+      const hourlyDisplay = hasHourly ? Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore))) : 50;
+      const deepDisplay = hasDeep ? Math.max(0, Math.min(100, Math.round(deepScore.stupidScore))) : 50;
+      const toolingDisplay = hasTooling ? Math.max(0, Math.min(100, Math.round(toolingScore.stupidScore))) : 50;
+
+      // Calculate combined score with proper weighting
+      combinedScore = Math.round(hourlyDisplay * 0.5 + deepDisplay * 0.25 + toolingDisplay * 0.25);
     }
-    
+
     return combinedScore;
   } catch (error) {
     console.error(`Error getting combined score for model ${modelId}:`, error);
@@ -321,7 +328,7 @@ export async function getCombinedModelScores() {
     const modelScores = [];
     
     for (const model of allModels) {
-      // Get latest hourly score
+      // Get latest hourly score (7-axis/speed)
       const latestHourlyScore = await db
         .select()
         .from(scores)
@@ -329,7 +336,7 @@ export async function getCombinedModelScores() {
         .orderBy(desc(scores.ts))
         .limit(1);
 
-      // Get latest deep score  
+      // Get latest deep score (reasoning)
       const latestDeepScore = await db
         .select()
         .from(scores)
@@ -337,30 +344,35 @@ export async function getCombinedModelScores() {
         .orderBy(desc(scores.ts))
         .limit(1);
 
+      // Get latest tooling score
+      const latestToolingScore = await db
+        .select()
+        .from(scores)
+        .where(and(eq(scores.modelId, model.id), eq(scores.suite, 'tooling')))
+        .orderBy(desc(scores.ts))
+        .limit(1);
+
       const hourlyScore = latestHourlyScore[0];
       const deepScore = latestDeepScore[0];
+      const toolingScore = latestToolingScore[0];
       
-      // Combine scores with 70% hourly, 30% deep weighting
+      // Combine scores with 50% hourly, 25% deep, 25% tooling weighting
       let combinedScore: number | 'unavailable' = 'unavailable';
       let isAvailable = false;
       
-      if (hourlyScore && hourlyScore.stupidScore !== null && hourlyScore.stupidScore >= 0) {
-        let hourlyDisplay = Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore)));
+      // Check which scores are available
+      const hasHourly = hourlyScore && hourlyScore.stupidScore !== null && hourlyScore.stupidScore >= 0;
+      const hasDeep = deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0;
+      const hasTooling = toolingScore && toolingScore.stupidScore !== null && toolingScore.stupidScore >= 0;
+      
+      if (hasHourly || hasDeep || hasTooling) {
+        // Get display scores (0-100 range)
+        const hourlyDisplay = hasHourly ? Math.max(0, Math.min(100, Math.round(hourlyScore.stupidScore))) : 50;
+        const deepDisplay = hasDeep ? Math.max(0, Math.min(100, Math.round(deepScore.stupidScore))) : 50;
+        const toolingDisplay = hasTooling ? Math.max(0, Math.min(100, Math.round(toolingScore.stupidScore))) : 50;
         
-        if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
-          // Has both scores - combine them
-          let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
-          combinedScore = Math.round(hourlyDisplay * 0.7 + deepDisplay * 0.3);
-          isAvailable = true;
-        } else {
-          // Only hourly score - use it directly
-          combinedScore = hourlyDisplay;
-          isAvailable = true;
-        }
-      } else if (deepScore && deepScore.stupidScore !== null && deepScore.stupidScore >= 0) {
-        // Only deep score - use it directly
-        let deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
-        combinedScore = deepDisplay;
+        // Calculate combined score with proper weighting
+        combinedScore = Math.round(hourlyDisplay * 0.5 + deepDisplay * 0.25 + toolingDisplay * 0.25);
         isAvailable = true;
       }
       
@@ -1470,6 +1482,18 @@ function getModelPricing(modelName: string, provider: string): { input: number; 
     if (name.includes('2.5-flash-lite')) return { input: 0.10, output: 0.40 };
     if (name.includes('2.5-flash')) return { input: 0.30, output: 2.50 };
     return { input: 2, output: 6 }; // Default Google
+  }
+  
+  if (prov === 'deepseek') {
+    return { input: 0.0014, output: 0.0028 }; // DeepSeek pricing (very competitive)
+  }
+  
+  if (prov === 'glm') {
+    return { input: 0.001, output: 0.002 }; // GLM pricing (estimated)
+  }
+  
+  if (prov === 'kimi') {
+    return { input: 0.0015, output: 0.003 }; // Kimi pricing (estimated)
   }
   
   return { input: 3, output: 10 }; // Default fallback
