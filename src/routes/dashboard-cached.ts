@@ -17,8 +17,8 @@ export default async function (fastify: FastifyInstance, opts: any) {
     try {
       const result = await getCachedData(period, sortBy, analyticsPeriod);
       
-      // CRITICAL FIX: Fetch analytics data directly since it's not cached
-      // This ensures Intelligence Center gets real-time degradation data
+      // CRITICAL FIX: Use Fastify's inject() to call analytics routes internally
+      // This bypasses rate limiting since it's an internal call
       console.log('🔄 Fetching real-time analytics data for Intelligence Center...');
       
       let analyticsData = {
@@ -29,35 +29,31 @@ export default async function (fastify: FastifyInstance, opts: any) {
       };
       
       try {
-        // Make direct HTTP calls to analytics endpoints to get real-time data
-        const baseUrl = process.env.NODE_ENV === 'production' ? 'https://aistupidlevel.info' : 'http://localhost:4000';
-        
+        // Use Fastify's inject() to make internal requests (bypasses rate limiting)
         const [degradationsRes, recommendationsRes, reliabilityRes, transparencyRes] = await Promise.all([
-          fetch(`${baseUrl}/analytics/degradations?period=${analyticsPeriod}&sortBy=${sortBy}`),
-          fetch(`${baseUrl}/analytics/recommendations?period=${analyticsPeriod}&sortBy=${sortBy}`),
-          fetch(`${baseUrl}/analytics/provider-reliability?period=${analyticsPeriod}&sortBy=${sortBy}`),
-          fetch(`${baseUrl}/analytics/transparency?period=${analyticsPeriod}`)
+          fastify.inject({ method: 'GET', url: `/analytics/degradations?period=${analyticsPeriod}&sortBy=${sortBy}` }),
+          fastify.inject({ method: 'GET', url: `/analytics/recommendations?period=${analyticsPeriod}&sortBy=${sortBy}` }),
+          fastify.inject({ method: 'GET', url: `/analytics/provider-reliability?period=${analyticsPeriod}&sortBy=${sortBy}` }),
+          fastify.inject({ method: 'GET', url: `/analytics/transparency?period=${analyticsPeriod}` })
         ]);
         
-        // Parse responses with proper typing
-        const [degradationsData, recommendationsData, reliabilityData, transparencyData] = await Promise.all([
-          degradationsRes.json().catch(() => ({ success: false })) as Promise<any>,
-          recommendationsRes.json().catch(() => ({ success: false })) as Promise<any>,
-          reliabilityRes.json().catch(() => ({ success: false })) as Promise<any>,
-          transparencyRes.json().catch(() => ({ success: false })) as Promise<any>
-        ]);
+        // Parse responses
+        const degradationsData = JSON.parse(degradationsRes.payload);
+        const recommendationsData = JSON.parse(recommendationsRes.payload);
+        const reliabilityData = JSON.parse(reliabilityRes.payload);
+        const transparencyData = JSON.parse(transparencyRes.payload);
         
-        // Extract successful data with type safety
-        if (degradationsData && degradationsData.success && degradationsData.data) {
+        // Extract successful data
+        if (degradationsData?.success && degradationsData.data) {
           analyticsData.degradations = degradationsData.data;
         }
-        if (recommendationsData && recommendationsData.success && recommendationsData.data) {
+        if (recommendationsData?.success && recommendationsData.data) {
           analyticsData.recommendations = recommendationsData.data;
         }
-        if (reliabilityData && reliabilityData.success && reliabilityData.data) {
+        if (reliabilityData?.success && reliabilityData.data) {
           analyticsData.providerReliability = reliabilityData.data;
         }
-        if (transparencyData && transparencyData.success && transparencyData.data) {
+        if (transparencyData?.success && transparencyData.data) {
           analyticsData.transparencyMetrics = transparencyData.data;
         }
         

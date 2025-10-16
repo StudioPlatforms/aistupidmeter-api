@@ -627,28 +627,29 @@ export default async function (fastify: FastifyInstance, opts: any) {
       console.log(`🎯 Smart Recommendations: Getting ACTUAL leaderboard data for ${sortBy} mode`);
       
       // STEP 1: Get ACTUAL current leaderboard rankings - USE CACHED DATA WITH COMPLETE SCORES!
-      console.log(`🎯 Fetching cached dashboard data for recommendations...`);
+      console.log(`🎯 Fetching cached scores data for recommendations (avoiding circular dependency)...`);
       const cachedResponse = await fastify.inject({
         method: 'GET',
-        url: `/dashboard/cached?period=latest&sortBy=${sortBy}&analyticsPeriod=${period}`
+        url: `/dashboard/scores-cached?period=latest&sortBy=${sortBy}`
       });
       
       if (cachedResponse.statusCode !== 200) {
-        console.log('❌ Failed to get cached dashboard data');
-        return { success: false, error: 'Failed to get dashboard data' };
+        console.log('❌ Failed to get cached scores data');
+        return { success: false, error: 'Failed to get scores data' };
       }
       
       const cachedData = JSON.parse(cachedResponse.payload);
-      if (!cachedData.success || !cachedData.data || !cachedData.data.modelScores) {
+      if (!cachedData.success || !cachedData.data || !Array.isArray(cachedData.data)) {
         console.log('❌ No model scores in cached data');
         return { success: false, error: 'No model scores available' };
       }
       
-      const currentLeaderboard = cachedData.data.modelScores.map((model: any) => ({
+      // scores-cached returns data as an array directly, not nested in modelScores
+      const currentLeaderboard = cachedData.data.map((model: any) => ({
         id: model.id,
         name: model.name,
-        vendor: model.provider, // Note: cached data uses 'provider' not 'vendor'
-        score: model.currentScore
+        vendor: model.provider || model.vendor, // Handle both field names
+        score: model.currentScore || model.score // Handle both field names
       }));
       
       console.log(`📊 Got ${currentLeaderboard.length} models from CACHED RANKINGS data (${sortBy} mode)`);
