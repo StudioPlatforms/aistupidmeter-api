@@ -615,7 +615,18 @@ export async function runDeepBenchmarks(): Promise<void> {
       supportedProviders.includes(m.vendor as Provider)
     ) as Array<ModelInfo>;
     
+    // PRIORITIZE NEW PROVIDERS: Sort models to test DeepSeek, Kimi, GLM first
+    const newProviders = ['deepseek', 'glm', 'kimi'];
+    deepModels.sort((a, b) => {
+      const aIsNew = newProviders.includes(a.vendor);
+      const bIsNew = newProviders.includes(b.vendor);
+      if (aIsNew && !bIsNew) return -1;  // a comes first
+      if (!aIsNew && bIsNew) return 1;   // b comes first
+      return 0;  // keep original order
+    });
+    
     console.log(`🎯 ${deepModels.length} models support deep benchmarking`);
+    console.log(`⭐ Testing NEW providers first: ${deepModels.filter(m => newProviders.includes(m.vendor)).map(m => m.name).join(', ')}`);
     
     if (deepModels.length === 0) {
       console.log('⚠️ No supported models found for deep benchmarking');

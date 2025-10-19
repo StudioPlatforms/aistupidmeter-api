@@ -249,6 +249,7 @@ async function startServer() {
     { name: 'router', prefix: '' }, // AI Router - OpenAI-compatible endpoints at /v1/*
     { name: 'router-keys', prefix: '' }, // AI Router Key Management - /router/*
     { name: 'router-analytics', prefix: '' }, // AI Router Analytics - /router/analytics/*
+    { name: 'router-smart', prefix: '' }, // Smart Router - Automatic model selection at /v1/*
     { name: 'analytics', prefix: '/analytics' },
     { name: 'health', prefix: '/providers' },
     { name: 'dashboard-cached', prefix: '/dashboard' },

@@ -50,7 +50,7 @@ interface ModelRanking {
   avgLatency?: number;
 }
 
-interface SelectionCriteria {
+export interface SelectionCriteria {
   userId: number;
   strategy: 'best_overall' | 'best_coding' | 'best_reasoning' | 'best_creative' | 'cheapest' | 'fastest';
   excludeProviders?: string[];
@@ -59,7 +59,7 @@ interface SelectionCriteria {
   maxLatency?: number;
 }
 
-interface ModelSelection {
+export interface ModelSelection {
   model: string;
   provider: string;
   score: number;
@@ -138,7 +138,7 @@ async function getCachedRankings(suite: string, strategy: string): Promise<Model
 /**
  * Calculate estimated cost per 1k tokens for a model
  */
-function calculateModelCost(modelName: string, vendor: string): number {
+export function calculateModelCost(modelName: string, vendor: string): number {
   // Check for model-specific pricing first
   const modelCost = MODEL_COSTS[modelName as keyof typeof MODEL_COSTS];
   if (modelCost) {

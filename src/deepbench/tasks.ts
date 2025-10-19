@@ -10,7 +10,7 @@ export interface DeepStep {
 export interface DeepTask {
   slug: string;
   description: string;
-  providerAllow: ('openai' | 'anthropic' | 'google' | 'xai')[];
+  providerAllow: ('openai' | 'anthropic' | 'google' | 'xai' | 'deepseek' | 'glm' | 'kimi')[];
   steps: DeepStep[];
   resources?: {
     initialFiles?: Record<string, string>;
@@ -271,7 +271,7 @@ export const DEEP_TASKS: DeepTask[] = [
   {
     slug: 'deep/ide_assistant',
     description: 'Multi-turn debugging session: Fix e-commerce cart bugs with iterative feedback',
-    providerAllow: ['openai', 'anthropic', 'google', 'xai'],
+    providerAllow: ['openai', 'anthropic', 'google', 'xai', 'deepseek', 'glm', 'kimi'],
     resources: {
       initialFiles: ECOMMERCE_CART_FILES
     },
@@ -365,7 +365,7 @@ Write a single test function that covers all these scenarios and demonstrates yo
   {
     slug: 'deep/spec_follow',
     description: 'Build REST API following detailed requirements across multiple turns',
-    providerAllow: ['openai', 'anthropic', 'google', 'xai'],
+    providerAllow: ['openai', 'anthropic', 'google', 'xai', 'deepseek', 'glm', 'kimi'],
     resources: {
       requirements: REST_API_REQUIREMENTS,
       unitTests: `
@@ -505,7 +505,7 @@ The test should verify all requirements are working together properly.`,
   {
     slug: 'deep/doc_memory',
     description: 'Answer chained questions from large technical documentation',
-    providerAllow: ['openai', 'anthropic', 'google', 'xai'],
+    providerAllow: ['openai', 'anthropic', 'google', 'xai', 'deepseek', 'glm', 'kimi'],
     resources: {
       document: TECHNICAL_DOCUMENTATION
     },
@@ -602,7 +602,7 @@ This should be a cohesive summary showing how all pieces fit together.`,
   {
     slug: 'deep/refactor_project',
     description: 'Refactor monolithic application to microservices architecture',
-    providerAllow: ['openai', 'anthropic', 'google', 'xai'],
+    providerAllow: ['openai', 'anthropic', 'google', 'xai', 'deepseek', 'glm', 'kimi'],
     resources: {
       initialFiles: {
         'monolith.py': `# Monolithic application that needs refactoring
