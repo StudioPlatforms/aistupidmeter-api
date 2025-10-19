@@ -2,6 +2,7 @@ import { db } from '../../db/connection-pool';
 import { models, scores, runs } from '../../db/schema';
 import { routerPreferences, routerProviderKeys } from '../../db/router-schema';
 import { eq, and, desc, sql, inArray } from 'drizzle-orm';
+import { computeDashboardScores } from '../../lib/dashboard-compute';
 
 // Smart caching for router rankings (5-minute TTL)
 const rankingsCache = new Map<string, { data: any[]; timestamp: number }>();
@@ -69,7 +70,8 @@ export interface ModelSelection {
 }
 
 /**
- * Get cached rankings for a specific suite and strategy
+ * Get cached rankings using the SAME computed scores as the dashboard
+ * This ensures consistency between what users see on the website and what the router selects
  */
 async function getCachedRankings(suite: string, strategy: string): Promise<ModelRanking[]> {
   const cacheKey = `${suite}:${strategy}`;
@@ -79,59 +81,47 @@ async function getCachedRankings(suite: string, strategy: string): Promise<Model
     return cached.data;
   }
   
-  console.log(`🔄 Cache miss for ${cacheKey}, querying database...`);
+  console.log(`🔄 Cache miss for ${cacheKey}, using dashboard compute...`);
   
-  // Query scores table directly (same logic as dashboard)
-  const latestScores = await db
-    .select({
-      modelId: models.id,
-      modelName: models.name,
-      vendor: models.vendor,
-      score: scores.stupidScore,
-      axes: scores.axes,
-      ts: scores.ts
-    })
-    .from(scores)
-    .innerJoin(models, eq(scores.modelId, models.id))
-    .where(
-      and(
-        eq(models.showInRankings, true),
-        eq(scores.suite, suite)
-      )
-    )
-    .orderBy(desc(scores.ts));
+  // CRITICAL FIX: Use the SAME computeDashboardScores function as the website
+  // This ensures the router sees the same scores (e.g., Claude=71, not 82)
+  const sortByMap: Record<string, 'combined' | 'reasoning' | 'speed' | '7axis' | 'tooling'> = {
+    'best_overall': 'combined',
+    'best_coding': '7axis',
+    'best_reasoning': 'reasoning',
+    'best_creative': 'combined',
+    'cheapest': 'combined',
+    'fastest': 'speed'
+  };
   
-  // Group by model and get latest score for each
-  const modelScores = new Map<number, any>();
-  for (const score of latestScores) {
-    if (!modelScores.has(score.modelId)) {
-      modelScores.set(score.modelId, score);
-    }
-  }
+  const sortBy = sortByMap[strategy] || 'combined';
+  const dashboardScores = await computeDashboardScores('latest', sortBy);
   
-  // Convert to rankings with cost estimates
-  const rankings: ModelRanking[] = Array.from(modelScores.values()).map(score => ({
-    id: score.modelId,
-    name: score.modelName,
-    vendor: score.vendor,
-    score: score.score,
-    axes: score.axes,
-    lastUpdated: score.ts,
-    estimatedCost: calculateModelCost(score.modelName, score.vendor)
-  }));
+  // Convert dashboard scores to ModelRanking format
+  const rankings: ModelRanking[] = dashboardScores
+    .filter((score: any) => score.currentScore !== 'unavailable')
+    .map((score: any) => ({
+      id: parseInt(score.id),
+      name: score.name,
+      vendor: score.provider,
+      score: score.currentScore as number,
+      axes: undefined, // Not needed for router
+      lastUpdated: score.lastUpdated?.toISOString() || new Date().toISOString(),
+      estimatedCost: calculateModelCost(score.name, score.provider)
+    }));
   
   // Add latency data for speed-focused strategies
   if (strategy === 'fastest') {
     await addLatencyData(rankings);
   }
   
-  // Sort based on strategy
+  // Sort based on strategy (dashboard scores are already sorted, but re-sort for consistency)
   const sortedRankings = sortRankingsByStrategy(rankings, strategy);
   
   // Cache the results
   rankingsCache.set(cacheKey, { data: sortedRankings, timestamp: Date.now() });
   
-  console.log(`✅ Cached ${sortedRankings.length} rankings for ${cacheKey}`);
+  console.log(`✅ Cached ${sortedRankings.length} rankings for ${cacheKey} using dashboard scores`);
   return sortedRankings;
 }
 

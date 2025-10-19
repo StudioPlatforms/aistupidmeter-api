@@ -305,23 +305,27 @@ export async function explainSelection(
   const analysis = analyzePrompt(prompt);
   const strategy = determineStrategy(analysis);
   
-  const rankings = await getTaskSpecificRankings(
-    analysis.language,
-    analysis.taskType,
-    strategy,
-    userId
-  );
-  
-  const reasoning = rankings.length > 0
-    ? `Would select ${rankings[0].name} (${rankings[0].vendor}) with score ${rankings[0].score.toFixed(1)}`
-    : 'No suitable models found with current provider configuration';
-  
-  return {
-    analysis,
-    strategy,
-    reasoning,
-    availableModels: rankings.length
-  };
+  // CRITICAL FIX: Use the actual selectBestModel which now uses dashboard scores
+  try {
+    const selection = await selectBestModel({
+      userId,
+      strategy: strategy as any
+    });
+    
+    return {
+      analysis,
+      strategy,
+      reasoning: `Would select ${selection.model} (${selection.provider}) with score ${selection.score.toFixed(1)}`,
+      availableModels: 1 // We only get the top model from selection
+    };
+  } catch (error) {
+    return {
+      analysis,
+      strategy,
+      reasoning: 'No suitable models found with current provider configuration',
+      availableModels: 0
+    };
+  }
 }
 
 /**
