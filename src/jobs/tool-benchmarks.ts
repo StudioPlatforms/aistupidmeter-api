@@ -16,6 +16,44 @@ import { sandboxManager } from '../toolbench/sandbox/manager';
 // Import the working adapter functions from real-benchmarks.ts
 import { getKeysForProvider, getAdapter } from './real-benchmarks';
 
+// Credit exhaustion detection - prevents score updates when API credits are depleted
+function isCreditExhausted(error: any): boolean {
+  const status = error?.status || error?.response?.status;
+  const errorMsg = String(error?.message || error).toLowerCase();
+  
+  // Check HTTP status codes for billing issues
+  if (status === 402) { // Payment Required
+    return true;
+  }
+  
+  if (status === 429) { // Rate Limit - check if it's credit-related
+    return errorMsg.includes('credit') || 
+           errorMsg.includes('quota') || 
+           errorMsg.includes('billing') ||
+           errorMsg.includes('balance');
+  }
+  
+  // Check 403 Forbidden with billing keywords
+  if (status === 403) {
+    return errorMsg.includes('credit') || 
+           errorMsg.includes('quota') || 
+           errorMsg.includes('insufficient') ||
+           errorMsg.includes('balance') ||
+           errorMsg.includes('billing');
+  }
+  
+  // Check error messages for credit/quota keywords
+  return errorMsg.includes('insufficient credits') ||
+         errorMsg.includes('insufficient_quota') ||
+         errorMsg.includes('quota exceeded') ||
+         errorMsg.includes('quota_exceeded') ||
+         (errorMsg.includes('credit') && errorMsg.includes('exhaust')) ||
+         errorMsg.includes('billing') ||
+         errorMsg.includes('payment required') ||
+         errorMsg.includes('account_deactivated') ||
+         errorMsg.includes('subscription');
+}
+
 interface ToolBenchmarkConfig {
   runEasyTasks: boolean;
   runMediumTasks: boolean;
@@ -152,7 +190,13 @@ async function runSingleBenchmark(model: any, task: any): Promise<any> {
       result
     };
 
-  } catch (error) {
+  } catch (error: any) {
+    // Check if this is credit exhaustion - preserve last known score
+    if (isCreditExhausted(error)) {
+      console.log(`💳 ${model.name}: API credits exhausted - preserving last known tooling score and timestamp`);
+      return null; // Return null to skip this model without recording failure
+    }
+    
     console.error(`❌ ${model.name} on ${task.name} failed:`, error);
     return null;
   } finally {

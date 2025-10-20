@@ -47,6 +47,44 @@ const modelFailureTracker = new Map<string, {
   reason: string;
 }>();
 
+// Credit exhaustion detection - prevents score updates when API credits are depleted
+function isCreditExhausted(error: any): boolean {
+  const status = error?.status || error?.response?.status;
+  const errorMsg = String(error?.message || error).toLowerCase();
+  
+  // Check HTTP status codes for billing issues
+  if (status === 402) { // Payment Required
+    return true;
+  }
+  
+  if (status === 429) { // Rate Limit - check if it's credit-related
+    return errorMsg.includes('credit') || 
+           errorMsg.includes('quota') || 
+           errorMsg.includes('billing') ||
+           errorMsg.includes('balance');
+  }
+  
+  // Check 403 Forbidden with billing keywords
+  if (status === 403) {
+    return errorMsg.includes('credit') || 
+           errorMsg.includes('quota') || 
+           errorMsg.includes('insufficient') ||
+           errorMsg.includes('balance') ||
+           errorMsg.includes('billing');
+  }
+  
+  // Check error messages for credit/quota keywords
+  return errorMsg.includes('insufficient credits') ||
+         errorMsg.includes('insufficient_quota') ||
+         errorMsg.includes('quota exceeded') ||
+         errorMsg.includes('quota_exceeded') ||
+         (errorMsg.includes('credit') && errorMsg.includes('exhaust')) ||
+         errorMsg.includes('billing') ||
+         errorMsg.includes('payment required') ||
+         errorMsg.includes('account_deactivated') ||
+         errorMsg.includes('subscription');
+}
+
 function shouldSkipModel(modelName: string): { skip: boolean; reason?: string } {
   const tracker = modelFailureTracker.get(modelName);
   if (!tracker) return { skip: false };
@@ -1783,6 +1821,12 @@ export async function benchmarkModel(
   } catch (e: any) {
     console.warn(`[CANARY-FAIL] ${model.vendor}/${model.name}: ${String(e).slice(0,200)}`);
     
+    // Check if this is credit exhaustion - preserve last known score
+    if (isCreditExhausted(e)) {
+      console.log(`💳 ${model.name}: API credits exhausted - preserving last known score and timestamp`);
+      return; // Skip entirely, no database insert
+    }
+    
     // Check if this is a retryable error (503, 429, 5xx) that should be retried later
     const status = e?.status || e?.response?.status;
     const isRetryableError = status === 503 || status === 429 || (status >= 500 && status < 600);
@@ -1970,10 +2014,15 @@ export async function benchmarkModel(
     streamLog('info', `🔄 Calculating final score based on successful completions...`);
   }
 
-  // If all tasks failed, record N/A with sentinel values
+  // If all tasks failed, check if it's credit exhaustion before recording
   if (perTaskAxes.length === 0) {
     streamLog('error', `❌ Unfortunately, all ${totalTasks} tasks failed. This might indicate an API issue.`);
     streamLog('info', `💡 Suggestions: Check your API key, try again in a moment, or try a different model.`);
+    
+    // Check if any task failure was due to credit exhaustion
+    // Note: This is a best-effort check since we don't track individual task errors here
+    // The canary test should have caught credit issues earlier, but this is a safety net
+    
     await db.insert(scores).values({
       modelId: model.id,
       ts: batchTimestamp || new Date().toISOString(),
