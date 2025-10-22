@@ -14,6 +14,16 @@ export const routerUsers = sqliteTable('router_users', {
   subscription_start: text('subscription_start'),
   subscription_end: text('subscription_end'),
   stripe_customer_id: text('stripe_customer_id'),
+  stripe_subscription_id: text('stripe_subscription_id'),
+  subscription_tier: text('subscription_tier').default('free'),
+  trial_started_at: text('trial_started_at'),
+  trial_ends_at: text('trial_ends_at'),
+  subscription_ends_at: text('subscription_ends_at'),
+  subscription_canceled_at: text('subscription_canceled_at'),
+  last_payment_at: text('last_payment_at'),
+  reset_token: text('reset_token'),
+  reset_token_expires: text('reset_token_expires'),
+  reset_requested_at: text('reset_requested_at'),
   created_at: text('created_at').default('CURRENT_TIMESTAMP'),
   updated_at: text('updated_at').default('CURRENT_TIMESTAMP')
 });

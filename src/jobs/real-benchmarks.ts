@@ -1890,6 +1890,8 @@ export async function benchmarkModel(
   const perTaskAxes: Axes[] = [];
   let latencies: number[] = [];
   let failedTasks: typeof BENCHMARK_TASKS[0][] = []; // Track which tasks failed
+  let creditExhaustedDuringExecution = false; // Track if credits ran out during task execution
+  const taskErrors: any[] = []; // Track all task errors for analysis
 
   // Phase 1: Initial benchmark run
   streamLog('info', `🎯 Phase 1: Running initial benchmark on all ${selectedTasks.length} tasks`);
@@ -1940,6 +1942,15 @@ export async function benchmarkModel(
     } catch (taskError: any) {
       // Catch any unexpected errors at the task level
       const errorMsg = String(taskError?.message || taskError).slice(0, 200);
+      
+      // CRITICAL: Check if this error is due to credit exhaustion
+      if (isCreditExhausted(taskError)) {
+        creditExhaustedDuringExecution = true;
+        console.log(`💳 ${model.name}: Credits exhausted during task ${task.id}`);
+        streamLog('warning', `💳 API credits exhausted during task ${task.id} - will preserve last known score`);
+      }
+      
+      taskErrors.push({ task: task.id, error: taskError });
       streamLog('error', `❌ Task ${task.id} failed with unexpected error: ${errorMsg}`);
       streamLog('info', `📊 Adding to retry list. Progress: ${perTaskAxes.length} completed, ${failedTasks.length + 1} failed so far.`);
       failedTasks.push(task);
@@ -2019,10 +2030,18 @@ export async function benchmarkModel(
     streamLog('error', `❌ Unfortunately, all ${totalTasks} tasks failed. This might indicate an API issue.`);
     streamLog('info', `💡 Suggestions: Check your API key, try again in a moment, or try a different model.`);
     
-    // Check if any task failure was due to credit exhaustion
-    // Note: This is a best-effort check since we don't track individual task errors here
-    // The canary test should have caught credit issues earlier, but this is a safety net
+    // CRITICAL: Check if ANY task failure was due to credit exhaustion
+    // This catches credit exhaustion that happens DURING task execution (after canary passes)
+    const creditExhausted = creditExhaustedDuringExecution || 
+      taskErrors.some(e => isCreditExhausted(e.error));
     
+    if (creditExhausted) {
+      console.log(`💳 ${model.name}: API credits exhausted during execution - preserving last known score and timestamp`);
+      streamLog('warning', `💳 API credits exhausted - your last successful benchmark score will remain visible`);
+      return; // Skip database insert entirely - preserves last score & timestamp
+    }
+    
+    // Only insert -888 if failures were NOT due to credit exhaustion
     await db.insert(scores).values({
       modelId: model.id,
       ts: batchTimestamp || new Date().toISOString(),
