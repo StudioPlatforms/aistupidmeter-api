@@ -46,40 +46,53 @@ export function startBenchmarkScheduler() {
       console.log(`🕐 ${now.toISOString()} - Starting scheduled 4-hourly benchmark run...`);
       console.log(`📊 Previous run was: ${lastRunTime ? lastRunTime.toISOString() : 'Never'}`);
       
-      // Run regular benchmarks only
-      console.log(`📊 Running regular (speed) benchmarks...`);
-      await runRealBenchmarks();
-      console.log(`✅ Regular benchmarks completed`);
+      // Run regular benchmarks in a separate process to avoid blocking
+      console.log(`📊 Running regular (speed) benchmarks in non-blocking mode...`);
       
-      // OPTIMIZED: Use hot cache refresh for regular 4-hourly updates (90% faster)
-      console.log(`🔥 Refreshing HOT cache after benchmark completion (popular combinations only)...`);
-      const cacheResult = await refreshHotCache();
-      console.log(`✅ HOT cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms (${cacheResult.type})`);
-      
-      // Double-check cache was updated properly - log first model timestamp
-      try {
-        const { getCachedData } = await import('./cache/dashboard-cache');
-        const testCache = await getCachedData('latest', 'combined', 'latest');
-        if (testCache?.data?.modelScores?.[0]) {
-          const firstModel = testCache.data.modelScores[0];
-          const timeAgo = Math.round((Date.now() - new Date(firstModel.lastUpdated).getTime()) / 60000);
-          console.log(`📊 Cache verification: ${firstModel.name} updated ${timeAgo}m ago (should be ~1-5m ago)`);
+      // Use setImmediate to prevent blocking the event loop
+      setImmediate(async () => {
+        try {
+          await runRealBenchmarks();
+          console.log(`✅ Regular benchmarks completed`);
           
-          if (timeAgo > 10) {
-            console.warn(`⚠️ Cache may not have updated properly - timestamps still old!`);
-            // Force another refresh if timestamps are still old
-            console.log(`🔄 Forcing additional cache refresh due to stale timestamps...`);
-            await refreshAllCache();
+          // OPTIMIZED: Use hot cache refresh for regular 4-hourly updates (90% faster)
+          console.log(`🔥 Refreshing HOT cache after benchmark completion (popular combinations only)...`);
+          const cacheResult = await refreshHotCache();
+          console.log(`✅ HOT cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms (${cacheResult.type})`);
+          
+          // Double-check cache was updated properly - log first model timestamp
+          try {
+            const { getCachedData } = await import('./cache/dashboard-cache');
+            const testCache = await getCachedData('latest', 'combined', 'latest');
+            if (testCache?.data?.modelScores?.[0]) {
+              const firstModel = testCache.data.modelScores[0];
+              const timeAgo = Math.round((Date.now() - new Date(firstModel.lastUpdated).getTime()) / 60000);
+              console.log(`📊 Cache verification: ${firstModel.name} updated ${timeAgo}m ago (should be ~1-5m ago)`);
+              
+              if (timeAgo > 10) {
+                console.warn(`⚠️ Cache may not have updated properly - timestamps still old!`);
+                // Force another refresh if timestamps are still old
+                console.log(`🔄 Forcing additional cache refresh due to stale timestamps...`);
+                await refreshAllCache();
+              }
+            }
+          } catch (error) {
+            console.warn('Cache verification failed:', error);
           }
+          
+          console.log(`✅ ${new Date().toISOString()} - 4-hourly benchmark run completed successfully`);
+        } catch (error) {
+          console.error(`❌ ${new Date().toISOString()} - 4-hourly benchmark run failed:`, error);
+        } finally {
+          isRunning = false;
         }
-      } catch (error) {
-        console.warn('Cache verification failed:', error);
-      }
+      });
       
-      console.log(`✅ ${new Date().toISOString()} - 4-hourly benchmark run completed successfully`);
+      // Immediately release the cron lock to prevent blocking
+      isRunning = false;
+      
     } catch (error) {
-      console.error(`❌ ${new Date().toISOString()} - 4-hourly benchmark run failed:`, error);
-    } finally {
+      console.error(`❌ ${new Date().toISOString()} - 4-hourly benchmark setup failed:`, error);
       isRunning = false;
     }
   }, {
@@ -105,21 +118,32 @@ export function startBenchmarkScheduler() {
       console.log(`🏗️ Previous deep run was: ${lastDeepRunTime ? lastDeepRunTime.toISOString() : 'Never'}`);
       console.log(`📊 REASONING mode timestamps will update after this completes`);
       
-      // Run deep benchmarks only
-      console.log(`🏗️ Running deep (reasoning) benchmarks...`);
-      await runDeepBenchmarks();
-      console.log(`✅ Deep benchmarks completed - REASONING mode should now show ~1-2 hours ago`);
+      // Run deep benchmarks in non-blocking mode
+      setImmediate(async () => {
+        try {
+          console.log(`🏗️ Running deep (reasoning) benchmarks...`);
+          await runDeepBenchmarks();
+          console.log(`✅ Deep benchmarks completed - REASONING mode should now show ~1-2 hours ago`);
+          
+          // Refresh cache after deep benchmark completion
+          console.log(`🔄 Refreshing dashboard cache after deep benchmark completion...`);
+          const cacheResult = await refreshAllCache();
+          console.log(`✅ Cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms`);
+          
+          console.log(`✅ ${new Date().toISOString()} - Daily deep benchmark run completed successfully`);
+        } catch (error) {
+          console.error(`❌ ${new Date().toISOString()} - Daily deep benchmark run failed:`, error);
+          console.error(`🚨 This will affect REASONING mode display until next successful run`);
+        } finally {
+          isDeepRunning = false;
+        }
+      });
       
-      // Refresh cache after deep benchmark completion
-      console.log(`🔄 Refreshing dashboard cache after deep benchmark completion...`);
-      const cacheResult = await refreshAllCache();
-      console.log(`✅ Cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms`);
+      // Immediately release the cron lock
+      isDeepRunning = false;
       
-      console.log(`✅ ${new Date().toISOString()} - Daily deep benchmark run completed successfully`);
     } catch (error) {
-      console.error(`❌ ${new Date().toISOString()} - Daily deep benchmark run failed:`, error);
-      console.error(`🚨 This will affect REASONING mode display until next successful run`);
-    } finally {
+      console.error(`❌ ${new Date().toISOString()} - Daily deep benchmark setup failed:`, error);
       isDeepRunning = false;
     }
   }, {
@@ -145,21 +169,32 @@ export function startBenchmarkScheduler() {
       console.log(`🔧 Previous tool run was: ${lastToolRunTime ? lastToolRunTime.toISOString() : 'Never'}`);
       console.log(`📊 TOOLING mode timestamps will update after this completes`);
       
-      // Run tool benchmarks only
-      console.log(`🔧 Running tool calling benchmarks...`);
-      await runToolBenchmarks();
-      console.log(`✅ Tool benchmarks completed - TOOLING mode should now show ~1-2 hours ago`);
+      // Run tool benchmarks in non-blocking mode
+      setImmediate(async () => {
+        try {
+          console.log(`🔧 Running tool calling benchmarks...`);
+          await runToolBenchmarks();
+          console.log(`✅ Tool benchmarks completed - TOOLING mode should now show ~1-2 hours ago`);
+          
+          // Refresh cache after tool benchmark completion
+          console.log(`🔄 Refreshing dashboard cache after tool benchmark completion...`);
+          const cacheResult = await refreshAllCache();
+          console.log(`✅ Cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms`);
+          
+          console.log(`✅ ${new Date().toISOString()} - Daily tool benchmark run completed successfully`);
+        } catch (error) {
+          console.error(`❌ ${new Date().toISOString()} - Daily tool benchmark run failed:`, error);
+          console.error(`🚨 This will affect TOOLING mode display until next successful run`);
+        } finally {
+          isToolRunning = false;
+        }
+      });
       
-      // Refresh cache after tool benchmark completion
-      console.log(`🔄 Refreshing dashboard cache after tool benchmark completion...`);
-      const cacheResult = await refreshAllCache();
-      console.log(`✅ Cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms`);
+      // Immediately release the cron lock
+      isToolRunning = false;
       
-      console.log(`✅ ${new Date().toISOString()} - Daily tool benchmark run completed successfully`);
     } catch (error) {
-      console.error(`❌ ${new Date().toISOString()} - Daily tool benchmark run failed:`, error);
-      console.error(`🚨 This will affect TOOLING mode display until next successful run`);
-    } finally {
+      console.error(`❌ ${new Date().toISOString()} - Daily tool benchmark setup failed:`, error);
       isToolRunning = false;
     }
   }, {
@@ -184,25 +219,36 @@ export function startBenchmarkScheduler() {
       console.log(`🕐 ${now.toISOString()} - Starting scheduled hourly canary benchmark run...`);
       console.log(`🐤 Previous canary run was: ${lastCanaryRunTime ? lastCanaryRunTime.toISOString() : 'Never'}`);
       
-      // Run canary benchmarks (fast, 12 tasks, 2 trials each)
-      console.log(`🐤 Running canary benchmarks (12 tasks, 2 trials each)...`);
-      await runCanaryBenchmarks();
-      console.log(`✅ Canary benchmarks completed`);
+      // Run canary benchmarks in non-blocking mode
+      setImmediate(async () => {
+        try {
+          console.log(`🐤 Running canary benchmarks (12 tasks, 2 trials each)...`);
+          await runCanaryBenchmarks();
+          console.log(`✅ Canary benchmarks completed`);
+          
+          // Update router model rankings after canary benchmarks
+          console.log(`🔄 Updating router model rankings...`);
+          try {
+            const { updateModelRankings } = await import('./router/jobs/ranking-updater');
+            const result = await updateModelRankings();
+            console.log(`✅ Router rankings updated: ${result.totalRankings} rankings across ${result.categories} categories`);
+          } catch (error) {
+            console.error(`❌ Failed to update router rankings:`, error);
+          }
+          
+          console.log(`✅ ${new Date().toISOString()} - Hourly canary benchmark run completed successfully`);
+        } catch (error) {
+          console.error(`❌ ${new Date().toISOString()} - Hourly canary benchmark run failed:`, error);
+        } finally {
+          isCanaryRunning = false;
+        }
+      });
       
-      // Update router model rankings after canary benchmarks
-      console.log(`🔄 Updating router model rankings...`);
-      try {
-        const { updateModelRankings } = await import('./router/jobs/ranking-updater');
-        const result = await updateModelRankings();
-        console.log(`✅ Router rankings updated: ${result.totalRankings} rankings across ${result.categories} categories`);
-      } catch (error) {
-        console.error(`❌ Failed to update router rankings:`, error);
-      }
+      // Immediately release the cron lock
+      isCanaryRunning = false;
       
-      console.log(`✅ ${new Date().toISOString()} - Hourly canary benchmark run completed successfully`);
     } catch (error) {
-      console.error(`❌ ${new Date().toISOString()} - Hourly canary benchmark run failed:`, error);
-    } finally {
+      console.error(`❌ ${new Date().toISOString()} - Hourly canary benchmark setup failed:`, error);
       isCanaryRunning = false;
     }
   }, {
@@ -254,6 +300,7 @@ export function startBenchmarkScheduler() {
   console.log(`⚡ Daily scheduler active: ${dailyScheduledTask ? dailyScheduledTask.getStatus() : 'Unknown'}`);
   console.log(`⚡ Tool scheduler active: ${toolScheduledTask ? toolScheduledTask.getStatus() : 'Unknown'}`);
   console.log(`⚡ Health scheduler active: ${healthScheduledTask ? healthScheduledTask.getStatus() : 'Unknown'}`);
+  console.log(`🛡️ DST-safe mode: Enabled (non-blocking execution with setImmediate)`);
   
   // Log next scheduled times for both
   const now = new Date();
