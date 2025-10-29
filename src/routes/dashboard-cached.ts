@@ -25,16 +25,18 @@ export default async function (fastify: FastifyInstance, opts: any) {
         degradations: [],
         recommendations: null,
         transparencyMetrics: null,
-        providerReliability: []
+        providerReliability: [],
+        driftIncidents: []
       };
       
       try {
         // Use Fastify's inject() to make internal requests (bypasses rate limiting)
-        const [degradationsRes, recommendationsRes, reliabilityRes, transparencyRes] = await Promise.all([
+        const [degradationsRes, recommendationsRes, reliabilityRes, transparencyRes, incidentsRes] = await Promise.all([
           fastify.inject({ method: 'GET', url: `/analytics/degradations?period=${analyticsPeriod}&sortBy=${sortBy}` }),
           fastify.inject({ method: 'GET', url: `/analytics/recommendations?period=${analyticsPeriod}&sortBy=${sortBy}` }),
           fastify.inject({ method: 'GET', url: `/analytics/provider-reliability?period=${analyticsPeriod}&sortBy=${sortBy}` }),
-          fastify.inject({ method: 'GET', url: `/analytics/transparency?period=${analyticsPeriod}` })
+          fastify.inject({ method: 'GET', url: `/analytics/transparency?period=${analyticsPeriod}` }),
+          fastify.inject({ method: 'GET', url: `/dashboard/incidents?period=7d&limit=50` })
         ]);
         
         // Parse responses
@@ -42,6 +44,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
         const recommendationsData = JSON.parse(recommendationsRes.payload);
         const reliabilityData = JSON.parse(reliabilityRes.payload);
         const transparencyData = JSON.parse(transparencyRes.payload);
+        const incidentsData = JSON.parse(incidentsRes.payload);
         
         // Extract successful data
         if (degradationsData?.success && degradationsData.data) {
@@ -55,6 +58,9 @@ export default async function (fastify: FastifyInstance, opts: any) {
         }
         if (transparencyData?.success && transparencyData.data) {
           analyticsData.transparencyMetrics = transparencyData.data;
+        }
+        if (incidentsData?.success && incidentsData.data) {
+          analyticsData.driftIncidents = incidentsData.data;
         }
         
         console.log(`✅ Analytics data fetched: ${analyticsData.degradations.length} degradations, ${analyticsData.providerReliability.length} providers`);
@@ -77,7 +83,8 @@ export default async function (fastify: FastifyInstance, opts: any) {
           degradations: analyticsData.degradations,
           recommendations: analyticsData.recommendations,
           transparencyMetrics: analyticsData.transparencyMetrics,
-          providerReliability: analyticsData.providerReliability
+          providerReliability: analyticsData.providerReliability,
+          driftIncidents: analyticsData.driftIncidents || []
         },
         meta: {
           period,

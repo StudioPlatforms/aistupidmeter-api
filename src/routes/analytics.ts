@@ -446,23 +446,67 @@ export default async function (fastify: FastifyInstance, opts: any) {
     }
   });
   
-  // Provider Trust Scores - Show ALL providers with realistic assessments
+  // Provider Trust Scores - OPTIMIZED with caching and batch queries
+  const providerReliabilityCache = new Map<string, { data: any[]; timestamp: number }>();
+  const PROVIDER_CACHE_DURATION = 5 * 60 * 1000; // 5 minute cache
+  
   fastify.get('/provider-reliability', async (request) => {
     const { period = '30d' } = request.query as { period?: 'latest' | '24h' | '7d' | '1m' };
     try {
       console.log('🏢 Calculating provider trust scores for all providers...');
+      const startTime = Date.now();
+      
+      // Check cache first
+      const cacheKey = `provider-reliability-${period}`;
+      const cached = providerReliabilityCache.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < PROVIDER_CACHE_DURATION) {
+        console.log(`✅ Using cached provider reliability data (${Date.now() - cached.timestamp}ms old)`);
+        return {
+          success: true,
+          data: cached.data,
+          timestamp: new Date(),
+          cached: true
+        };
+      }
       
       const providers = ['openai', 'anthropic', 'google', 'xai'];
+      
+      // OPTIMIZED: Batch fetch all models at once instead of per-provider
+      const allModels = await db.select().from(models);
+      const modelsByProvider = new Map<string, typeof allModels>();
+      
+      for (const provider of providers) {
+        modelsByProvider.set(
+          provider,
+          allModels.filter(m => m.vendor === provider)
+        );
+      }
+      
+      // OPTIMIZED: Batch fetch all incidents at once
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const allIncidents = await db
+        .select()
+        .from(incidents)
+        .where(gte(incidents.detectedAt, thirtyDaysAgo.toISOString()));
+      
+      const incidentsByProvider = new Map<string, typeof allIncidents>();
+      for (const provider of providers) {
+        incidentsByProvider.set(
+          provider,
+          allIncidents.filter(i => i.provider === provider)
+        );
+      }
+      
+      // OPTIMIZED: Get leaderboard once instead of per-provider
+      const { computeDashboardScores } = await import('../lib/dashboard-compute');
+      const currentLeaderboard = await computeDashboardScores('latest', 'combined');
+      
       const reliabilityMetrics = [];
       
       for (const provider of providers) {
         console.log(`📊 Analyzing ${provider} provider...`);
         
-        // Get all models for this provider
-        const providerModels = await db
-          .select()
-          .from(models)
-          .where(eq(models.vendor, provider));
+        const providerModels = modelsByProvider.get(provider) || [];
         
         if (providerModels.length === 0) {
           console.log(`⚠️ No models found for ${provider}`);
@@ -471,9 +515,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
         
         console.log(`Found ${providerModels.length} models for ${provider}`);
         
-        // Get current leaderboard to see how many models are performing well - USE CORRECTED DATA SOURCE
-        const { computeDashboardScores } = await import('../lib/dashboard-compute');
-        const currentLeaderboard = await computeDashboardScores('latest', 'combined');
+        // Filter leaderboard for this provider's models
         const providerInLeaderboard = currentLeaderboard?.filter(model => 
           providerModels.some(pm => pm.id === model.id)
         ) || [];
@@ -484,49 +526,46 @@ export default async function (fastify: FastifyInstance, opts: any) {
           return rank <= 20; // Top 20 models
         });
         
-        // For active models, need to check actual score timestamps
-        const activeModels = [];
-        for (const model of providerInLeaderboard) {
-          const latestScore = await db
-            .select()
-            .from(scores)
-            .where(eq(scores.modelId, model.id))
-            .orderBy(desc(scores.ts))
-            .limit(1);
-          
-          if (latestScore.length > 0) {
-            const lastUpdate = new Date(latestScore[0].ts || new Date());
-            const minutesAgo = (Date.now() - lastUpdate.getTime()) / (1000 * 60);
-            if (minutesAgo <= 60) {
-              activeModels.push({ ...model, lastUpdate });
-            }
+        // OPTIMIZED: Batch check active models with a single query per provider
+        const providerModelIds = providerModels.map(m => m.id);
+        const recentScores = await db
+          .select({
+            modelId: scores.modelId,
+            ts: scores.ts
+          })
+          .from(scores)
+          .where(sql`${scores.modelId} IN (${sql.join(providerModelIds, sql`, `)})`)
+          .orderBy(desc(scores.ts));
+        
+        // Group by model and get latest for each
+        const latestScoresByModel = new Map<number, Date>();
+        for (const score of recentScores) {
+          if (!latestScoresByModel.has(score.modelId)) {
+            latestScoresByModel.set(score.modelId, new Date(score.ts || new Date()));
           }
         }
         
-        // Base trust score calculation - realistic for each provider
+        const activeModels = Array.from(latestScoresByModel.entries())
+          .filter(([_, lastUpdate]) => {
+            const minutesAgo = (Date.now() - lastUpdate.getTime()) / (1000 * 60);
+            return minutesAgo <= 60;
+          });
+        
+        // Base trust score calculation - more balanced baseline
         let baseTrustScore = 75; // Realistic baseline
         
-        // Provider-specific baseline adjustments based on real-world reputation
-        if (provider === 'openai') baseTrustScore = 85;      // Market leader
-        else if (provider === 'anthropic') baseTrustScore = 83; // High quality
-        else if (provider === 'google') baseTrustScore = 80;    // Good but sometimes inconsistent
-        else if (provider === 'xai') baseTrustScore = 72;       // Newer, less proven
+        // Provider-specific baseline adjustments - REDUCED to prevent overwhelming incident penalties
+        if (provider === 'openai') baseTrustScore = 80;      // Market leader (reduced from 85)
+        else if (provider === 'anthropic') baseTrustScore = 78; // High quality (reduced from 83)
+        else if (provider === 'google') baseTrustScore = 76;    // Good but sometimes inconsistent (reduced from 80)
+        else if (provider === 'xai') baseTrustScore = 72;       // Newer, less proven (unchanged)
         
         // Adjust based on current performance
-        const performanceBonus = Math.min(15, topPerformingModels.length * 3); // Up to +15 for good models
-        const activeBonus = Math.min(10, activeModels.length * 2); // Up to +10 for active models
+        const performanceBonus = Math.min(10, topPerformingModels.length * 2); // Reduced bonus to make incidents more impactful
+        const activeBonus = Math.min(8, activeModels.length * 1.5); // Reduced bonus
         
-        // Calculate ACTUAL incidents from database records
-        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-        const actualIncidents = await db
-          .select()
-          .from(incidents)
-          .where(
-            and(
-              eq(incidents.provider, provider),
-              gte(incidents.detectedAt, thirtyDaysAgo.toISOString())
-            )
-          );
+        // Get incidents for this provider (already fetched in batch)
+        const actualIncidents = incidentsByProvider.get(provider) || [];
         
         console.log(`📋 Found ${actualIncidents.length} actual incidents for ${provider} in last 30 days`);
         
@@ -546,8 +585,33 @@ export default async function (fastify: FastifyInstance, opts: any) {
           avgRecoveryHours = (totalRecoveryTime / resolvedIncidents) / 60; // Convert to hours
         }
         
-        // Count recent incidents (last 30 days)
-        let recentIncidents = actualIncidents.length;
+        // FIXED: Get drift incidents from the degradations endpoint to count actual issues
+        let driftIncidentsCount = 0;
+        try {
+          const degradationsResponse = await fastify.inject({
+            method: 'GET',
+            url: '/analytics/degradations?period=7d'
+          });
+          
+          if (degradationsResponse.statusCode === 200) {
+            const degradationsData = JSON.parse(degradationsResponse.payload);
+            if (degradationsData.success && degradationsData.data) {
+              // Count degradations for this provider's models
+              const providerModelNames = providerModels.map(m => m.name.toLowerCase());
+              driftIncidentsCount = degradationsData.data.filter((deg: any) => 
+                deg.provider === provider || 
+                providerModelNames.includes(deg.modelName?.toLowerCase())
+              ).length;
+              
+              console.log(`📊 Found ${driftIncidentsCount} drift incidents for ${provider} from degradations endpoint`);
+            }
+          }
+        } catch (error) {
+          console.error(`❌ Failed to fetch drift incidents for ${provider}:`, error);
+        }
+        
+        // Count recent incidents (last 30 days) - combine actual incidents with drift incidents
+        let recentIncidents = actualIncidents.length + driftIncidentsCount;
         
         // Also check for models that have been consistently underperforming (legacy logic)
         let performanceIncidents = 0;
@@ -579,12 +643,13 @@ export default async function (fastify: FastifyInstance, opts: any) {
           baseTrustScore + performanceBonus + activeBonus - (totalIncidents * 5)
         ));
         
-        const incidentsPerMonth = Math.max(0, Math.round(recentIncidents));
+        // FIXED: Calculate proper monthly incident rate
+        const incidentsPerMonth = Math.max(0, Math.round(recentIncidents)); // recentIncidents is already 30-day count
         
         reliabilityMetrics.push({
           provider,
           trustScore: Math.round(finalTrustScore),
-          totalIncidents: Math.round(recentIncidents * 30), // Scale to monthly
+          totalIncidents: Math.round(recentIncidents), // Don't multiply by 30 - already 30-day count
           incidentsPerMonth,
           avgRecoveryHours: avgRecoveryHours.toFixed(1),
           lastIncident: recentIncidents > 0 ? new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) : null,
@@ -601,7 +666,14 @@ export default async function (fastify: FastifyInstance, opts: any) {
       // Sort by trust score (show all providers)
       reliabilityMetrics.sort((a, b) => b.trustScore - a.trustScore);
       
-      console.log(`🎉 Provider trust scores calculated for ${reliabilityMetrics.length} providers`);
+      const endTime = Date.now();
+      console.log(`🎉 Provider trust scores calculated for ${reliabilityMetrics.length} providers in ${endTime - startTime}ms`);
+      
+      // Cache the results
+      providerReliabilityCache.set(cacheKey, {
+        data: reliabilityMetrics,
+        timestamp: Date.now()
+      });
       
       return {
         success: true,

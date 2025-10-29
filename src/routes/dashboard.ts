@@ -2546,10 +2546,13 @@ export default async function (fastify: FastifyInstance, opts: any) {
     }
   });
 
-  // Get drift incidents for Intelligence Center
+  // Get drift incidents for Intelligence Center - OPTIMIZED with JOIN query
   fastify.get('/incidents', async (req: any) => {
     try {
       const { period = '7d', limit = 50 } = req.query;
+      
+      console.log(`🚀 Fetching drift incidents for period: ${period}, limit: ${limit}`);
+      const startTime = Date.now();
       
       // Calculate time threshold based on period
       let timeThreshold: Date;
@@ -2567,11 +2570,13 @@ export default async function (fastify: FastifyInstance, opts: any) {
           timeThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
       }
       
-      // Get recent incidents
-      const recentIncidents = await db
+      // OPTIMIZED: Single query with JOIN instead of N+1 queries
+      // This fetches incidents AND model names in one database round trip
+      const incidentsWithModelNames = await db
         .select({
           id: incidents.id,
           modelId: incidents.modelId,
+          modelName: models.name,
           provider: incidents.provider,
           incidentType: incidents.incidentType,
           severity: incidents.severity,
@@ -2582,34 +2587,34 @@ export default async function (fastify: FastifyInstance, opts: any) {
           metadata: incidents.metadata
         })
         .from(incidents)
+        .leftJoin(models, eq(incidents.modelId, models.id))
         .where(gte(incidents.detectedAt, timeThreshold.toISOString()))
         .orderBy(desc(incidents.detectedAt))
         .limit(parseInt(limit));
       
-      // Get model names for the incidents
-      const incidentsWithModelNames = await Promise.all(
-        recentIncidents.map(async (incident) => {
-          const model = await db
-            .select({ name: models.name })
-            .from(models)
-            .where(eq(models.id, incident.modelId))
-            .limit(1);
-          
-          return {
-            ...incident,
-            modelName: model[0]?.name || 'Unknown Model',
-            detectedAt: new Date(incident.detectedAt),
-            resolvedAt: incident.resolvedAt ? new Date(incident.resolvedAt) : null,
-            metadata: incident.metadata ? JSON.parse(incident.metadata) : null
-          };
-        })
-      );
+      const endTime = Date.now();
+      console.log(`✅ Fetched ${incidentsWithModelNames.length} incidents in ${endTime - startTime}ms (optimized JOIN query)`);
+      
+      // Format the results
+      const formattedIncidents = incidentsWithModelNames.map(incident => ({
+        id: incident.id,
+        modelId: incident.modelId,
+        modelName: incident.modelName || 'Unknown Model',
+        provider: incident.provider,
+        incidentType: incident.incidentType,
+        severity: incident.severity,
+        title: incident.title,
+        description: incident.description,
+        detectedAt: new Date(incident.detectedAt),
+        resolvedAt: incident.resolvedAt ? new Date(incident.resolvedAt) : null,
+        metadata: incident.metadata ? JSON.parse(incident.metadata) : null
+      }));
       
       return {
         success: true,
-        data: incidentsWithModelNames,
+        data: formattedIncidents,
         period,
-        totalIncidents: incidentsWithModelNames.length
+        totalIncidents: formattedIncidents.length
       };
     } catch (error) {
       console.error('Error fetching drift incidents:', error);
