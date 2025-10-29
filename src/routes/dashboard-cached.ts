@@ -73,6 +73,10 @@ export default async function (fastify: FastifyInstance, opts: any) {
       // allow short CDN cache if you want; otherwise keep private
       reply.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
       
+      // CRITICAL FIX: Ensure metadata accurately reflects the sortBy used for computation
+      // The frontend expects the ACTUAL sortBy used, not the requested one
+      const actualSortBy = sortBy; // This is what was passed to getCachedData and computeDashboardScores
+      
       return {
         success: true,
         cached: result.cached,
@@ -88,7 +92,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
         },
         meta: {
           period,
-          sortBy,
+          sortBy: actualSortBy, // Return the actual sortBy used for computation
           analyticsPeriod,
           cachedAt: new Date().toISOString(),
           cached: result.cached,

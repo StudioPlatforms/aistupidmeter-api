@@ -2,10 +2,21 @@ import { FastifyInstance } from 'fastify';
 import { db } from '../db/index';
 import { models, scores, runs, metrics, deep_sessions, incidents } from '../db/schema';
 import { eq, desc, sql, gte, and } from 'drizzle-orm';
-import { computeDashboardScores } from '../lib/dashboard-compute';
+import { 
+  computeDashboardScores,
+  getSingleModelCombinedScore,
+  getAllCombinedModelScores
+} from '../lib/dashboard-compute';
 
-// Helper function to get combined score for a single model (same as analytics)
+// REMOVED: Local getCombinedScore function - now using shared getSingleModelCombinedScore from dashboard-compute.ts
+
+// Helper function to get combined score for a single model (wrapper for shared function)
 async function getCombinedScore(modelId: number): Promise<number | null> {
+  return getSingleModelCombinedScore(modelId);
+}
+
+// LEGACY IMPLEMENTATION (kept for reference but should not be used):
+async function getCombinedScoreLegacy(modelId: number): Promise<number | null> {
   try {
     // Get latest hourly score (7-axis/speed)
     const latestHourlyScore = await db
@@ -59,6 +70,10 @@ async function getCombinedScore(modelId: number): Promise<number | null> {
     return null;
   }
 }
+
+// NOTE: getToolingScores, getDeepReasoningScores, getCombinedModelScores are exported from dashboard.ts
+// because they are used by dashboard-compute.ts. This creates a circular dependency that should be
+// refactored in the future by moving these functions to dashboard-compute.ts.
 
 // Helper function to get tooling scores ONLY (100% tooling, 0% speed/reasoning)
 export async function getToolingScores() {
