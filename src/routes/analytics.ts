@@ -197,6 +197,19 @@ export default async function (fastify: FastifyInstance, opts: any) {
         
         // 2. PERFORMANCE TREND WARNINGS (24h decline detection) - NOW WITH CI FILTERING
         if (historicalScores.length >= 5) {
+          // CRITICAL FIX: Check data freshness before flagging drift
+          // If the most recent score is >3 hours old, skip drift detection
+          // This prevents false positives when API credits are exhausted
+          const mostRecentScore = historicalScores[0];
+          const lastUpdate = new Date(mostRecentScore.ts || new Date());
+          const hoursStale = (Date.now() - lastUpdate.getTime()) / (1000 * 60 * 60);
+          
+          if (hoursStale > 3) {
+            console.log(`📊 ${model.name}: Data is ${hoursStale.toFixed(1)}h old - skipping drift detection (likely credit exhaustion)`);
+            // Skip drift detection for stale data - continue showing last good score
+            continue;
+          }
+          
           const validScores = historicalScores
             .filter(s => s.stupidScore !== -777 && s.stupidScore !== -888 && s.stupidScore !== -999 && s.stupidScore !== -100)
             .map(s => {
