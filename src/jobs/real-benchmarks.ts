@@ -1892,6 +1892,7 @@ export async function benchmarkModel(
   let failedTasks: typeof BENCHMARK_TASKS[0][] = []; // Track which tasks failed
   let creditExhaustedDuringExecution = false; // Track if credits ran out during task execution
   const taskErrors: any[] = []; // Track all task errors for analysis
+  let creditExhaustedTaskName: string | null = null; // Track which task exhausted credits
 
   // Phase 1: Initial benchmark run
   streamLog('info', `🎯 Phase 1: Running initial benchmark on all ${selectedTasks.length} tasks`);
@@ -1946,8 +1947,13 @@ export async function benchmarkModel(
       // CRITICAL: Check if this error is due to credit exhaustion
       if (isCreditExhausted(taskError)) {
         creditExhaustedDuringExecution = true;
+        creditExhaustedTaskName = task.id;
         console.log(`💳 ${model.name}: Credits exhausted during task ${task.id}`);
         streamLog('warning', `💳 API credits exhausted during task ${task.id} - will preserve last known score`);
+        
+        // CRITICAL FIX: Stop immediately when credits exhausted
+        // Don't continue with remaining tasks or calculate partial scores
+        break;
       }
       
       taskErrors.push({ task: task.id, error: taskError });
@@ -1956,6 +1962,19 @@ export async function benchmarkModel(
       failedTasks.push(task);
       // Continue with next task
     }
+  }
+
+  // CRITICAL CHECK: If credits exhausted during execution, preserve last score and exit
+  if (creditExhaustedDuringExecution) {
+    console.log(`💳 ${model.name}: Credits exhausted during task execution (at ${creditExhaustedTaskName}) - preserving last successful score and timestamp`);
+    if (streamingSessionId && emitBenchmarkProgress) {
+      emitBenchmarkProgress(streamingSessionId, { 
+        type: 'warning', 
+        message: `💳 API credits exhausted - your last successful benchmark score will remain visible`,
+        data: { model: model.name, task: creditExhaustedTaskName }
+      });
+    }
+    return; // Exit without inserting any score - preserves last successful score in database
   }
 
   // Phase 2: Retry failed tasks with enhanced parameters
@@ -2032,6 +2051,7 @@ export async function benchmarkModel(
     
     // CRITICAL: Check if ANY task failure was due to credit exhaustion
     // This catches credit exhaustion that happens DURING task execution (after canary passes)
+    // Note: creditExhaustedDuringExecution should already be caught above, but double-check here
     const creditExhausted = creditExhaustedDuringExecution || 
       taskErrors.some(e => isCreditExhausted(e.error));
     
