@@ -15,7 +15,7 @@ import {
   LLMAdapter
 } from '../llm/adapters';
 import { db } from '../db/index';
-import { models, scores, runs, metrics, tasks as tasksTable } from '../db/schema';
+import { models, scores, runs, metrics, tasks as tasksTable, raw_outputs, test_case_results } from '../db/schema';
 import { desc, eq } from 'drizzle-orm';
 import * as crypto from 'crypto';
 import { calculateConfidenceInterval, calculateStdDev } from '../lib/statistical-tests';
@@ -1105,6 +1105,10 @@ async function runSingleBenchmarkStreaming(
   success: boolean; latencyMs: number; code: string;
   tokensIn?: number; tokensOut?: number;
   metrics: Record<AxisKey, number>;
+  rawOutputData?: any;
+  apiVersion?: string | null;
+  responseHeaders?: Record<string, string>;
+  modelFingerprint?: string | null;
 } | null> {
   // Helper function to emit streaming progress if sessionId is provided
   const streamLog = (type: string, message: string, data?: any) => {
@@ -1239,6 +1243,42 @@ async function runSingleBenchmarkStreaming(
     streamLog('info', `      ✅ Extracted ${sanitized.length} chars of Python code`);
     streamLog('info', `      💻 Extracted code: ${sanitized.slice(0, 200)}${sanitized.length > 200 ? '...' : ''}`);
     
+    // HIGH VALUE DATA CAPTURE: Prepare raw output data for persistence
+    let rawOutputData: any = null;
+    try {
+      const extractionSuccess = sanitized && sanitized.length >= 10;
+      const extractionMethod = /```/.test(rawText) ? 'code_block' : 
+                              /^(def|class)\s+/.test(rawText) ? 'plain_text' : 'failed';
+      
+      // Determine failure type if extraction failed
+      let failureType: string | null = null;
+      let failureDetails: string | null = null;
+      
+      if (!extractionSuccess) {
+        if (rawText.length === 0) {
+          failureType = 'empty_response';
+        } else if (/sorry|cannot|unable|inappropriate/i.test(rawText)) {
+          failureType = 'refusal';
+        } else if (rawText.length > 5000) {
+          failureType = 'hallucination';
+        } else {
+          failureType = 'extraction_failed';
+          failureDetails = `Raw length: ${rawText.length}, extracted: ${sanitized?.length || 0}`;
+        }
+      }
+      
+      rawOutputData = {
+        rawText,
+        extractedCode: sanitized,
+        extractionSuccess,
+        extractionMethod,
+        failureType,
+        failureDetails
+      };
+    } catch (captureError) {
+      console.warn(`[RAW-OUTPUT-CAPTURE] Failed: ${String(captureError).slice(0, 100)}`);
+    }
+    
     // Log code evaluation process
     streamLog('info', `      🧪 Evaluating code against ${activeTask.testCases?.length || 0} test cases...`);
     
@@ -1256,6 +1296,43 @@ async function runSingleBenchmarkStreaming(
     
     streamLog('info', `      ⚡ Latency: ${latencyMs}ms (efficiency will be calculated relative to batch)`);
     
+    // HIGH VALUE DATA CAPTURE: Extract API version and response headers
+    let apiVersion: string | null = null;
+    let responseHeaders: Record<string, string> = {};
+    let modelFingerprint: string | null = null;
+
+    try {
+      // Extract from response object (varies by provider)
+      if (res && typeof res === 'object') {
+        // OpenAI style
+        apiVersion = (res as any)?.model || 
+                     (res as any)?.response?.model ||
+                     (res as any)?.headers?.['openai-model'] ||
+                     null;
+        
+        // Capture response headers if available
+        const headers = (res as any)?.headers || (res as any)?.response?.headers;
+        if (headers && typeof headers === 'object') {
+          responseHeaders = { ...headers };
+        }
+        
+        // Generate fingerprint from response characteristics
+        const fingerprintData = {
+          tokensIn: finalTokensIn,
+          tokensOut: finalTokensOut,
+          latencyMs,
+          responseLength: rawText.length,
+          timestamp: new Date().toISOString().slice(0, 10) // Date only
+        };
+        modelFingerprint = crypto.createHash('sha256')
+          .update(JSON.stringify(fingerprintData))
+          .digest('hex')
+          .slice(0, 16);
+      }
+    } catch (headerError) {
+      console.warn(`[HEADER-CAPTURE] Failed: ${String(headerError).slice(0, 100)}`);
+    }
+    
     // Map evaluation results to axis metrics
     const m = {
       correctness: evalRes.correctness,
@@ -1269,7 +1346,18 @@ async function runSingleBenchmarkStreaming(
       safety: evalRes.safety
     } as Record<AxisKey, number>;
 
-    return { success: true, latencyMs, code: sanitized, tokensIn: finalTokensIn, tokensOut: finalTokensOut, metrics: m };
+    return { 
+      success: true, 
+      latencyMs, 
+      code: sanitized, 
+      tokensIn: finalTokensIn, 
+      tokensOut: finalTokensOut, 
+      metrics: m,
+      rawOutputData,
+      apiVersion,
+      responseHeaders,
+      modelFingerprint
+    };
   } catch (e: any) {
     // Enhanced error logging with more context and smart retry logic
     const errorMsg = String(e?.message || e).slice(0, 200);

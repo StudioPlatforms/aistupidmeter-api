@@ -37,7 +37,11 @@ export const runs = sqliteTable('runs', {
   latencyMs: integer('latency_ms').notNull(),
   attempts: integer('attempts').notNull(),
   passed: integer('passed', { mode: 'boolean' }).notNull(),
-  artifacts: text('artifacts', { mode: 'json' }).$type<Record<string, any>>()
+  artifacts: text('artifacts', { mode: 'json' }).$type<Record<string, any>>(),
+  // API version tracking for correlating performance with model updates
+  apiVersion: text('api_version'), // e.g., "gpt-4-0613", extracted from response headers
+  responseHeaders: text('response_headers', { mode: 'json' }).$type<Record<string, string>>(), // Full response headers as JSON
+  modelFingerprint: text('model_fingerprint') // Hash of response characteristics for version detection
 });
 
 export const metrics = sqliteTable('metrics', {
@@ -231,4 +235,61 @@ export const incidents = sqliteTable('incidents', {
   metadata: text('metadata'), // JSON for additional context
   createdAt: text('created_at').default('CURRENT_TIMESTAMP'),
   updatedAt: text('updated_at').default('CURRENT_TIMESTAMP')
+});
+
+// Raw outputs table - captures LLM responses before code extraction
+// HIGH VALUE: Reveals failure modes, hallucinations, and extraction issues
+export const raw_outputs = sqliteTable('raw_outputs', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  runId: integer('run_id').references(() => runs.id).notNull(),
+  rawText: text('raw_text').notNull(), // Full LLM response before extraction
+  extractedCode: text('extracted_code'), // Code after extraction (may be null if extraction failed)
+  extractionSuccess: integer('extraction_success', { mode: 'boolean' }).notNull(),
+  extractionMethod: text('extraction_method'), // 'code_block', 'plain_text', 'failed'
+  failureType: text('failure_type'), // 'syntax_error', 'logic_error', 'timeout', 'refusal', 'hallucination', 'empty_response'
+  failureDetails: text('failure_details'), // Additional context about the failure
+  ts: text('ts').default('CURRENT_TIMESTAMP')
+});
+
+// Test case results table - per-test-case granularity for failure analysis
+// HIGH VALUE: Shows which specific test cases models fail on
+export const test_case_results = sqliteTable('test_case_results', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  runId: integer('run_id').references(() => runs.id).notNull(),
+  testCaseIndex: integer('test_case_index').notNull(),
+  testInput: text('test_input').notNull(),
+  expectedOutput: text('expected_output').notNull(),
+  actualOutput: text('actual_output'), // May be null if execution failed
+  passed: integer('passed', { mode: 'boolean' }).notNull(),
+  errorMessage: text('error_message'), // Python error message if test failed
+  executionTimeMs: integer('execution_time_ms'), // Time to execute this specific test
+  ts: text('ts').default('CURRENT_TIMESTAMP')
+});
+
+// Adversarial prompts library - systematic safety testing
+// EXTREMELY HIGH VALUE: $300K-1M/year potential
+export const adversarial_prompts = sqliteTable('adversarial_prompts', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  promptText: text('prompt_text').notNull(),
+  attackType: text('attack_type').notNull(), // 'jailbreak', 'injection', 'extraction', 'manipulation', 'harmful_content'
+  severity: text('severity').notNull(), // 'low', 'medium', 'high', 'critical'
+  expectedBehavior: text('expected_behavior').notNull(), // What a safe model should do
+  category: text('category'), // 'code_injection', 'prompt_leak', 'safety_bypass', 'data_extraction'
+  createdAt: text('created_at').default('CURRENT_TIMESTAMP'),
+  active: integer('active', { mode: 'boolean' }).default(true)
+});
+
+// Adversarial test results - tracks which models are vulnerable
+// EXTREMELY HIGH VALUE: Safety data is rare and critical
+export const adversarial_results = sqliteTable('adversarial_results', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  promptId: integer('prompt_id').references(() => adversarial_prompts.id).notNull(),
+  modelId: integer('model_id').references(() => models.id).notNull(),
+  responseText: text('response_text').notNull(),
+  bypassSuccessful: integer('bypass_successful', { mode: 'boolean' }).notNull(), // Did the attack work?
+  safetyScore: real('safety_score').notNull(), // 0.0-1.0, higher is safer
+  refusalDetected: integer('refusal_detected', { mode: 'boolean' }).default(false), // Did model refuse?
+  harmfulContentGenerated: integer('harmful_content_generated', { mode: 'boolean' }).default(false),
+  notes: text('notes'), // Additional observations
+  ts: text('ts').default('CURRENT_TIMESTAMP')
 });
