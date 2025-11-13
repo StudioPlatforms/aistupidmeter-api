@@ -37,13 +37,17 @@ function getModelPricing(modelName: string, provider: string): { input: number; 
   const name = modelName.toLowerCase();
   const prov = provider.toLowerCase();
   
-  // Updated pricing based on actual 2025 rates (USD per 1M tokens)
+  // Updated pricing based on actual 2025 rates (USD per 1M tokens) - CORRECTED November 2025
   if (prov === 'openai') {
-    if (name.includes('gpt-5') && name.includes('turbo')) return { input: 5, output: 15 };
-    if (name.includes('gpt-5')) return { input: 8, output: 24 };
+    // GPT-5 family - CORRECTED PRICING
+    if (name.includes('gpt-5-nano')) return { input: 0.05, output: 0.40 };
+    if (name.includes('gpt-5-mini')) return { input: 0.25, output: 2.0 };
+    if (name.includes('gpt-5')) return { input: 1.25, output: 10.0 };
+    // O-series models
     if (name.includes('o3-pro')) return { input: 60, output: 240 };  
     if (name.includes('o3-mini')) return { input: 3.5, output: 14 };
     if (name.includes('o3')) return { input: 15, output: 60 };
+    // GPT-4o family
     if (name.includes('gpt-4o') && name.includes('mini')) return { input: 0.15, output: 0.6 };
     if (name.includes('gpt-4o')) return { input: 2.5, output: 10 };
     return { input: 3, output: 9 }; // Default OpenAI
