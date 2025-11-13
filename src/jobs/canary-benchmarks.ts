@@ -78,9 +78,10 @@ export const SAFETY_SENTINEL_TASKS = [
 
 // ---------- Canary Task Selection ----------
 // LIGHTNING-FAST: Only 2 minimal tasks for maximum speed across ALL models
+// UPDATED: Slightly harder tasks to create variance for drift detection
 export const CANARY_TASK_IDS = [
-  'is_palindrome',      // Easy - basic string manipulation (fast)
-  'binary_search'       // Medium - algorithm understanding (fast)
+  'prime_check',        // Easy - but requires logic (creates variance)
+  'merge_intervals'     // Medium - algorithm understanding (differentiates models)
 ];
 
 // No safety sentinels for speed - just performance check
@@ -271,7 +272,7 @@ async function benchmarkModelCanaryLightning(
       globalTimeout
     ]) as TaskResult[];
     
-    // LIGHTNING SCORING: Ultra-simple aggregation
+    // LIGHTNING SCORING: Ultra-simple aggregation with stricter evaluation
     const validResults = taskResults.filter((r: TaskResult) => r.success);
     if (validResults.length === 0) {
       console.log(`⚠️ ${model.name}: All tasks failed`);
@@ -280,7 +281,14 @@ async function benchmarkModelCanaryLightning(
     
     const avgScore = validResults.reduce((sum: number, r: TaskResult) => sum + r.score, 0) / validResults.length;
     const avgLatency = validResults.reduce((sum: number, r: TaskResult) => sum + r.latency, 0) / validResults.length;
-    const stupidScore = avgScore * 100; // Convert to 0-100 scale
+    
+    // DRIFT DETECTION FIX: Stricter scoring to create variance
+    // Old: avgScore * 100 (everyone got 80)
+    // New: Exponential penalty for imperfection
+    let stupidScore = avgScore * 100;
+    if (avgScore < 0.95) {
+      stupidScore = Math.pow(avgScore, 1.3) * 100; // Penalize errors more
+    }
     
     // LIGHTNING SAVE: Direct database insert without complex processing
     await db.insert(scores).values({

@@ -268,15 +268,15 @@ function makeUnifiedPrompt(instancePrompt: string, expected: string, batchSeed: 
 }
 
 const AXIS_WEIGHTS = {
-  correctness: 0.30,   // Reduced slightly
-  complexity: 0.18,    // Changed from spec to complexity
-  codeQuality: 0.12,
+  correctness: 0.40,   // INCREASED: Correctness is critical for drift detection
+  complexity: 0.20,    // INCREASED: Task understanding matters
+  codeQuality: 0.15,   // INCREASED: Code quality differentiates models
   efficiency: 0.05,    // Kept low for throughput focus
-  stability: 0.12,     // Adjusted for new axes
-  edgeCases: 0.05,     // Changed from refusal
-  debugging: 0.05,     // Changed from recovery
-  format: 0.08,        // New axis for JSON/format obedience
-  safety: 0.05         // New axis for refusal/jailbreak correctness
+  stability: 0.10,     // Adjusted for new axes
+  edgeCases: 0.03,     // Reduced - less critical
+  debugging: 0.03,     // Reduced - less critical
+  format: 0.02,        // Reduced - format is minor
+  safety: 0.02         // Reduced - safety is minor for coding tasks
 } as const;
 
 // Cost tracking configuration
@@ -1676,7 +1676,7 @@ function shrinkTo(x: number, n: number, target: number, k: number = 1): number {
 }
 
 function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasBaseline: boolean = true, successfulTasks: number = 1): number {
-  // FAIR SCORING: Performance-based, minimal historical bias
+  // DRIFT DETECTION FIX: Stricter scoring to create variance between model tiers
   let weightedSum = 0;
   let totalWeight = 0;
   
@@ -1684,17 +1684,20 @@ function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasB
     let performance = axesNow[k] || 0;
     const weight = AXIS_WEIGHTS[k];
     
-    // Gentle exponential decay for imperfections
+    // STRICTER: Exponential penalty for imperfections (was 1.4, now 1.6)
     if (performance < 1.0) {
-      performance = Math.pow(performance, 1.4);
+      performance = Math.pow(performance, 1.6);
     }
     
-    // Reduced axis-specific penalties
+    // STRICTER: Increased penalties for poor performance
     if (k === 'correctness' && performance < 0.95) {
-      performance *= 0.85;
+      performance *= 0.75; // Was 0.85, now 0.75
+    }
+    if (k === 'correctness' && performance < 0.80) {
+      performance *= 0.70; // Additional penalty for low correctness
     }
     if (k === 'codeQuality' && performance < 0.6) {
-      performance *= 0.95;
+      performance *= 0.85; // Was 0.95, now 0.85
     }
     
     weightedSum += performance * weight * 100;
@@ -1705,8 +1708,9 @@ function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasB
   
   let baseScore = weightedSum / totalWeight;
   
-  // Gentle professor curve
-  baseScore = Math.pow(baseScore / 100, 1.2) * 100;
+  // STRICTER: Reduced professor curve (was 1.2, now 1.3)
+  // This creates more separation between good and mediocre models
+  baseScore = Math.pow(baseScore / 100, 1.3) * 100;
   
   // FAIRNESS FIX: Reduced variance penalties (only for established models)
   let varianceAdjustment = 0;
@@ -1725,18 +1729,18 @@ function calculateScore(axesNow: Axes, baseline: {means: Axes; stds: Axes}, hasB
   // FAIRNESS FIX: NO penalty for new models - let performance speak
   // Removed: if (!hasBaseline) finalScore -= 5;
   
-  // Quality gates with smaller penalties
+  // STRICTER: Quality gates with larger penalties to differentiate tiers
   const correctness = axesNow.correctness || 0;
   const codeQuality = axesNow.codeQuality || 0;
   const complexity = axesNow.complexity || 0;
   
   const gates = {
-    correctness_minor: correctness < 0.90 ? -5 : 0,
-    correctness_major: correctness < 0.70 ? -6 : 0,
-    correctness_fail : correctness < 0.50 ? -8 : 0,
-    quality_minor    : codeQuality < 0.60 ? -6 : 0,
-    quality_major    : codeQuality < 0.40 ? -12: 0,
-    task_understood  : complexity  < 0.30 ? -8 : 0,
+    correctness_minor: correctness < 0.90 ? -8 : 0,  // Was -5, now -8
+    correctness_major: correctness < 0.70 ? -10 : 0, // Was -6, now -10
+    correctness_fail : correctness < 0.50 ? -15 : 0, // Was -8, now -15
+    quality_minor    : codeQuality < 0.60 ? -8 : 0,  // Was -6, now -8
+    quality_major    : codeQuality < 0.40 ? -15: 0,  // Was -12, now -15
+    task_understood  : complexity  < 0.30 ? -12 : 0, // Was -8, now -12
   };
   finalScore += Object.values(gates).reduce((a,b)=>a+b,0);
 

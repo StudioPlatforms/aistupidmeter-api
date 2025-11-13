@@ -12,7 +12,9 @@ export const models = sqliteTable('models', {
   // Tool calling capabilities
   supportsToolCalling: integer('supports_tool_calling', { mode: 'boolean' }).default(false),
   maxToolsPerCall: integer('max_tools_per_call').default(10),
-  toolCallReliability: real('tool_call_reliability').default(0.0) // 0.0-1.0 based on historical performance
+  toolCallReliability: real('tool_call_reliability').default(0.0), // 0.0-1.0 based on historical performance
+  // Reasoning capabilities
+  usesReasoningEffort: integer('uses_reasoning_effort', { mode: 'boolean' }).default(false) // Models that use extended thinking (GPT-5, o3, Gemini 2.5 Pro, DeepSeek Reasoner, etc.)
 });
 
 export const tasks = sqliteTable('tasks', {

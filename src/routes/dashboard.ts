@@ -138,7 +138,8 @@ export async function getToolingScores() {
           status: 'unavailable',
           unavailableReason: 'No tooling benchmark data available',
           history: [],
-          isNew: isNew
+          isNew: isNew,
+          usesReasoningEffort: Boolean(model.usesReasoningEffort)
         });
         continue;
       }
@@ -196,7 +197,8 @@ export async function getToolingScores() {
           displayScore: Math.max(0, Math.min(100, Math.round(h.stupidScore))),
           timestamp: h.ts && h.ts !== 'CURRENT_TIMESTAMP' ? h.ts : new Date().toISOString()
         })),
-        isNew: isNew
+        isNew: isNew,
+          usesReasoningEffort: Boolean(model.usesReasoningEffort)
       });
     }
     
@@ -265,7 +267,8 @@ export async function getDeepReasoningScores() {
           status: 'unavailable',
           unavailableReason: 'No deep reasoning benchmark data available',
           history: [],
-          isNew: isNew
+          isNew: isNew,
+          usesReasoningEffort: Boolean(model.usesReasoningEffort)
         });
         continue;
       }
@@ -323,7 +326,8 @@ export async function getDeepReasoningScores() {
           displayScore: Math.max(0, Math.min(100, Math.round(h.stupidScore))),
           timestamp: h.ts
         })),
-        isNew: isNew
+        isNew: isNew,
+          usesReasoningEffort: Boolean(model.usesReasoningEffort)
       });
     }
     
@@ -407,7 +411,8 @@ export async function getCombinedModelScores() {
           status: 'unavailable',
           unavailableReason: 'No recent benchmark data',
           history: [],
-          isNew: isNew
+          isNew: isNew,
+          usesReasoningEffort: Boolean(model.usesReasoningEffort)
         });
         continue;
       }
@@ -463,7 +468,8 @@ export async function getCombinedModelScores() {
           displayScore: Math.max(0, Math.min(100, Math.round(h.stupidScore))),
           timestamp: h.ts
         })),
-        isNew: isNew
+        isNew: isNew,
+          usesReasoningEffort: Boolean(model.usesReasoningEffort)
       });
     }
     
@@ -615,7 +621,8 @@ export async function getModelScoresFromDB() {
               totalTasks: 0,
               unavailableReason: score.note || model.notes || 'No valid scores available',
               history: [], // Empty history for unavailable models
-              isNew: isNew
+              isNew: isNew,
+          usesReasoningEffort: Boolean(model.usesReasoningEffort)
             });
             continue;
           }
@@ -812,7 +819,8 @@ export async function getModelScoresFromDB() {
           stability: Math.round(stabilityScore),
           changeFromPrevious: changeFromPrevious,
           periodAvg: currentScore,
-          isNew: isNew
+          isNew: isNew,
+          usesReasoningEffort: Boolean(model.usesReasoningEffort)
         });
       }
     }
