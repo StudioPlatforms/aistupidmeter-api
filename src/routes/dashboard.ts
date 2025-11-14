@@ -1910,8 +1910,21 @@ export default async function (fastify: FastifyInstance, opts: any) {
   fastify.get('/history/:modelId', async (req: any) => {
     const { modelId } = req.params;
     const { period = 'latest', sortBy = 'combined' } = req.query;
-    
+
     try {
+      console.log(`📊 [HISTORY] Request for model ${modelId}: period=${period}, sortBy=${sortBy}`);
+      
+      // CRITICAL FIX: Get the canonical score using the SAME pipeline as the main page
+      // This ensures consistency between rankings page and details page
+      const allModelScores = await computeDashboardScores(period as any, sortBy as any);
+      const canonicalModel = allModelScores.find((m: any) => String(m.id) === String(modelId));
+      
+      if (canonicalModel) {
+        console.log(`✅ [HISTORY] Canonical score for model ${modelId} from main pipeline: ${canonicalModel.currentScore}`);
+      } else {
+        console.log(`⚠️ [HISTORY] Model ${modelId} not found in canonical scores`);
+      }
+      
       // Determine time period and data limits based on request
       let timeThreshold: Date;
       let dataLimit: number;
@@ -1943,10 +1956,10 @@ export default async function (fastify: FastifyInstance, opts: any) {
           break;
       }
 
-      // FIXED: Handle combined mode by fetching and combining scores from all suites
+      // FIXED: Handle combined mode by using the SAME calculation as main page
       if (sortBy === 'combined') {
-        // For combined mode, we need to fetch hourly and deep scores and combine them
-        // Get hourly scores (70% weight)
+        // For combined mode, we need to fetch hourly, deep, and tooling scores and combine them
+        // Get hourly scores (50% weight)
         const hourlyScores = await db
           .select({
             stupidScore: scores.stupidScore,
@@ -1966,7 +1979,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
           .orderBy(desc(scores.ts))
           .limit(dataLimit);
 
-        // Get deep scores (30% weight)
+        // Get deep scores (25% weight)
         const deepScores = await db
           .select({
             stupidScore: scores.stupidScore,
@@ -1986,10 +1999,40 @@ export default async function (fastify: FastifyInstance, opts: any) {
           .orderBy(desc(scores.ts))
           .limit(dataLimit);
 
-        // Create a map of timestamps to combine scores
+        // Get tooling scores (25% weight)
+        const toolingScores = await db
+          .select({
+            stupidScore: scores.stupidScore,
+            ts: scores.ts,
+            axes: scores.axes,
+            suite: scores.suite,
+            note: scores.note,
+            confidence_lower: scores.confidenceLower,
+            confidence_upper: scores.confidenceUpper
+          })
+          .from(scores)
+          .where(and(
+            eq(scores.modelId, parseInt(modelId)),
+            eq(scores.suite, 'tooling'),
+            gte(scores.ts, timeThreshold.toISOString())
+          ))
+          .orderBy(desc(scores.ts))
+          .limit(dataLimit);
+
+        // CRITICAL FIX: For the LATEST period only, use the SAME calculation as main page
+        // For historical periods (24h, 7d, 1m), we should NOT use the latest score
+        // This ensures consistency between main page and details page for "latest" only
+        let latestCombinedScore: number | null = null;
+        if (period === 'latest' && hourlyScores.length > 0) {
+          // Use the shared function to get the exact same score as main page
+          latestCombinedScore = await getSingleModelCombinedScore(parseInt(modelId));
+          console.log(`🎯 LATEST combined score for model ${modelId}: ${latestCombinedScore} (using shared calculation)`);
+        }
+
+        // Create a map of timestamps to combine scores for historical data
         const combinedScoresMap = new Map<string, any>();
 
-        // Process hourly scores (70% weight)
+        // Process hourly scores (50% weight)
         hourlyScores.forEach(score => {
           if (score.stupidScore !== null && score.stupidScore >= 0 && score.ts) {
             const timestamp = score.ts;
@@ -1999,6 +2042,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
               timestamp,
               hourlyScore: hourlyDisplay,
               deepScore: null,
+              toolingScore: null,
               axes: score.axes,
               confidence_lower: score.confidence_lower,
               confidence_upper: score.confidence_upper
@@ -2006,7 +2050,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
           }
         });
 
-        // Add deep scores (30% weight) - match by closest timestamp
+        // Add deep scores (25% weight) - match by closest timestamp
         deepScores.forEach(deepScore => {
           if (deepScore.stupidScore !== null && deepScore.stupidScore >= 0 && deepScore.ts) {
             const deepDisplay = Math.max(0, Math.min(100, Math.round(deepScore.stupidScore)));
@@ -2032,20 +2076,63 @@ export default async function (fastify: FastifyInstance, opts: any) {
           }
         });
 
-        // Calculate combined scores (70% hourly + 30% deep)
+        // Add tooling scores (25% weight) - match by closest timestamp
+        toolingScores.forEach(toolingScore => {
+          if (toolingScore.stupidScore !== null && toolingScore.stupidScore >= 0 && toolingScore.ts) {
+            const toolingDisplay = Math.max(0, Math.min(100, Math.round(toolingScore.stupidScore)));
+            const toolingTimestamp = new Date(toolingScore.ts).getTime();
+            
+            // Find the closest hourly score within 1 hour
+            let closestEntry: any = null;
+            let minDiff = Infinity;
+            
+            for (const [timestamp, entry] of combinedScoresMap.entries()) {
+              const entryTime = new Date(timestamp).getTime();
+              const diff = Math.abs(entryTime - toolingTimestamp);
+              
+              if (diff < minDiff && diff < 60 * 60 * 1000) { // Within 1 hour
+                minDiff = diff;
+                closestEntry = entry;
+              }
+            }
+            
+            if (closestEntry) {
+              closestEntry.toolingScore = toolingDisplay;
+            }
+          }
+        });
+
+        // Calculate combined scores (50% hourly + 25% deep + 25% tooling)
         const formattedHistory = Array.from(combinedScoresMap.values())
-          .map(entry => {
+          .map((entry, index) => {
             let combinedScore: number;
             
-            if (entry.hourlyScore !== null && entry.deepScore !== null) {
-              // Both scores available - full combination
-              combinedScore = Math.round(entry.hourlyScore * 0.7 + entry.deepScore * 0.3);
-            } else if (entry.hourlyScore !== null) {
-              // Only hourly score - use it directly
-              combinedScore = entry.hourlyScore;
+            // CRITICAL FIX: For the FIRST (most recent) entry, use the shared calculation result
+            if (index === 0 && latestCombinedScore !== null) {
+              combinedScore = latestCombinedScore;
+              console.log(`✅ Using shared combined score for latest: ${combinedScore}`);
             } else {
-              // Shouldn't happen, but fallback
-              combinedScore = 50;
+              // For historical entries, use the timestamp-matching logic
+              const hasHourly = entry.hourlyScore !== null;
+              const hasDeep = entry.deepScore !== null;
+              const hasTooling = entry.toolingScore !== null;
+              
+              if (hasHourly && hasDeep && hasTooling) {
+                // All three scores available - full combination
+                combinedScore = Math.round(entry.hourlyScore * 0.5 + entry.deepScore * 0.25 + entry.toolingScore * 0.25);
+              } else if (hasHourly && hasDeep) {
+                // Hourly + deep only
+                combinedScore = Math.round(entry.hourlyScore * 0.67 + entry.deepScore * 0.33);
+              } else if (hasHourly && hasTooling) {
+                // Hourly + tooling only
+                combinedScore = Math.round(entry.hourlyScore * 0.67 + entry.toolingScore * 0.33);
+              } else if (hasHourly) {
+                // Only hourly score - use it directly
+                combinedScore = entry.hourlyScore;
+              } else {
+                // Shouldn't happen, but fallback
+                combinedScore = 50;
+              }
             }
 
             return {
@@ -2068,6 +2155,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
           period,
           sortBy: 'combined',
           dataPoints: formattedHistory.length,
+          canonicalScore: canonicalModel?.currentScore || null,
           timeRange: {
             from: timeThreshold.toISOString(),
             to: new Date().toISOString()
@@ -2233,6 +2321,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
       });
 
       console.log(`📊 History for model ${modelId} (${sortBy}, ${period}): ${formattedHistory.length} data points`);
+      console.log(`✅ Canonical score from shared pipeline: ${canonicalModel?.currentScore || 'not found'}`);
       
       return {
         success: true,
@@ -2243,7 +2332,9 @@ export default async function (fastify: FastifyInstance, opts: any) {
         timeRange: {
           from: timeThreshold.toISOString(),
           to: new Date().toISOString()
-        }
+        },
+        // Include the canonical score from the shared pipeline for consistency verification
+        canonicalScore: canonicalModel?.currentScore || null
       };
     } catch (error) {
       console.error('Error fetching historical data:', error);

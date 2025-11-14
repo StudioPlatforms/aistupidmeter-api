@@ -110,7 +110,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
       
       // Historical degradation detection using each model's past performance
       for (const model of currentLeaderboard) {
-        let currentScore = model.score;
+        let currentScore = typeof model.score === "number" ? model.score : 0;
         
         // CRITICAL FIX: Handle null scores from leaderboard
         if (currentScore === null || currentScore === undefined) {
@@ -120,7 +120,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
           const latestScore = await db
             .select()
             .from(scores)
-            .where(eq(scores.modelId, model.id))
+            .where(eq(scores.modelId, parseInt(model.id)))
             .orderBy(desc(scores.ts))
             .limit(1);
           
@@ -149,7 +149,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
           .from(scores)
           .where(
             and(
-              eq(scores.modelId, model.id),
+              eq(scores.modelId, parseInt(model.id)),
               gte(scores.ts, twentyFourHoursAgo.toISOString())
             )
           )
@@ -185,7 +185,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
           }
           
           degradations.push({
-            modelId: model.id,
+            modelId: parseInt(model.id),
             modelName: model.name,
             provider: model.vendor,
             currentScore: currentScore,
@@ -255,7 +255,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
             // Detect significant 24h decline - NOW REQUIRES CI VALIDATION
             if (trendDrop > 8 && trendDropPct > 12 && dropExceedsCI) {
               degradations.push({
-                modelId: model.id,
+                modelId: parseInt(model.id),
                 modelName: model.name,
                 provider: model.vendor,
                 currentScore: Math.round(recentAvg),
@@ -283,7 +283,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
               if (isPoorPerformer) {
                 // High variance + poor performance = real problem
                 degradations.push({
-                  modelId: model.id,
+                  modelId: parseInt(model.id),
                   modelName: model.name,
                   provider: model.vendor,
                   currentScore: currentScore,
@@ -302,7 +302,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
                 // Optional: Add as informational note only if variance is extreme
                 if (stdDev > 20) {
                   degradations.push({
-                    modelId: model.id,
+                    modelId: parseInt(model.id),
                     modelName: model.name,
                     provider: model.vendor,
                     currentScore: currentScore,
@@ -328,7 +328,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
         // Flag expensive models with poor rankings
         if (estimatedCost > 15 && rank > 15) {
           degradations.push({
-            modelId: model.id,
+            modelId: parseInt(model.id),
             modelName: model.name,
             provider: model.vendor,
             currentScore: currentScore,
@@ -353,7 +353,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
           const message = `🔴 SERVICE DISRUPTION: ${recentFailures} failed requests in last 24h (${failureRate}% failure rate)`;
           
           degradations.push({
-            modelId: model.id,
+            modelId: parseInt(model.id),
             modelName: model.name,
             provider: model.vendor,
             currentScore: currentScore,
@@ -374,7 +374,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
               .from(incidents)
               .where(
                 and(
-                  eq(incidents.modelId, model.id),
+                  eq(incidents.modelId, parseInt(model.id)),
                   eq(incidents.incidentType, 'service_disruption'),
                   gte(incidents.detectedAt, new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString()) // Last 6 hours
                 )
@@ -384,7 +384,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
             if (recentIncident.length === 0) {
               // Create new incident record
               await db.insert(incidents).values({
-                modelId: model.id,
+                modelId: parseInt(model.id),
                 provider: model.vendor || 'unknown', // Handle cases where vendor might be undefined
                 incidentType: 'service_disruption',
                 severity,
@@ -416,21 +416,21 @@ export default async function (fastify: FastifyInstance, opts: any) {
             m.name.toLowerCase().replace('-eu', '') === model.name.toLowerCase().replace('-eu', '')
           );
           
-          if (usVersion && usVersion.score && currentScore < usVersion.score - 5) {
-            const performanceGap = usVersion.score - currentScore;
-            const gapPercentage = Math.round((performanceGap / usVersion.score) * 100);
+          if (usVersion && typeof usVersion.score === "number" && usVersion.score > 0 && currentScore < usVersion.score - 5) {
+            const performanceGap = typeof usVersion!.score === "number" ? usVersion!.score : 0 - currentScore;
+            const gapPercentage = Math.round((performanceGap / (typeof usVersion!.score === "number" ? usVersion!.score : 1)) * 100);
             
             degradations.push({
-              modelId: model.id,
+              modelId: parseInt(model.id),
               modelName: model.name,
               provider: model.vendor,
               currentScore: currentScore,
-              baselineScore: usVersion.score,
+              baselineScore: usVersion!.score,
               dropPercentage: gapPercentage,
               zScore: "0.00",
               severity: gapPercentage > 15 ? 'major' : 'minor',
               detectedAt: new Date(),
-              message: `🌍 REGIONAL VARIATION: EU version ${gapPercentage}% slower than US (${currentScore} vs ${usVersion.score})`,
+              message: `🌍 REGIONAL VARIATION: EU version ${gapPercentage}% slower than US (${currentScore} vs ${usVersion!.score})`,
               type: 'regional_variation'
             });
           }
@@ -534,7 +534,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
         
         // Filter leaderboard for this provider's models
         const providerInLeaderboard = currentLeaderboard?.filter(model => 
-          providerModels.some(pm => pm.id === model.id)
+          providerModels.some(pm => String(pm.id) === String(model.id))
         ) || [];
         
         // Calculate provider performance metrics
@@ -634,9 +634,9 @@ export default async function (fastify: FastifyInstance, opts: any) {
         let performanceIncidents = 0;
         for (const model of providerModels.slice(0, 5)) { // Check top 5 models
           if (currentLeaderboard) {
-            const modelInLeaderboard = currentLeaderboard.find(lm => lm.id === model.id);
+            const modelInLeaderboard = currentLeaderboard.find(lm => String(lm.id) === String(model.id));
             if (modelInLeaderboard) {
-              const rank = currentLeaderboard.findIndex(m => m.id === model.id) + 1;
+              const rank = currentLeaderboard.findIndex(m => String(m.id) === String(model.id)) + 1;
               // If a major model is ranked very low, count as performance incident
               if (rank > 50 && (model.name.includes('gpt-4') || model.name.includes('claude') || model.name.includes('gemini'))) {
                 performanceIncidents += 0.2; // Partial incident for underperformance

@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { getCachedData, getCacheStats, purgeAllCache } from '../cache/dashboard-cache';
+import { computeModelScores } from '../lib/model-scoring';
 
 export default async function (fastify: FastifyInstance, opts: any) {
   // Main cached dashboard endpoint - serves all data instantly
