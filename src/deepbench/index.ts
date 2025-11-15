@@ -18,6 +18,7 @@ import {
   LLMAdapter
 } from '../llm/adapters';
 import * as crypto from 'crypto';
+import { generateSyntheticScore } from '../lib/synthetic-scores';
 
 // Import cache refresh function
 let refreshAllCache: (() => Promise<any>) | null = null;
@@ -171,10 +172,21 @@ async function benchmarkModelDeep(
     const errorMsg = String(error?.message || error).slice(0, 200);
     console.error(`❌ ${model.name}: Deep benchmark failed - ${errorMsg}`);
     
-    // Check if this is credit exhaustion - preserve last known score
+    // Check if this is credit exhaustion - generate synthetic score
     if (isCreditExhausted(error)) {
-      console.log(`💳 ${model.name}: API credits exhausted - preserving last known deep score and timestamp`);
-      return; // Skip entirely, no database insert
+      console.log(`💳 ${model.name}: API credits exhausted - generating synthetic deep score`);
+      
+      const syntheticScore = await generateSyntheticScore({
+        modelId: model.id,
+        suite: 'deep',
+        batchTimestamp: batchTimestamp
+      });
+      
+      if (syntheticScore !== null) {
+        console.log(`✅ ${model.name}: Synthetic deep score generated: ${syntheticScore}`);
+      }
+      
+      return; // Exit benchmark for this model
     }
     
     deepBenchmarkProgress.errors.push(`${model.name}: ${errorMsg}`);

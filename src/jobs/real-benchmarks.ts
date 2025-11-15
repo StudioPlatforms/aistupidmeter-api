@@ -19,6 +19,7 @@ import { models, scores, runs, metrics, tasks as tasksTable, raw_outputs, test_c
 import { desc, eq } from 'drizzle-orm';
 import * as crypto from 'crypto';
 import { calculateConfidenceInterval, calculateStdDev } from '../lib/statistical-tests';
+import { generateSyntheticScore } from '../lib/synthetic-scores';
 
 // Import streaming function for detailed user logs
 let emitBenchmarkProgress: ((sessionId: string, data: any) => void) | null = null;
@@ -1913,10 +1914,24 @@ export async function benchmarkModel(
   } catch (e: any) {
     console.warn(`[CANARY-FAIL] ${model.vendor}/${model.name}: ${String(e).slice(0,200)}`);
     
-    // Check if this is credit exhaustion - preserve last known score
+    // Check if this is credit exhaustion - generate synthetic score
     if (isCreditExhausted(e)) {
-      console.log(`💳 ${model.name}: API credits exhausted - preserving last known score and timestamp`);
-      return; // Skip entirely, no database insert
+      console.log(`💳 ${model.name}: API credits exhausted - generating synthetic score`);
+      
+      // Generate synthetic score based on recent history
+      const syntheticScore = await generateSyntheticScore({
+        modelId: model.id,
+        suite: 'hourly',
+        batchTimestamp: batchTimestamp || new Date().toISOString()
+      });
+      
+      if (syntheticScore !== null) {
+        console.log(`✅ ${model.name}: Synthetic score generated: ${syntheticScore}`);
+      } else {
+        console.log(`⚠️ ${model.name}: Insufficient history for synthetic score - preserving last known score`);
+      }
+      
+      return; // Exit benchmark for this model
     }
     
     // Check if this is a retryable error (503, 429, 5xx) that should be retried later
@@ -2056,17 +2071,31 @@ export async function benchmarkModel(
     }
   }
 
-  // CRITICAL CHECK: If credits exhausted during execution, preserve last score and exit
+  // CRITICAL CHECK: If credits exhausted during execution, generate synthetic score
   if (creditExhaustedDuringExecution) {
-    console.log(`💳 ${model.name}: Credits exhausted during task execution (at ${creditExhaustedTaskName}) - preserving last successful score and timestamp`);
+    console.log(`💳 ${model.name}: Credits exhausted during task execution (at ${creditExhaustedTaskName}) - generating synthetic score`);
     if (streamingSessionId && emitBenchmarkProgress) {
       emitBenchmarkProgress(streamingSessionId, { 
         type: 'warning', 
-        message: `💳 API credits exhausted - your last successful benchmark score will remain visible`,
+        message: `💳 API credits exhausted - generating estimated score based on recent performance`,
         data: { model: model.name, task: creditExhaustedTaskName }
       });
     }
-    return; // Exit without inserting any score - preserves last successful score in database
+    
+    // Generate synthetic score based on recent history
+    const syntheticScore = await generateSyntheticScore({
+      modelId: model.id,
+      suite: 'hourly',
+      batchTimestamp: batchTimestamp || new Date().toISOString()
+    });
+    
+    if (syntheticScore !== null) {
+      console.log(`✅ ${model.name}: Synthetic score generated: ${syntheticScore}`);
+    } else {
+      console.log(`⚠️ ${model.name}: Insufficient history for synthetic score`);
+    }
+    
+    return; // Exit benchmark for this model
   }
 
   // Phase 2: Retry failed tasks with enhanced parameters
@@ -2148,9 +2177,25 @@ export async function benchmarkModel(
       taskErrors.some(e => isCreditExhausted(e.error));
     
     if (creditExhausted) {
-      console.log(`💳 ${model.name}: API credits exhausted during execution - preserving last known score and timestamp`);
-      streamLog('warning', `💳 API credits exhausted - your last successful benchmark score will remain visible`);
-      return; // Skip database insert entirely - preserves last score & timestamp
+      console.log(`💳 ${model.name}: API credits exhausted during execution - generating synthetic score`);
+      streamLog('warning', `💳 API credits exhausted - generating estimated score based on recent performance`);
+      
+      // Generate synthetic score based on recent history
+      const syntheticScore = await generateSyntheticScore({
+        modelId: model.id,
+        suite: 'hourly',
+        batchTimestamp: batchTimestamp || new Date().toISOString()
+      });
+      
+      if (syntheticScore !== null) {
+        console.log(`✅ ${model.name}: Synthetic score generated: ${syntheticScore}`);
+        streamLog('success', `✅ Synthetic score generated: ${syntheticScore}`);
+      } else {
+        console.log(`⚠️ ${model.name}: Insufficient history for synthetic score`);
+        streamLog('warning', `⚠️ Insufficient history for synthetic score`);
+      }
+      
+      return; // Exit benchmark for this model
     }
     
     // Only insert -888 if failures were NOT due to credit exhaustion

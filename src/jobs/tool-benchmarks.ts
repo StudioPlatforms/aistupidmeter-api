@@ -15,6 +15,7 @@ import { sandboxManager } from '../toolbench/sandbox/manager';
 
 // Import the working adapter functions from real-benchmarks.ts
 import { getKeysForProvider, getAdapter } from './real-benchmarks';
+import { generateSyntheticScore } from '../lib/synthetic-scores';
 
 // Credit exhaustion detection - prevents score updates when API credits are depleted
 function isCreditExhausted(error: any): boolean {
@@ -191,9 +192,20 @@ async function runSingleBenchmark(model: any, task: any): Promise<any> {
     };
 
   } catch (error: any) {
-    // Check if this is credit exhaustion - preserve last known score
+    // Check if this is credit exhaustion - generate synthetic score
     if (isCreditExhausted(error)) {
-      console.log(`💳 ${model.name}: API credits exhausted - preserving last known tooling score and timestamp`);
+      console.log(`💳 ${model.name}: API credits exhausted - generating synthetic tooling score`);
+      
+      const syntheticScore = await generateSyntheticScore({
+        modelId: model.id,
+        suite: 'tooling',
+        batchTimestamp: new Date().toISOString()
+      });
+      
+      if (syntheticScore !== null) {
+        console.log(`✅ ${model.name}: Synthetic tooling score generated: ${syntheticScore}`);
+      }
+      
       return null; // Return null to skip this model without recording failure
     }
     
