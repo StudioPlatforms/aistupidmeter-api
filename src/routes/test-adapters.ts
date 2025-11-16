@@ -4,6 +4,9 @@ import {
   XAIAdapter,
   AnthropicAdapter,
   GoogleAdapter,
+  GLMAdapter,
+  DeepSeekAdapter,
+  KimiAdapter,
   Provider
 } from '../llm/adapters';
 import { db } from '../db/index';
@@ -31,53 +34,74 @@ export default async function (fastify: FastifyInstance, opts: any) {
   
   // Test model discovery for all providers
   fastify.get('/discovery', async (req, reply) => {
+    const userProvider = (req.query as any)?.provider as Provider | undefined;
     const results: Record<string, any> = {};
-    const providers: Provider[] = ['openai', 'xai', 'anthropic', 'google'];
-    
-    for (const provider of providers) {
-      try {
-        const adapter = getAdapter(provider);
-        const models = await adapter.listModels();
-        results[provider] = {
-          success: true,
-          models,
-          count: models.length
-        };
-        console.log(`✅ ${provider}: Found ${models.length} models`);
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        results[provider] = {
-          success: false,
-          error: errorMessage,
-          models: [],
-          count: 0
-        };
-        console.log(`❌ ${provider}: ${errorMessage}`);
-      }
+    const allowedProviders: Provider[] = ['openai', 'xai', 'anthropic', 'google', 'glm', 'deepseek', 'kimi'];
+    // Only discover the requested provider when a user key is supplied to avoid failing others
+    const providers: Provider[] = userProvider ? [userProvider] : allowedProviders;
+    const userKey = req.headers['x-user-api-key'] as string | undefined;
+    const requireUserKey = userProvider && ['glm','deepseek','kimi'].includes(userProvider);
+
+    // Validate provider early to avoid throwing inside iterator
+    if (userProvider && !allowedProviders.includes(userProvider)) {
+      return reply.code(400).send({ success: false, error: `Invalid provider: ${userProvider}` });
+    }
+
+    if (requireUserKey && (!userKey || !userKey.trim())) {
+      return reply.code(400).send({ success: false, error: `User API key required for ${userProvider}` });
     }
     
-    return {
-      timestamp: new Date(),
-      results,
-      summary: {
-        totalProviders: providers.length,
-        successfulProviders: Object.values(results).filter(r => r.success).length,
-        totalModelsFound: Object.values(results).reduce((sum, r) => sum + r.count, 0)
+    try {
+      for (const provider of providers) {
+        try {
+          const adapter = userKey ? getUserAdapter(provider, userKey) : getAdapter(provider);
+          const models = await adapter.listModels();
+          results[provider] = {
+            success: true,
+            models,
+            count: models.length
+          };
+          console.log(`✅ ${provider}: Found ${models.length} models`);
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          results[provider] = {
+            success: false,
+            error: errorMessage,
+            models: [],
+            count: 0
+          };
+          console.log(`❌ ${provider}: ${errorMessage}`);
+        }
       }
-    };
+      
+      return {
+        timestamp: new Date(),
+        results,
+        summary: {
+          totalProviders: providers.length,
+          successfulProviders: Object.values(results).filter(r => r.success).length,
+          totalModelsFound: Object.values(results).reduce((sum, r) => sum + r.count, 0)
+        }
+      };
+    } catch (err) {
+      console.error('Discovery endpoint failed:', err);
+      return reply.code(500).send({ success: false, error: 'Internal discovery error' });
+    }
   });
 
   // Test basic chat functionality for each provider
   fastify.post('/chat-test', async (req, reply) => {
     const body = req.body as { provider: Provider; model?: string };
     const { provider, model } = body;
+    const userKey = req.headers['x-user-api-key'] as string | undefined;
+    const allowed: Provider[] = ['openai','xai','anthropic','google','glm','deepseek','kimi'];
     
-    if (!provider) {
-      return reply.code(400).send({ error: 'Provider is required' });
+    if (!provider || !allowed.includes(provider)) {
+      return reply.code(400).send({ error: `Provider is required and must be one of: ${allowed.join(', ')}` });
     }
     
     try {
-      const adapter = getAdapter(provider);
+      const adapter = userKey ? getUserAdapter(provider, userKey) : getAdapter(provider);
       
       // Use provided model or get first available model
       let testModel = model;
@@ -1341,6 +1365,9 @@ function getUserAdapter(provider: Provider, userApiKey: string): any {
     case 'xai': return new XAIAdapter(userApiKey);
     case 'anthropic': return new AnthropicAdapter(userApiKey);
     case 'google': return new GoogleAdapter(userApiKey);
+    case 'glm': return new GLMAdapter(userApiKey);
+    case 'deepseek': return new DeepSeekAdapter(userApiKey);
+    case 'kimi': return new KimiAdapter(userApiKey);
     default: throw new Error(`Unknown provider: ${provider}`);
   }
 }
@@ -1364,6 +1391,9 @@ function getAdapter(provider: Provider): any {
     case 'xai': return new XAIAdapter(key);
     case 'anthropic': return new AnthropicAdapter(key);
     case 'google': return new GoogleAdapter(key);
+    case 'glm': return new GLMAdapter(key);
+    case 'deepseek': return new DeepSeekAdapter(key);
+    case 'kimi': return new KimiAdapter(key);
     default: throw new Error(`Unknown provider: ${provider}`);
   }
 }
