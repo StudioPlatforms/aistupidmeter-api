@@ -76,10 +76,11 @@ export async function generateSyntheticScore(options: SyntheticScoreOptions): Pr
     const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
     const stdDev = Math.sqrt(variance);
     
-    // Generate synthetic score with medium variation (±0.5×stdDev)
+    // Generate synthetic score with HIGHER variation (±1.5×stdDev instead of ±0.5×stdDev)
+    // This creates more realistic spread across models while staying within historical patterns
     // Use model-specific seeded random to ensure each model gets a unique score
     const randomValue = seededRandom(modelId, batchTimestamp, 'score');
-    const randomFactor = (randomValue - 0.5) * stdDev;
+    const randomFactor = (randomValue - 0.5) * stdDev * 3; // 3x multiplier = ±1.5×stdDev range
     const syntheticScore = Math.round(Math.max(0, Math.min(100, mean + randomFactor)));
     
     // Generate synthetic axes based on historical patterns
@@ -136,14 +137,14 @@ function generateSyntheticAxes(recentScores: any[]): Record<string, number> {
     const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
     const stdDev = Math.sqrt(variance);
     
-    // Apply same medium variation as overall score (±0.5×stdDev)
+    // Apply HIGHER variation to match overall score (±1.5×stdDev)
     // Use model-specific seeded random with axis name as salt for unique per-axis variation
     const randomValue = seededRandom(
       recentScores[0].modelId, 
       new Date(recentScores[0].ts || '').toISOString(), 
       `axis-${key}`
     );
-    const randomFactor = (randomValue - 0.5) * stdDev;
+    const randomFactor = (randomValue - 0.5) * stdDev * 3; // 3x multiplier = ±1.5×stdDev range
     const syntheticValue = Math.max(0, Math.min(1, mean + randomFactor));
     
     syntheticAxes[key] = syntheticValue;
