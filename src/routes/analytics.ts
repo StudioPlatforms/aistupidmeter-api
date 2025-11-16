@@ -344,8 +344,14 @@ export default async function (fastify: FastifyInstance, opts: any) {
         
         // 4. AVAILABILITY ISSUES (based on recent failed benchmarks)
         // CRITICAL FIX: Don't flag credit exhaustion as service disruption
+        const creditKeywords = ['credit', 'quota', 'billing', 'insufficient', 'payment', 'subscription'];
+        const isCreditFailure = (s: any) => {
+          const note = (s.note || '').toLowerCase();
+          return creditKeywords.some(k => note.includes(k));
+        };
         const recentFailures = historicalScores.filter(s => 
-          s.stupidScore === -777 || s.stupidScore === -888 || s.stupidScore === -999 || s.stupidScore === -100
+          (s.stupidScore === -777 || s.stupidScore === -888 || s.stupidScore === -999 || s.stupidScore === -100) &&
+          !isCreditFailure(s)
         ).length;
         
         // Check if we have synthetic scores being generated (indicates credit exhaustion, not service disruption)
@@ -359,7 +365,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
             )
           )
           .orderBy(desc(scores.ts))
-          .limit(5);
+          .limit(50);
         
         // If we have recent successful scores (including synthetics), it's likely credit exhaustion, not service disruption
         const hasRecentSuccessfulScores = recentSyntheticScores.some(s => 
