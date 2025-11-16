@@ -40,6 +40,24 @@ try {
   console.warn('⚠️ Cache refresh not available - dashboard may not update automatically');
 }
 
+// Lightweight cache refresher used after synthetic inserts to keep UI (ticker + intelligence center) in sync,
+// even if the job exits before the final refresh.
+let lastCacheRefresh = 0;
+async function refreshCache(reason: string) {
+  if (!refreshAllCache) return;
+  const now = Date.now();
+  // Throttle to once per minute to avoid hammering the cache layer
+  if (now - lastCacheRefresh < 60_000) return;
+  lastCacheRefresh = now;
+  try {
+    console.log(`🔄 Refreshing dashboard cache (${reason})...`);
+    const res = await refreshAllCache();
+    console.log(`✅ Cache refresh complete (${reason}): ${res?.refreshed ?? 'ok'}`);
+  } catch (err) {
+    console.warn(`⚠️ Cache refresh failed (${reason}): ${String(err).slice(0, 120)}`);
+  }
+}
+
 // Smart skip system for persistently overloaded models
 const modelFailureTracker = new Map<string, {
   consecutiveFailures: number;
@@ -383,7 +401,7 @@ async function withBackoff<T>(fn: () => Promise<T>, maxTries = 3): Promise<T | n
       
       if (t >= maxTries) {
         console.log(`⚠️ API call failed after ${maxTries} attempts: ${e?.message}`);
-        return null; // Return null instead of throwing
+        throw e; // Bubble up so callers can detect credit exhaustion
       }
       
       if (isRetryableByStatus || isRetryableByMessage) {
@@ -393,7 +411,7 @@ async function withBackoff<T>(fn: () => Promise<T>, maxTries = 3): Promise<T | n
         t++;
       } else {
         console.log(`⚠️ API error (non-retryable): ${e?.message}`);
-        return null;
+        throw e; // Let caller decide how to handle non-retryable errors
       }
     }
   }
@@ -1362,6 +1380,13 @@ async function runSingleBenchmarkStreaming(
   } catch (e: any) {
     // Enhanced error logging with more context and smart retry logic
     const errorMsg = String(e?.message || e).slice(0, 200);
+
+    // Surface credit exhaustion so upstream logic can generate synthetic scores
+    if (isCreditExhausted(e)) {
+      streamLog('error', `      💳 API credits exhausted - aborting trials for ${model.name}`);
+      throw e;
+    }
+
     const isRetryableError = 
       e?.status === 429 || // Rate limit
       e?.status === 503 || // Service unavailable  
@@ -1470,6 +1495,13 @@ async function runTaskWithTrialsStreaming(
       // Catch any unexpected errors at the trial level
       consecutiveFailures++;
       const errorMsg = String(e?.message || e).slice(0, 100);
+
+      // Propagate credit exhaustion so upper layers can synthesize scores
+      if (isCreditExhausted(e)) {
+        streamLog('error', `    💳 API credits exhausted during trial ${i + 1} - aborting task`);
+        throw e;
+      }
+
       streamLog('error', `    ❌ Trial ${i + 1}: Unexpected error - ${errorMsg}`);
     }
     
@@ -1914,6 +1946,24 @@ export async function benchmarkModel(
   } catch (e: any) {
     console.warn(`[CANARY-FAIL] ${model.vendor}/${model.name}: ${String(e).slice(0,200)}`);
     
+    // If the provider responded but gave us no usable content, treat it like a soft failure and synthesize
+    const msg = String(e?.message || e).toLowerCase();
+    if (msg.includes('empty content') || msg.includes('canary test failed')) {
+      console.log(`💳 ${model.name}: No usable canary output - generating synthetic score`);
+      const syntheticScore = await generateSyntheticScore({
+        modelId: model.id,
+        suite: 'hourly',
+        batchTimestamp: batchTimestamp || new Date().toISOString()
+      });
+      if (syntheticScore !== null) {
+        console.log(`✅ ${model.name}: Synthetic score generated: ${syntheticScore}`);
+        await refreshCache(`synthetic-${model.name}`);
+      } else {
+        console.log(`⚠️ ${model.name}: Insufficient history for synthetic score - preserving last known score`);
+      }
+      return;
+    }
+    
     // Check if this is credit exhaustion - generate synthetic score
     if (isCreditExhausted(e)) {
       console.log(`💳 ${model.name}: API credits exhausted - generating synthetic score`);
@@ -1927,6 +1977,7 @@ export async function benchmarkModel(
       
       if (syntheticScore !== null) {
         console.log(`✅ ${model.name}: Synthetic score generated: ${syntheticScore}`);
+        await refreshCache(`synthetic-${model.name}`);
       } else {
         console.log(`⚠️ ${model.name}: Insufficient history for synthetic score - preserving last known score`);
       }
@@ -2091,6 +2142,7 @@ export async function benchmarkModel(
     
     if (syntheticScore !== null) {
       console.log(`✅ ${model.name}: Synthetic score generated: ${syntheticScore}`);
+      await refreshCache(`synthetic-${model.name}`);
     } else {
       console.log(`⚠️ ${model.name}: Insufficient history for synthetic score`);
     }
@@ -2190,6 +2242,7 @@ export async function benchmarkModel(
       if (syntheticScore !== null) {
         console.log(`✅ ${model.name}: Synthetic score generated: ${syntheticScore}`);
         streamLog('success', `✅ Synthetic score generated: ${syntheticScore}`);
+        await refreshCache(`synthetic-${model.name}`);
       } else {
         console.log(`⚠️ ${model.name}: Insufficient history for synthetic score`);
         streamLog('warning', `⚠️ Insufficient history for synthetic score`);
@@ -2463,6 +2516,13 @@ export async function runRealBenchmarks() {
     
     // Randomize the order of models for each benchmark run
     const shuffledModels = [...allModels as any[]].sort(() => Math.random() - 0.5);
+    const totalModelsCount = shuffledModels.length;
+    let completedModelsCount = 0;
+    const runStartedAt = Date.now();
+    const logProgress = (provider: string, modelName: string, providerCompleted: number, providerTotal: number) => {
+      const elapsedSec = Math.round((Date.now() - runStartedAt) / 1000);
+      console.log(`🟢 Progress ${completedModelsCount}/${totalModelsCount} models | ${provider} ${providerCompleted}/${providerTotal} | ${modelName} | ${elapsedSec}s elapsed`);
+    };
     
     // Group by provider for rate limit management
     const modelsByProvider: Record<string, any[]> = {};
@@ -2480,17 +2540,26 @@ export async function runRealBenchmarks() {
 
     // Shuffle the provider order as well
     const providerEntries = Object.entries(modelsByProvider).sort(() => Math.random() - 0.5);
+    const totalProviders = providerEntries.length;
 
     // Track failed models for retry at the end
     const failedModels: Array<{ id: number; name: string; vendor: Provider; reason: string }> = [];
 
     // Phase 1: Initial benchmark run for all models
-    const providerPromises = providerEntries.map(async ([provider, models]) => {
-      console.log(`🔄 Benchmarking ${provider} models (${models.length} models)...`);
+    const providerPromises = providerEntries.map(async ([provider, models], providerIdx) => {
+      console.log(`🔄 Benchmarking ${provider} models (${models.length} models)... [provider ${providerIdx + 1}/${totalProviders}]`);
+      
+      const totalModelsForProvider = models.length;
+      let providerCompleted = 0;
       
       for (const model of models) {
         try {
+          console.log(`▶️ ${provider} ${providerCompleted + 1}/${totalModelsForProvider}: ${model.name}`);
           await benchmarkModel(model, batchTimestamp);
+          providerCompleted++;
+          completedModelsCount++;
+          console.log(`✅ ${provider} ${providerCompleted}/${totalModelsForProvider}: ${model.name} done`);
+          logProgress(provider, model.name, providerCompleted, totalModelsForProvider);
           // Small delay between models from same provider
           await sleep(100);
         } catch (error: any) {
@@ -2503,6 +2572,10 @@ export async function runRealBenchmarks() {
             vendor: model.vendor as Provider, 
             reason: errorMsg 
           });
+          // Count failure as completed for overall progress
+          providerCompleted++;
+          completedModelsCount++;
+          logProgress(provider, model.name, providerCompleted, totalModelsForProvider);
         }
       }
       

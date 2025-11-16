@@ -45,6 +45,35 @@ export interface ModelInfo {
   vendor: 'openai' | 'anthropic' | 'google' | 'xai';
 }
 
+// Detect credit/quota exhaustion so callers can swap in synthetic scores
+function isCreditExhausted(error: any): boolean {
+  const status = error?.status || error?.response?.status;
+  const errorMsg = String(error?.message || error).toLowerCase();
+  if (status === 402) return true;
+  if (status === 429) {
+    return errorMsg.includes('credit') ||
+           errorMsg.includes('quota') ||
+           errorMsg.includes('billing') ||
+           errorMsg.includes('balance');
+  }
+  if (status === 403) {
+    return errorMsg.includes('credit') ||
+           errorMsg.includes('quota') ||
+           errorMsg.includes('insufficient') ||
+           errorMsg.includes('balance') ||
+           errorMsg.includes('billing');
+  }
+  return errorMsg.includes('insufficient credits') ||
+         errorMsg.includes('insufficient_quota') ||
+         errorMsg.includes('quota exceeded') ||
+         errorMsg.includes('quota_exceeded') ||
+         (errorMsg.includes('credit') && errorMsg.includes('exhaust')) ||
+         errorMsg.includes('billing') ||
+         errorMsg.includes('payment required') ||
+         errorMsg.includes('account_deactivated') ||
+         errorMsg.includes('subscription');
+}
+
 export class MultiTurnSession {
   private conversation: Message[] = [];
   private artifacts: TurnResult[] = [];
@@ -101,6 +130,11 @@ export class MultiTurnSession {
         
       } catch (error) {
         console.error(`    ❌ Turn ${turnIndex + 1} failed: ${String(error).slice(0, 100)}`);
+
+        // Bubble up credit exhaustion so the top-level runner can insert synthetic scores
+        if (isCreditExhausted(error)) {
+          throw error;
+        }
         
         // Create failed turn result
         const failedTurn: TurnResult = {

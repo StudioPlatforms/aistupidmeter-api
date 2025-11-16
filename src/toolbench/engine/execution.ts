@@ -147,6 +147,24 @@ export class ToolExecutionEngine {
     request: ChatRequest,
     context: SessionContext
   ): Promise<{ response: ChatResponse; toolResults: ToolExecutionResult[] }> {
+    // Helper to detect credit/quota exhaustion so callers can synthesize scores
+    const isCreditExhausted = (error: any) => {
+      const status = error?.status || error?.response?.status;
+      const msg = String(error?.message || error).toLowerCase();
+      if (status === 402) return true;
+      if (status === 429) return msg.includes('credit') || msg.includes('quota') || msg.includes('billing') || msg.includes('balance');
+      if (status === 403) return msg.includes('credit') || msg.includes('quota') || msg.includes('insufficient') || msg.includes('balance') || msg.includes('billing');
+      return msg.includes('insufficient credits') ||
+             msg.includes('insufficient_quota') ||
+             msg.includes('quota exceeded') ||
+             msg.includes('quota_exceeded') ||
+             (msg.includes('credit') && msg.includes('exhaust')) ||
+             msg.includes('billing') ||
+             msg.includes('payment required') ||
+             msg.includes('account_deactivated') ||
+             msg.includes('subscription');
+    };
+
     try {
       // Make the LLM call
       const response = await adapter.chat(request);
@@ -167,6 +185,11 @@ export class ToolExecutionEngine {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       context.errors.push(`LLM call failed: ${errorMessage}`);
+
+      // Bubble credit exhaustion so upstream can generate synthetic scores
+      if (isCreditExhausted(error)) {
+        throw error;
+      }
       
       // Return a mock response for error handling
       const errorResponse: ChatResponse = {

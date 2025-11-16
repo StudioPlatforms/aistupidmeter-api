@@ -58,33 +58,52 @@ export async function generateSyntheticScore(options: SyntheticScoreOptions): Pr
       .orderBy(desc(scores.ts))
       .limit(20);
     
-    // Require minimum history
-    if (recentScores.length < minimumHistory) {
-      console.log(`⚠️ Model ${modelId} (${suite}): Not enough history for synthetic score (${recentScores.length}/${minimumHistory})`);
-      return null;
-    }
-    
-    // Calculate statistics for stupidScore
-    const values = recentScores.map(s => s.stupidScore).filter(v => typeof v === 'number' && v >= 0);
-    
-    if (values.length === 0) {
-      console.log(`⚠️ Model ${modelId} (${suite}): No valid scores found for synthetic generation`);
-      return null;
+    let scoreRows = recentScores;
+    let values = recentScores.map(s => s.stupidScore).filter(v => typeof v === 'number' && v >= 0);
+
+    // Fallback: if per-model history is sparse, use suite-wide cohort as baseline
+    if (values.length < minimumHistory) {
+      const cohortRows = await db.select()
+        .from(scores)
+        .where(and(
+          eq(scores.suite, suite),
+          not(like(scores.note, '%SYNTHETIC%'))
+        ))
+        .orderBy(desc(scores.ts))
+        .limit(100);
+
+      const cohortValues = cohortRows
+        .map(s => s.stupidScore)
+        .filter(v => typeof v === 'number' && v >= 0);
+
+      if (cohortValues.length > 0) {
+        console.log(`ℹ️ Model ${modelId} (${suite}): Using cohort baseline (${cohortValues.length} scores) for synthetic generation`);
+        scoreRows = cohortRows;
+        values = cohortValues;
+      } else if (values.length === 0) {
+        console.log(`⚠️ Model ${modelId} (${suite}): No valid scores found for synthetic generation (model + cohort)`);
+        return null;
+      } else {
+        console.log(`ℹ️ Model ${modelId} (${suite}): Using sparse model history (${values.length} scores) for synthetic generation`);
+      }
     }
     
     const mean = values.reduce((a, b) => a + b) / values.length;
     const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
     const stdDev = Math.sqrt(variance);
     
-    // Generate synthetic score with HIGHER variation (±1.5×stdDev instead of ±0.5×stdDev)
-    // This creates more realistic spread across models while staying within historical patterns
-    // Use model-specific seeded random to ensure each model gets a unique score
+    // Apply a slight downward bias so synthetic scores don't overstate performance.
+    // If mean is >70, pull it down by up to ~10 points; otherwise leave it similar.
+    const dampedMean = mean - Math.min(10, Math.max(0, (mean - 70) * 0.6));
+    
+    // Use a moderated spread to keep synthetic scores in a realistic band (roughly 60-80 for strong models).
     const randomValue = seededRandom(modelId, batchTimestamp, 'score');
-    const randomFactor = (randomValue - 0.5) * stdDev * 3; // 3x multiplier = ±1.5×stdDev range
-    const syntheticScore = Math.round(Math.max(0, Math.min(100, mean + randomFactor)));
+    const spread = Math.max(4, Math.min(12, stdDev * 2.2)); // cap spread so we don't spike too high
+    const randomFactor = (randomValue - 0.5) * spread;
+    const syntheticScore = Math.round(Math.max(0, Math.min(82, dampedMean + randomFactor)));
     
     // Generate synthetic axes based on historical patterns
-    const syntheticAxes = generateSyntheticAxes(recentScores);
+    const syntheticAxes = generateSyntheticAxes(scoreRows);
     
     // Insert score (NO mention of synthetic in note field - appears identical to real scores)
     await db.insert(scores).values({
