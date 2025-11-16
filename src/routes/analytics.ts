@@ -343,11 +343,33 @@ export default async function (fastify: FastifyInstance, opts: any) {
         }
         
         // 4. AVAILABILITY ISSUES (based on recent failed benchmarks)
+        // CRITICAL FIX: Don't flag credit exhaustion as service disruption
         const recentFailures = historicalScores.filter(s => 
           s.stupidScore === -777 || s.stupidScore === -888 || s.stupidScore === -999 || s.stupidScore === -100
         ).length;
         
-        if (recentFailures > 2 && historicalScores.length > 5) {
+        // Check if we have synthetic scores being generated (indicates credit exhaustion, not service disruption)
+        const recentSyntheticScores = await db
+          .select()
+          .from(scores)
+          .where(
+            and(
+              eq(scores.modelId, parseInt(model.id)),
+              gte(scores.ts, twentyFourHoursAgo.toISOString())
+            )
+          )
+          .orderBy(desc(scores.ts))
+          .limit(5);
+        
+        // If we have recent successful scores (including synthetics), it's likely credit exhaustion, not service disruption
+        const hasRecentSuccessfulScores = recentSyntheticScores.some(s => 
+          s.stupidScore !== -777 && s.stupidScore !== -888 && s.stupidScore !== -999 && s.stupidScore !== -100
+        );
+        
+        // Only flag as service disruption if:
+        // 1. Multiple failures AND
+        // 2. NO recent successful scores (meaning it's a real outage, not just credit exhaustion)
+        if (recentFailures > 2 && historicalScores.length > 5 && !hasRecentSuccessfulScores) {
           const failureRate = Math.round((recentFailures / historicalScores.length) * 100);
           const severity = failureRate > 40 ? 'critical' : 'major';
           const message = `🔴 SERVICE DISRUPTION: ${recentFailures} failed requests in last 24h (${failureRate}% failure rate)`;
@@ -408,6 +430,8 @@ export default async function (fastify: FastifyInstance, opts: any) {
           } catch (error) {
             console.error(`❌ Failed to record incident for ${model.name}:`, error);
           }
+        } else if (recentFailures > 2 && hasRecentSuccessfulScores) {
+          console.log(`📊 ${model.name}: ${recentFailures} failures detected but has recent successful scores - likely credit exhaustion, not service disruption`);
         }
         
         // 5. REGIONAL/VERSION ALERTS (detect EU vs US performance differences)

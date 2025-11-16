@@ -13,6 +13,30 @@ interface SyntheticScoreOptions {
 }
 
 /**
+ * Deterministic random number generator seeded by model ID and timestamp
+ * Ensures each model gets a unique but consistent random value
+ * 
+ * @param modelId - The model's database ID
+ * @param timestamp - Batch timestamp for consistency
+ * @param salt - Optional salt for generating multiple random values per model
+ * @returns A pseudo-random number between 0 and 1
+ */
+function seededRandom(modelId: number, timestamp: string, salt: string = ''): number {
+  const seed = `${modelId}-${timestamp}-${salt}`;
+  let hash = 0;
+  
+  // Simple hash function
+  for (let i = 0; i < seed.length; i++) {
+    const char = seed.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  
+  // Convert to 0-1 range using sine function for better distribution
+  return Math.abs(Math.sin(hash)) % 1;
+}
+
+/**
  * Generates a synthetic score based on the last 20 real scores
  * Uses statistical analysis to create realistic variation
  * 
@@ -53,7 +77,9 @@ export async function generateSyntheticScore(options: SyntheticScoreOptions): Pr
     const stdDev = Math.sqrt(variance);
     
     // Generate synthetic score with medium variation (±0.5×stdDev)
-    const randomFactor = (Math.random() - 0.5) * stdDev;
+    // Use model-specific seeded random to ensure each model gets a unique score
+    const randomValue = seededRandom(modelId, batchTimestamp, 'score');
+    const randomFactor = (randomValue - 0.5) * stdDev;
     const syntheticScore = Math.round(Math.max(0, Math.min(100, mean + randomFactor)));
     
     // Generate synthetic axes based on historical patterns
@@ -111,7 +137,13 @@ function generateSyntheticAxes(recentScores: any[]): Record<string, number> {
     const stdDev = Math.sqrt(variance);
     
     // Apply same medium variation as overall score (±0.5×stdDev)
-    const randomFactor = (Math.random() - 0.5) * stdDev;
+    // Use model-specific seeded random with axis name as salt for unique per-axis variation
+    const randomValue = seededRandom(
+      recentScores[0].modelId, 
+      new Date(recentScores[0].ts || '').toISOString(), 
+      `axis-${key}`
+    );
+    const randomFactor = (randomValue - 0.5) * stdDev;
     const syntheticValue = Math.max(0, Math.min(1, mean + randomFactor));
     
     syntheticAxes[key] = syntheticValue;
