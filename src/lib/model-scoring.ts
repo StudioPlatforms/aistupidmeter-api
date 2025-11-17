@@ -237,7 +237,10 @@ async function computeHistoricalCombinedScores(period: PeriodKey): Promise<Model
   const timeThreshold = getTimeThreshold(period);
   
   for (const model of allModels) {
-    // Get historical scores from all three suites
+    // CRITICAL FIX: Get the LATEST combined score first (for currentScore field)
+    const latestCombinedScore = await getSingleModelCombinedScore(model.id);
+    
+    // Get historical scores from all three suites for period statistics
     const historicalScores = await db
       .select()
       .from(scores)
@@ -255,7 +258,7 @@ async function computeHistoricalCombinedScores(period: PeriodKey): Promise<Model
       continue; // Skip models with no data in this period
     }
     
-    // Calculate period average
+    // Calculate period average (for statistics only, NOT for currentScore)
     const convertedScores = validScores.map(s => 
       Math.max(0, Math.min(100, Math.round(s.stupidScore)))
     );
@@ -273,17 +276,18 @@ async function computeHistoricalCombinedScores(period: PeriodKey): Promise<Model
         : 'stable')
       : 'stable';
     
+    // CRITICAL FIX: Use LATEST score for currentScore, period average for periodAvg
     modelScores.push({
       id: String(model.id),
       name: model.name,
       provider: model.vendor,
       vendor: model.vendor,
-      currentScore: periodAvg,
-      score: periodAvg,
+      currentScore: latestCombinedScore || periodAvg, // Use latest, fallback to period avg
+      score: latestCombinedScore || periodAvg,
       trend,
       lastUpdated: new Date(historicalScores[0].ts || new Date()),
-      status: getStatus(periodAvg),
-      periodAvg,
+      status: getStatus(latestCombinedScore || periodAvg),
+      periodAvg, // Keep period average as separate field for statistics
       stability,
       dataPoints: validScores.length,
       isNew: isModelNew(model),
@@ -505,6 +509,13 @@ async function computeHistoricalScoresForSuite(period: PeriodKey, suite: string)
   const dataLimit = getDataLimit(period);
   
   for (const model of allModels) {
+    // CRITICAL FIX: Get the LATEST score for this suite first (for currentScore field)
+    const latestScore = await getLatestScore(model.id, suite);
+    const latestScoreValue = latestScore && latestScore.stupidScore >= 0 
+      ? Math.round(latestScore.stupidScore) 
+      : null;
+    
+    // Get historical scores for period statistics
     const historicalScores = await db
       .select()
       .from(scores)
@@ -534,17 +545,18 @@ async function computeHistoricalScoresForSuite(period: PeriodKey, suite: string)
     const oldest = convertedScores[convertedScores.length - 1];
     const trend = latest - oldest > 5 ? 'up' : latest - oldest < -5 ? 'down' : 'stable';
     
+    // CRITICAL FIX: Use LATEST score for currentScore, period average for periodAvg
     modelScores.push({
       id: String(model.id),
       name: model.name,
       provider: model.vendor,
       vendor: model.vendor,
-      currentScore: periodAvg,
-      score: periodAvg,
+      currentScore: latestScoreValue || periodAvg, // Use latest, fallback to period avg
+      score: latestScoreValue || periodAvg,
       trend,
       lastUpdated: new Date(historicalScores[0].ts || new Date()),
-      status: getStatus(periodAvg),
-      periodAvg,
+      status: getStatus(latestScoreValue || periodAvg),
+      periodAvg, // Keep period average as separate field for statistics
       stability,
       dataPoints: validScores.length,
       isNew: isModelNew(model),
