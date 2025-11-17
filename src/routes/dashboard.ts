@@ -1914,13 +1914,13 @@ export default async function (fastify: FastifyInstance, opts: any) {
     try {
       console.log(`📊 [HISTORY] Request for model ${modelId}: period=${period}, sortBy=${sortBy}`);
       
-      // CRITICAL FIX: Get the canonical score using the SAME pipeline as the main page
-      // This ensures consistency between rankings page and details page
-      const allModelScores = await computeDashboardScores(period as any, sortBy as any);
-      const canonicalModel = allModelScores.find((m: any) => String(m.id) === String(modelId));
+      // CRITICAL FIX: ALWAYS get the canonical score from 'latest' period to ensure consistency
+      // The canonical score should represent the CURRENT score, not a period average
+      const latestScores = await computeDashboardScores('latest' as any, sortBy as any);
+      const canonicalModel = latestScores.find((m: any) => String(m.id) === String(modelId));
       
       if (canonicalModel) {
-        console.log(`✅ [HISTORY] Canonical score for model ${modelId} from main pipeline: ${canonicalModel.currentScore}`);
+        console.log(`✅ [HISTORY] Canonical score for model ${modelId} from latest: ${canonicalModel.currentScore}`);
       } else {
         console.log(`⚠️ [HISTORY] Model ${modelId} not found in canonical scores`);
       }
@@ -2321,7 +2321,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
       });
 
       console.log(`📊 History for model ${modelId} (${sortBy}, ${period}): ${formattedHistory.length} data points`);
-      console.log(`✅ Canonical score from shared pipeline: ${canonicalModel?.currentScore || 'not found'}`);
+      console.log(`✅ Canonical score from latest (not period average): ${canonicalModel?.currentScore || 'not found'}`);
       
       return {
         success: true,
@@ -2333,7 +2333,8 @@ export default async function (fastify: FastifyInstance, opts: any) {
           from: timeThreshold.toISOString(),
           to: new Date().toISOString()
         },
-        // Include the canonical score from the shared pipeline for consistency verification
+        // CRITICAL FIX: Always return the LATEST score as canonical, not period average
+        // This ensures the "current score" displayed matches the most recent historical point
         canonicalScore: canonicalModel?.currentScore || null
       };
     } catch (error) {
