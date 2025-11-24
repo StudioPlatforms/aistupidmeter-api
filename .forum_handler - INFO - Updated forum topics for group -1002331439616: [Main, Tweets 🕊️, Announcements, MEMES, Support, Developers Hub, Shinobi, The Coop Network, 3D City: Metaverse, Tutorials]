@@ -1,0 +1,22 @@
+[0;1;32m●[0m aistupid-api.service - AI Stupid Level API Server
+     Loaded: loaded (/etc/systemd/system/aistupid-api.service; enabled; vendor preset: enabled)
+     Active: [0;1;32mactive (running)[0m since Mon 2025-11-24 08:03:40 CET; 22s ago
+   Main PID: 2438673 (npm start)
+      Tasks: 23 (limit: 19099)
+     Memory: 63.6M
+        CPU: 1.528s
+     CGroup: /system.slice/aistupid-api.service
+             ├─2438673 "npm start" "" "" "" "" "" "" "" "" "" "" "" "" "" ""
+             ├─2438687 sh -c "node dist/index.js"
+             └─2438688 node dist/index.js
+
+Nov 24 08:03:51 vmi2334300.contaboserver.net aistupid-api[2438688]: ⚠️  High traffic from 81.196.110.130 on /dashboard/batch-status
+Nov 24 08:03:52 vmi2334300.contaboserver.net aistupid-api[2438688]: ⚠️  High traffic from 81.196.110.130 on /providers
+Nov 24 08:03:55 vmi2334300.contaboserver.net aistupid-api[2438688]: ⚠️  High traffic from 172.97.165.52 on /providers
+Nov 24 08:03:55 vmi2334300.contaboserver.net aistupid-api[2438688]: ⚠️  High traffic from 172.97.165.52 on /providers
+Nov 24 08:03:55 vmi2334300.contaboserver.net aistupid-api[2438688]: ⚠️  High traffic from 172.97.165.52 on /dashboard/batch-status
+Nov 24 08:03:57 vmi2334300.contaboserver.net aistupid-api[2438688]: ⚠️  High traffic from 180.191.198.70 on /dashboard/batch-status
+Nov 24 08:03:58 vmi2334300.contaboserver.net aistupid-api[2438688]: ⚠️  High traffic from 70.34.214.227 on /providers
+Nov 24 08:03:58 vmi2334300.contaboserver.net aistupid-api[2438688]: ⚠️  High traffic from 202.128.126.44 on /dashboard/batch-status
+Nov 24 08:04:01 vmi2334300.contaboserver.net aistupid-api[2438688]: ⚠️  High traffic from 176.111.231.55 on /providers
+Nov 24 08:04:02 vmi2334300.contaboserver.net aistupid-api[2438688]: ⚠️  High traffic from 176.111.231.55 on /providers

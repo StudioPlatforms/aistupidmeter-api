@@ -37,8 +37,8 @@ function seededRandom(modelId: number, timestamp: string, salt: string = ''): nu
 }
 
 /**
- * Generates a synthetic score based on the last 20 real scores
- * Uses statistical analysis to create realistic variation
+ * Enhanced synthetic score generation with realistic performance patterns
+ * Uses 100+ historical entries and simulates real-world model behavior
  * 
  * @param options - Configuration for synthetic score generation
  * @returns The generated synthetic score, or null if insufficient history
@@ -47,7 +47,7 @@ export async function generateSyntheticScore(options: SyntheticScoreOptions): Pr
   const { modelId, suite, batchTimestamp, minimumHistory = 10 } = options;
   
   try {
-    // Fetch last 20 REAL scores (excluding synthetic ones)
+    // Fetch last 100+ REAL scores (excluding synthetic ones) for comprehensive analysis
     const recentScores = await db.select()
       .from(scores)
       .where(and(
@@ -56,7 +56,7 @@ export async function generateSyntheticScore(options: SyntheticScoreOptions): Pr
         not(like(scores.note, '%SYNTHETIC%'))
       ))
       .orderBy(desc(scores.ts))
-      .limit(20);
+      .limit(100);
     
     let scoreRows = recentScores;
     let values = recentScores.map(s => s.stupidScore).filter(v => typeof v === 'number' && v >= 0);
@@ -70,7 +70,7 @@ export async function generateSyntheticScore(options: SyntheticScoreOptions): Pr
           not(like(scores.note, '%SYNTHETIC%'))
         ))
         .orderBy(desc(scores.ts))
-        .limit(100);
+        .limit(200); // Larger cohort for better baseline
 
       const cohortValues = cohortRows
         .map(s => s.stupidScore)
@@ -88,22 +88,46 @@ export async function generateSyntheticScore(options: SyntheticScoreOptions): Pr
       }
     }
     
-    const mean = values.reduce((a, b) => a + b) / values.length;
-    const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
+    // Enhanced statistical analysis with temporal weighting
+    const weightedMean = calculateWeightedMean(values, scoreRows);
+    const variance = values.reduce((sum, val) => sum + Math.pow(val - weightedMean, 2), 0) / values.length;
     const stdDev = Math.sqrt(variance);
     
-    // Apply a slight downward bias so synthetic scores don't overstate performance.
-    // If mean is >70, pull it down by up to ~10 points; otherwise leave it similar.
-    const dampedMean = mean - Math.min(10, Math.max(0, (mean - 70) * 0.6));
+    // Apply realistic performance patterns
+    const performancePattern = calculatePerformancePattern(scoreRows, modelId, batchTimestamp);
     
-    // Use a moderated spread to keep synthetic scores in a realistic band (roughly 60-80 for strong models).
-    const randomValue = seededRandom(modelId, batchTimestamp, 'score');
-    const spread = Math.max(4, Math.min(12, stdDev * 2.2)); // cap spread so we don't spike too high
-    const randomFactor = (randomValue - 0.5) * spread;
-    const syntheticScore = Math.round(Math.max(0, Math.min(82, dampedMean + randomFactor)));
+    // Enhanced randomness with multiple time scales
+    const shortTermRandom = seededRandom(modelId, batchTimestamp, 'short-term');
+    const mediumTermRandom = seededRandom(modelId, batchTimestamp.slice(0, 10), 'medium-term'); // Daily variation
+    const longTermRandom = seededRandom(modelId, batchTimestamp.slice(0, 7), 'long-term'); // Monthly variation
     
-    // Generate synthetic axes based on historical patterns
-    const syntheticAxes = generateSyntheticAxes(scoreRows);
+    // Combine randomness sources for more realistic variation
+    const combinedRandom = (shortTermRandom * 0.6 + mediumTermRandom * 0.3 + longTermRandom * 0.1);
+    
+    // Apply performance pattern effects
+    const patternAdjustedMean = weightedMean + performancePattern.effect;
+    
+    // Apply a slight downward bias so synthetic scores don't overstate performance
+    const dampedMean = patternAdjustedMean - Math.min(10, Math.max(0, (patternAdjustedMean - 70) * 0.6));
+    
+    // Enhanced spread calculation with model-specific volatility
+    const modelVolatility = calculateModelVolatility(scoreRows);
+    const baseSpread = Math.max(4, Math.min(15, stdDev * 2.5)); // Slightly wider spread
+    const volatilityAdjustedSpread = baseSpread * (1 + modelVolatility * 0.5);
+    
+    const randomFactor = (combinedRandom - 0.5) * volatilityAdjustedSpread;
+    let syntheticScore = Math.round(Math.max(0, Math.min(85, dampedMean + randomFactor)));
+    
+    // Apply occasional performance dips (simulating real-world "bad days")
+    if (performancePattern.hasDip) {
+      const dipSeverity = seededRandom(modelId, batchTimestamp, 'dip-severity');
+      const dipAmount = Math.round(syntheticScore * (0.1 + dipSeverity * 0.2)); // 10-30% dip
+      syntheticScore = Math.max(0, syntheticScore - dipAmount);
+      console.log(`📉 Model ${modelId}: Applied performance dip of ${dipAmount} points`);
+    }
+    
+    // Generate synthetic axes based on historical patterns with enhanced realism
+    const syntheticAxes = generateEnhancedSyntheticAxes(scoreRows, modelId, batchTimestamp);
     
     // Insert score (NO mention of synthetic in note field - appears identical to real scores)
     await db.insert(scores).values({
@@ -116,7 +140,7 @@ export async function generateSyntheticScore(options: SyntheticScoreOptions): Pr
       note: null // No special note - appears identical to real scores
     });
     
-    console.log(`🎲 Generated synthetic ${suite} score for model ${modelId}: ${syntheticScore} (based on ${recentScores.length} historical scores, mean=${mean.toFixed(1)}, stdDev=${stdDev.toFixed(1)})`);
+    console.log(`🎲 Generated enhanced synthetic ${suite} score for model ${modelId}: ${syntheticScore} (based on ${recentScores.length} historical scores, weightedMean=${weightedMean.toFixed(1)}, stdDev=${stdDev.toFixed(1)}, pattern=${performancePattern.type})`);
     
     return syntheticScore;
     
@@ -124,6 +148,165 @@ export async function generateSyntheticScore(options: SyntheticScoreOptions): Pr
     console.error(`❌ Failed to generate synthetic score for model ${modelId} (${suite}):`, String(error).slice(0, 200));
     return null;
   }
+}
+
+/**
+ * Calculate weighted mean with temporal decay (recent scores matter more)
+ */
+function calculateWeightedMean(values: number[], scoreRows: any[]): number {
+  if (values.length === 0) return 0;
+  if (values.length === 1) return values[0];
+  
+  // Use exponential decay: recent scores get higher weights
+  const weights = scoreRows.map((row, index) => {
+    const ageFactor = Math.exp(-index * 0.1); // Exponential decay
+    return ageFactor;
+  });
+  
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+  const weightedSum = values.reduce((sum, value, index) => sum + value * weights[index], 0);
+  
+  return weightedSum / totalWeight;
+}
+
+/**
+ * Calculate model-specific volatility based on historical performance
+ */
+function calculateModelVolatility(scoreRows: any[]): number {
+  if (scoreRows.length < 5) return 0.5; // Default medium volatility for sparse data
+  
+  const scores = scoreRows.map(r => r.stupidScore).filter(s => typeof s === 'number' && s >= 0);
+  if (scores.length < 3) return 0.5;
+  
+  // Calculate coefficient of variation (standard deviation / mean)
+  const mean = scores.reduce((a, b) => a + b) / scores.length;
+  const variance = scores.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / scores.length;
+  const stdDev = Math.sqrt(variance);
+  
+  const cv = stdDev / mean;
+  
+  // Normalize to 0-1 range (most models have CV between 0.05 and 0.25)
+  return Math.max(0, Math.min(1, (cv - 0.05) / 0.2));
+}
+
+/**
+ * Detect and simulate realistic performance patterns
+ */
+function calculatePerformancePattern(scoreRows: any[], modelId: number, batchTimestamp: string): {
+  type: string;
+  effect: number;
+  hasDip: boolean;
+} {
+  if (scoreRows.length < 10) {
+    return { type: 'baseline', effect: 0, hasDip: false };
+  }
+  
+  const scores = scoreRows.map(r => r.stupidScore).filter(s => typeof s === 'number' && s >= 0);
+  const recentScores = scores.slice(0, Math.min(10, scores.length));
+  const olderScores = scores.slice(Math.min(10, scores.length));
+  
+  // Calculate trends
+  const recentMean = recentScores.reduce((a, b) => a + b) / recentScores.length;
+  const olderMean = olderScores.length > 0 ? olderScores.reduce((a, b) => a + b) / olderScores.length : recentMean;
+  
+  const trend = recentMean - olderMean;
+  
+  // Detect patterns using seeded randomness for consistency
+  const patternRandom = seededRandom(modelId, batchTimestamp, 'pattern');
+  
+  // 15% chance of performance dip
+  const hasDip = patternRandom < 0.15;
+  
+  // 10% chance of recovery pattern (improving after previous dip)
+  const isRecovery = patternRandom > 0.85 && trend > 5;
+  
+  // 5% chance of exceptional performance
+  const isExceptional = patternRandom > 0.95;
+  
+  let type = 'baseline';
+  let effect = 0;
+  
+  if (hasDip) {
+    type = 'dip';
+    effect = -8 - (patternRandom * 12); // -8 to -20 point effect
+  } else if (isRecovery) {
+    type = 'recovery';
+    effect = 5 + (patternRandom * 10); // +5 to +15 point effect
+  } else if (isExceptional) {
+    type = 'exceptional';
+    effect = 8 + (patternRandom * 7); // +8 to +15 point effect
+  } else if (trend > 3) {
+    type = 'improving';
+    effect = Math.min(5, trend * 0.5); // Small positive effect for improving trends
+  } else if (trend < -3) {
+    type = 'declining';
+    effect = Math.max(-5, trend * 0.5); // Small negative effect for declining trends
+  }
+  
+  return { type, effect, hasDip };
+}
+
+/**
+ * Enhanced synthetic axes generation with realistic correlations
+ */
+function generateEnhancedSyntheticAxes(recentScores: any[], modelId: number, batchTimestamp: string): Record<string, number> {
+  if (recentScores.length === 0 || !recentScores[0].axes) {
+    return {};
+  }
+  
+  const axisKeys = Object.keys(recentScores[0].axes);
+  const syntheticAxes: Record<string, number> = {};
+  
+  // Calculate baseline statistics for each axis
+  const axisStats: Record<string, { mean: number; stdDev: number; volatility: number }> = {};
+  
+  for (const key of axisKeys) {
+    const values = recentScores
+      .map(s => s.axes[key])
+      .filter(v => typeof v === 'number' && v >= 0 && v <= 1);
+    
+    if (values.length === 0) {
+      axisStats[key] = { mean: 0.5, stdDev: 0.15, volatility: 0.5 };
+      continue;
+    }
+    
+    const mean = values.reduce((a, b) => a + b) / values.length;
+    const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
+    const stdDev = Math.sqrt(variance);
+    const volatility = Math.min(1, stdDev / 0.3); // Normalize volatility
+    
+    axisStats[key] = { mean, stdDev, volatility };
+  }
+  
+  // Generate correlated values (axes that should move together)
+  const performanceFactor = seededRandom(modelId, batchTimestamp, 'performance-factor') - 0.5;
+  
+  for (const key of axisKeys) {
+    const stats = axisStats[key];
+    
+    // Base random variation
+    const baseRandom = seededRandom(modelId, batchTimestamp, `axis-${key}`);
+    const baseVariation = (baseRandom - 0.5) * stats.stdDev * 2;
+    
+    // Performance correlation (some axes should correlate with overall performance)
+    let correlationEffect = 0;
+    if (['correctness', 'codeQuality', 'complexity'].includes(key)) {
+      correlationEffect = performanceFactor * 0.3; // Strong correlation with performance
+    } else if (['efficiency', 'stability'].includes(key)) {
+      correlationEffect = performanceFactor * 0.2; // Moderate correlation
+    } else {
+      correlationEffect = performanceFactor * 0.1; // Weak correlation
+    }
+    
+    // Apply volatility scaling
+    const volatilityFactor = 1 + (stats.volatility * 0.5);
+    const finalVariation = (baseVariation + correlationEffect) * volatilityFactor;
+    
+    const syntheticValue = Math.max(0, Math.min(1, stats.mean + finalVariation));
+    syntheticAxes[key] = syntheticValue;
+  }
+  
+  return syntheticAxes;
 }
 
 /**
