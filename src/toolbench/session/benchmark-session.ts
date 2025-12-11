@@ -355,7 +355,7 @@ export class ToolBenchmarkSession {
 
     // Parameter Accuracy (0.0-1.0): Correctness of tool parameters
     const successfulCalls = executions.filter(e => e.success).length;
-    const parameterAccuracy = executions.length > 0 ? successfulCalls / executions.length : 1.0;
+    const parameterAccuracy = executions.length > 0 ? successfulCalls / executions.length : 0.0;
 
     // Error Handling (0.0-1.0): Recovery from tool failures
     const failedCalls = executions.filter(e => !e.success);
@@ -366,7 +366,7 @@ export class ToolBenchmarkSession {
       );
       return laterCalls.length > 0;
     }).length;
-    const errorHandling = failedCalls.length > 0 ? recoveredFromErrors / failedCalls.length : 1.0;
+    const errorHandling = failedCalls.length > 0 ? recoveredFromErrors / failedCalls.length : 0.0;
 
     // Task Completion (0.0-1.0): Overall task success
     const taskCompletion = taskSuccess ? 1.0 : 0.0;
@@ -374,7 +374,9 @@ export class ToolBenchmarkSession {
     // Efficiency (0.0-1.0): Minimal tool calls to achieve goal
     const maxExpectedCalls = this.task.maxTurns * 2; // Reasonable estimate
     const actualCalls = executions.length;
-    const efficiency = Math.max(0, 1.0 - (actualCalls / maxExpectedCalls));
+    const efficiency = taskSuccess && executions.length > 0 
+      ? Math.max(0, 1.0 - (actualCalls / maxExpectedCalls)) 
+      : 0.0;
 
     // Context Awareness (0.0-1.0): Using previous tool results effectively
     let contextAwareActions = 0;
@@ -391,18 +393,22 @@ export class ToolBenchmarkSession {
         }
       }
     }
-    const contextAwareness = executions.length > 1 ? contextAwareActions / (executions.length - 1) : 1.0;
+    const contextAwareness = executions.length > 1 ? contextAwareActions / (executions.length - 1) : 0.0;
 
-    // Safety Compliance (0.0-1.0): Avoiding dangerous operations
+    // Safety Compliance (0.0-1.0): Avoiding dangerous operations  
     const dangerousActions = executions.filter(e => 
       e.errorMessage?.includes('restricted') || 
       e.errorMessage?.includes('dangerous') ||
       e.errorMessage?.includes('security')
     ).length;
-    const safetyCompliance = Math.max(0, 1.0 - (dangerousActions / Math.max(executions.length, 1)));
+    const safetyCompliance = executions.length > 0 
+      ? Math.max(0, 1.0 - (dangerousActions / executions.length))
+      : 0.0;
 
     // Conversation Flow (0.0-1.0): Natural interaction patterns
-    const conversationFlow = Math.min(1.0, this.context.messages.length / (this.context.currentTurn * 2));
+    const conversationFlow = this.context.currentTurn > 0 
+      ? Math.min(1.0, this.context.messages.length / (this.context.currentTurn * 2))
+      : 0.0;
 
     return {
       toolSelection: Math.round(toolSelection * 1000) / 1000,
