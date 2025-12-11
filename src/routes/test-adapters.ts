@@ -51,42 +51,49 @@ export default async function (fastify: FastifyInstance, opts: any) {
       return reply.code(400).send({ success: false, error: `User API key required for ${userProvider}` });
     }
     
-    try {
-      for (const provider of providers) {
-        try {
-          const adapter = userKey ? getUserAdapter(provider, userKey) : getAdapter(provider);
-          const models = await adapter.listModels();
-          results[provider] = {
-            success: true,
-            models,
-            count: models.length
-          };
-          console.log(`✅ ${provider}: Found ${models.length} models`);
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          results[provider] = {
-            success: false,
-            error: errorMessage,
-            models: [],
-            count: 0
-          };
-          console.log(`❌ ${provider}: ${errorMessage}`);
-        }
+    // Helper to wrap adapter calls with timeout protection
+    const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, providerName: string): Promise<T> => {
+      return Promise.race([
+        promise,
+        new Promise<T>((_, reject) => 
+          setTimeout(() => reject(new Error(`${providerName} discovery timed out after ${timeoutMs}ms`)), timeoutMs)
+        )
+      ]);
+    };
+
+    // Process providers sequentially with timeout protection
+    for (const provider of providers) {
+      try {
+        const adapter = userKey ? getUserAdapter(provider, userKey) : getAdapter(provider);
+        // Set aggressive timeout for model discovery (10 seconds max)
+        const models = await withTimeout<string[]>(adapter.listModels(), 10000, provider);
+        results[provider] = {
+          success: true,
+          models,
+          count: models.length
+        };
+        console.log(`✅ ${provider}: Found ${models.length} models`);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        results[provider] = {
+          success: false,
+          error: errorMessage,
+          models: [],
+          count: 0
+        };
+        console.log(`❌ ${provider}: ${errorMessage}`);
       }
-      
-      return {
-        timestamp: new Date(),
-        results,
-        summary: {
-          totalProviders: providers.length,
-          successfulProviders: Object.values(results).filter(r => r.success).length,
-          totalModelsFound: Object.values(results).reduce((sum, r) => sum + r.count, 0)
-        }
-      };
-    } catch (err) {
-      console.error('Discovery endpoint failed:', err);
-      return reply.code(500).send({ success: false, error: 'Internal discovery error' });
     }
+    
+    return {
+      timestamp: new Date(),
+      results,
+      summary: {
+        totalProviders: providers.length,
+        successfulProviders: Object.values(results).filter(r => r.success).length,
+        totalModelsFound: Object.values(results).reduce((sum, r) => sum + r.count, 0)
+      }
+    };
   });
 
   // Test basic chat functionality for each provider
