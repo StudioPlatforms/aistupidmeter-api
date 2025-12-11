@@ -1,0 +1,21 @@
+[Unit]
+Description=AI Stupid Meter API Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/apps/api
+Environment="NODE_ENV=production"
+Environment="PORT=4000"
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/apps/api/server.log
+StandardError=append:/root/apps/api/server.log
+
+# Restart on failure
+StartLimitInterval=0
+
+[Install]
+WantedBy=multi-user.target
