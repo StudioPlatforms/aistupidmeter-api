@@ -152,6 +152,25 @@ try {
       top_pages TEXT NOT NULL,
       top_countries TEXT NOT NULL
     );
+
+    -- PHASE 2: Change-point detection table
+    CREATE TABLE IF NOT EXISTS change_points (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      model_id INTEGER NOT NULL,
+      detected_at TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+      from_score REAL NOT NULL,
+      to_score REAL NOT NULL,
+      delta REAL NOT NULL,
+      significance REAL NOT NULL,
+      change_type TEXT NOT NULL,
+      affected_axes TEXT,
+      suspected_cause TEXT,
+      incident_id INTEGER,
+      confirmed INTEGER DEFAULT 0,
+      false_alarm INTEGER DEFAULT 0,
+      notes TEXT,
+      FOREIGN KEY (model_id) REFERENCES models(id)
+    );
   `);
   
   // Add missing columns to existing tables

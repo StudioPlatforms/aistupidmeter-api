@@ -226,6 +226,16 @@ export function startBenchmarkScheduler() {
           await runCanaryBenchmarks();
           console.log(`✅ Canary benchmarks completed`);
           
+          // PHASE 2: Compute drift signatures after benchmarks
+          console.log(`🔍 Computing drift signatures for all models...`);
+          try {
+            const { computeAllDriftSignatures, detectChangePoints, recordChangePoint } = await import('./lib/drift-detection');
+            const driftResult = await computeAllDriftSignatures();
+            console.log(`✅ Drift computation: ${driftResult.success} success, ${driftResult.alerts} alerts, ${driftResult.warnings} warnings`);
+          } catch (error) {
+            console.error(`❌ Drift computation failed:`, error);
+          }
+          
           // Update router model rankings after canary benchmarks
           console.log(`🔄 Updating router model rankings...`);
           try {
@@ -290,6 +300,7 @@ export function startBenchmarkScheduler() {
 
   console.log('📅 Scheduler started with separate timing:');
   console.log('   • Canary benchmarks: Every hour at :00 (12 tasks, 2 trials) - FAST DRIFT DETECTION');
+  console.log('   • Drift computation: Every hour after canary (change-point detection, regime classification)');
   console.log('   • Regular (speed) benchmarks: Every 4 hours at :00 (00:00, 04:00, 08:00, 12:00, 16:00, 20:00)');
   console.log('   • Deep (reasoning) benchmarks: Daily at 3:00 AM Berlin time');
   console.log('   • Tool (tooling) benchmarks: Daily at 4:00 AM Berlin time');

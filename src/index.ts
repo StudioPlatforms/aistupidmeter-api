@@ -98,6 +98,9 @@ async function startServer() {
       if (request.url.startsWith('/dashboard/')) {
         return 300; // 5 requests per second for dashboard endpoints (300/minute)
       }
+      if (request.url.startsWith('/api/drift/')) {
+        return 240; // 4 requests per second for drift endpoints (240/minute) - cached responses are fast
+      }
       if (request.url.startsWith('/analytics/')) {
         return 240; // 4 requests per second for analytics (240/minute)
       }
@@ -140,13 +143,42 @@ async function startServer() {
   });
 
   // System pressure monitoring - circuit breaker
+  // Tuned for CPU-intensive drift computation workload
   await app.register(underPressure, {
-    maxEventLoopDelay: 1000,    // 1 second max delay
-    maxHeapUsedBytes: 1000000000, // 1GB heap limit
-    maxRssBytes: 1500000000,    // 1.5GB RSS limit
-    maxEventLoopUtilization: 0.98, // 98% max CPU utilization
-    retryAfter: 50,             // Retry after 50ms
+    maxEventLoopDelay: 2000,    // 2 seconds (was 1s) - allow for drift computations
+    maxHeapUsedBytes: 1500000000, // 1.5GB heap limit (was 1GB)
+    maxRssBytes: 2000000000,    // 2GB RSS limit (was 1.5GB)
+    maxEventLoopUtilization: 0.995, // 99.5% max CPU (was 98%) - drift is legitimately CPU-intensive
+    retryAfter: 100,            // Retry after 100ms (was 50ms)
     message: 'Service temporarily overloaded',
+    pressureHandler: (req: FastifyRequest, reply: FastifyReply, type: string, value: number | undefined) => {
+      // More intelligent pressure handling for drift endpoints
+      if (req.url.startsWith('/api/drift/')) {
+        // Check if request is for cached data
+        const cacheHeader = req.headers['x-cache'];
+        if (cacheHeader === 'HIT') {
+          // Allow cached responses even under pressure
+          return;
+        }
+        
+        // Only reject uncached drift requests during high pressure
+        reply.code(503).send({
+          error: 'Service Under Pressure',
+          message: 'Drift computation queue full, cache warming in progress',
+          retryAfter: 5,
+          type,
+          value: typeof value === 'number' ? Math.round(value * 100) / 100 : value
+        });
+        return;
+      }
+      
+      // Default pressure handling for other endpoints
+      reply.code(503).send({
+        error: 'Service Temporarily Overloaded',
+        message: 'Server is experiencing high load, please retry',
+        retryAfter: 3
+      });
+    },
     healthCheck: async () => {
       // Custom health check that verifies database and cache
       try {
@@ -251,6 +283,8 @@ async function startServer() {
     { name: 'router-analytics', prefix: '' }, // AI Router Analytics - /router/analytics/*
     { name: 'router-smart', prefix: '' }, // Smart Router - Automatic model selection at /v1/*
     { name: 'analytics', prefix: '/analytics' },
+    { name: 'drift-batch', prefix: '/api/drift' }, // PHASE 2: Batch drift endpoint (register BEFORE individual)
+    { name: 'drift', prefix: '/api/drift' }, // PHASE 2: Drift detection endpoints
     { name: 'health', prefix: '/providers' },
     { name: 'dashboard-cached', prefix: '/dashboard' },
     { name: 'models', prefix: '/models' },
@@ -407,6 +441,15 @@ async function startServer() {
       await app.close();
       console.log('✅ HTTP server closed');
       
+      // Stop drift scheduler
+      try {
+        const { stopDriftScheduler } = await import('./scheduler/drift-scheduler');
+        stopDriftScheduler();
+        console.log('✅ Drift scheduler stopped');
+      } catch (error) {
+        // Scheduler might not be initialized
+      }
+      
       // Cleanup performance monitoring
       cleanupPerformanceMiddleware();
       console.log('✅ Performance monitoring cleaned up');
@@ -469,6 +512,17 @@ async function startServer() {
         console.log('✅ Benchmark scheduler started');
       } catch (error) {
         console.error('❌ Failed to start benchmark scheduler:', error);
+      }
+    });
+
+    // Start drift pre-computation scheduler
+    setImmediate(async () => {
+      try {
+        const { startDriftScheduler } = await import('./scheduler/drift-scheduler');
+        startDriftScheduler();
+        console.log('✅ Drift pre-computation scheduler started');
+      } catch (error) {
+        console.error('❌ Failed to start drift scheduler:', error);
       }
     });
 

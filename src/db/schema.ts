@@ -295,3 +295,90 @@ export const adversarial_results = sqliteTable('adversarial_results', {
   notes: text('notes'), // Additional observations
   ts: text('ts').default('CURRENT_TIMESTAMP')
 });
+
+// PHASE 2: Change-point detection table
+// Tracks significant behavioral changes over time for drift monitoring
+export const change_points = sqliteTable('change_points', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  model_id: integer('model_id').references(() => models.id).notNull(),
+  detected_at: text('detected_at').default('CURRENT_TIMESTAMP').notNull(),
+  
+  // Change details
+  from_score: real('from_score').notNull(),
+  to_score: real('to_score').notNull(),
+  delta: real('delta').notNull(),
+  significance: real('significance').notNull(), // How many standard deviations
+  
+  // Classification
+  change_type: text('change_type').notNull(), // 'improvement' | 'degradation' | 'shift'
+  affected_axes: text('affected_axes'), // JSON array of affected axes
+  suspected_cause: text('suspected_cause'), // 'model_update' | 'safety_tuning' | etc.
+  
+  // Attribution
+  incident_id: integer('incident_id').references(() => incidents.id),
+  confirmed: integer('confirmed', { mode: 'boolean' }).default(false),
+  false_alarm: integer('false_alarm', { mode: 'boolean' }).default(false),
+  
+  // Context
+  notes: text('notes')
+});
+
+// PHASE 2: Model drift signatures table
+// Stores computed drift signatures for quick retrieval
+export const model_drift_signatures = sqliteTable('model_drift_signatures', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  model_id: integer('model_id').references(() => models.id).notNull(),
+  ts: text('ts').default('CURRENT_TIMESTAMP').notNull(),
+  
+  // Current state
+  baseline_score: real('baseline_score').notNull(),
+  current_score: real('current_score').notNull(),
+  ci_lower: real('ci_lower').notNull(),
+  ci_upper: real('ci_upper').notNull(),
+  
+  // Stability metrics
+  regime: text('regime').notNull(), // 'STABLE' | 'VOLATILE' | 'DEGRADED' | 'RECOVERING'
+  variance_24h: real('variance_24h').notNull(),
+  drift_status: text('drift_status').notNull(), // 'NORMAL' | 'WARNING' | 'ALERT'
+  page_hinkley_cusum: real('page_hinkley_cusum').notNull(),
+  
+  // Temporal context
+  last_change_timestamp: text('last_change_timestamp'),
+  hours_since_change: real('hours_since_change'),
+  
+  // Dimensional breakdown (JSON for flexibility)
+  axes_breakdown: text('axes_breakdown').notNull(),
+  
+  // Actionability
+  primary_issue: text('primary_issue'),
+  recommendation: text('recommendation'),
+  
+  // Full signature as JSON for extensibility
+  signature_json: text('signature_json').notNull()
+});
+
+// PHASE 2: Failure classifications table
+// Categorize individual test failures by type for drift analysis
+export const failure_classifications = sqliteTable('failure_classifications', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  run_id: integer('run_id').references(() => runs.id).notNull(),
+  model_id: integer('model_id').references(() => models.id).notNull(),
+  ts: text('ts').default('CURRENT_TIMESTAMP').notNull(),
+  
+  // Primary classification
+  failure_mode: text('failure_mode').notNull(),
+  failure_subtype: text('failure_subtype'),
+  
+  // Details
+  task_slug: text('task_slug').notNull(),
+  expected_behavior: text('expected_behavior'),
+  actual_behavior: text('actual_behavior'),
+  error_excerpt: text('error_excerpt'),
+  
+  // Severity
+  severity: text('severity').notNull(), // 'minor' | 'major' | 'critical'
+  
+  // Analysis
+  is_regression: integer('is_regression', { mode: 'boolean' }).default(false),
+  first_seen: text('first_seen')
+});

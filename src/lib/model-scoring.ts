@@ -6,6 +6,7 @@
 import { db } from '../db/index';
 import { models, scores, runs } from '../db/schema';
 import { eq, desc, sql, and, gte } from 'drizzle-orm';
+import { calculateConfidenceInterval } from './statistical-tests';
 
 // ============================================================================
 // TYPE DEFINITIONS
@@ -37,7 +38,12 @@ export interface ModelScore {
   dataPoints?: number;
   isNew?: boolean;
   usesReasoningEffort?: boolean;
+  // Phase 1 additions: Staleness detection and confidence intervals
   isStale?: boolean;
+  staleDuration?: number; // Hours since last update
+  confidenceLower?: number; // Lower bound of 95% CI
+  confidenceUpper?: number; // Upper bound of 95% CI
+  standardError?: number; // Standard error for drift detection
 }
 
 export interface HistoryPoint {
@@ -213,6 +219,14 @@ async function computeCombinedScores(): Promise<ModelScore[]> {
     const status = getStatus(combinedScore);
     const lastUpdated = new Date(hourlyScore?.ts || deepScore?.ts || new Date());
     
+    // PHASE 1: Get recent scores for CI calculation
+    const recentScores = await getRecentScoresForCI(model.id, 'combined');
+    const { confidenceLower, confidenceUpper, standardError } = calculateScoreCI(recentScores);
+    
+    // PHASE 1: Staleness detection
+    const hoursStale = (Date.now() - lastUpdated.getTime()) / (1000 * 60 * 60);
+    const isStale = hoursStale > 3;
+    
     modelScores.push({
       id: String(model.id),
       name: model.name,
@@ -224,7 +238,13 @@ async function computeCombinedScores(): Promise<ModelScore[]> {
       lastUpdated,
       status,
       isNew: isModelNew(model),
-      usesReasoningEffort: Boolean(model.usesReasoningEffort)
+      usesReasoningEffort: Boolean(model.usesReasoningEffort),
+      // Phase 1 additions
+      isStale,
+      staleDuration: isStale ? Math.round(hoursStale) : undefined,
+      confidenceLower,
+      confidenceUpper,
+      standardError
     });
   }
   
@@ -237,7 +257,7 @@ async function computeHistoricalCombinedScores(period: PeriodKey): Promise<Model
   const timeThreshold = getTimeThreshold(period);
   
   for (const model of allModels) {
-    // CRITICAL FIX: Get the LATEST combined score first (for currentScore field)
+    // PHASE 1 FIX: Always get LATEST combined score (not period-specific)
     const latestCombinedScore = await getSingleModelCombinedScore(model.id);
     
     // Get historical scores from all three suites for period statistics
@@ -259,7 +279,7 @@ async function computeHistoricalCombinedScores(period: PeriodKey): Promise<Model
     }
     
     // Calculate period average (for statistics only, NOT for currentScore)
-    const convertedScores = validScores.map(s => 
+    const convertedScores = validScores.map(s =>
       Math.max(0, Math.min(100, Math.round(s.stupidScore)))
     );
     const periodAvg = Math.round(
@@ -276,22 +296,39 @@ async function computeHistoricalCombinedScores(period: PeriodKey): Promise<Model
         : 'stable')
       : 'stable';
     
-    // CRITICAL FIX: Use LATEST score for currentScore, period average for periodAvg
+    // PHASE 1 FIX: currentScore MUST be latest, never period average
+    // This ensures score doesn't change when user switches time periods
+    const displayScore = latestCombinedScore !== null ? latestCombinedScore : periodAvg;
+    
+    // Calculate confidence interval from recent scores
+    const { confidenceLower, confidenceUpper, standardError } = calculateScoreCI(convertedScores.slice(0, 5));
+    
+    // Staleness detection (flag if data >3 hours old)
+    const lastUpdate = new Date(historicalScores[0].ts || new Date());
+    const hoursStale = (Date.now() - lastUpdate.getTime()) / (1000 * 60 * 60);
+    const isStale = hoursStale > 3;
+    
     modelScores.push({
       id: String(model.id),
       name: model.name,
       provider: model.vendor,
       vendor: model.vendor,
-      currentScore: latestCombinedScore || periodAvg, // Use latest, fallback to period avg
-      score: latestCombinedScore || periodAvg,
+      currentScore: displayScore,
+      score: displayScore,
       trend,
-      lastUpdated: new Date(historicalScores[0].ts || new Date()),
-      status: getStatus(latestCombinedScore || periodAvg),
-      periodAvg, // Keep period average as separate field for statistics
+      lastUpdated: lastUpdate,
+      status: getStatus(displayScore),
+      periodAvg, // Period average as SEPARATE field
       stability,
       dataPoints: validScores.length,
       isNew: isModelNew(model),
-      usesReasoningEffort: Boolean(model.usesReasoningEffort)
+      usesReasoningEffort: Boolean(model.usesReasoningEffort),
+      // Phase 1 additions
+      isStale,
+      staleDuration: isStale ? Math.round(hoursStale) : undefined,
+      confidenceLower,
+      confidenceUpper,
+      standardError
     });
   }
   
@@ -316,6 +353,15 @@ async function computeReasoningScores(): Promise<ModelScore[]> {
     
     const reasoningScore = Math.round(deepScore.stupidScore);
     const trend = await calculateTrend(model.id, 'deep');
+    const lastUpdated = new Date(deepScore.ts || new Date());
+    
+    // PHASE 1: Get recent scores for CI
+    const recentScores = await getRecentScoresForCI(model.id, 'deep');
+    const { confidenceLower, confidenceUpper, standardError } = calculateScoreCI(recentScores);
+    
+    // PHASE 1: Staleness detection
+    const hoursStale = (Date.now() - lastUpdated.getTime()) / (1000 * 60 * 60);
+    const isStale = hoursStale > 3;
     
     modelScores.push({
       id: String(model.id),
@@ -325,10 +371,16 @@ async function computeReasoningScores(): Promise<ModelScore[]> {
       currentScore: reasoningScore,
       score: reasoningScore,
       trend,
-      lastUpdated: new Date(deepScore.ts || new Date()),
+      lastUpdated,
       status: getStatus(reasoningScore),
       isNew: isModelNew(model),
-      usesReasoningEffort: Boolean(model.usesReasoningEffort)
+      usesReasoningEffort: Boolean(model.usesReasoningEffort),
+      // Phase 1 additions
+      isStale,
+      staleDuration: isStale ? Math.round(hoursStale) : undefined,
+      confidenceLower,
+      confidenceUpper,
+      standardError
     });
   }
   
@@ -357,6 +409,15 @@ async function computeToolingScores(): Promise<ModelScore[]> {
     
     const score = Math.round(toolingScore.stupidScore);
     const trend = await calculateTrend(model.id, 'tooling');
+    const lastUpdated = new Date(toolingScore.ts || new Date());
+    
+    // PHASE 1: Get recent scores for CI
+    const recentScores = await getRecentScoresForCI(model.id, 'tooling');
+    const { confidenceLower, confidenceUpper, standardError } = calculateScoreCI(recentScores);
+    
+    // PHASE 1: Staleness detection
+    const hoursStale = (Date.now() - lastUpdated.getTime()) / (1000 * 60 * 60);
+    const isStale = hoursStale > 3;
     
     modelScores.push({
       id: String(model.id),
@@ -366,10 +427,16 @@ async function computeToolingScores(): Promise<ModelScore[]> {
       currentScore: score,
       score: score,
       trend,
-      lastUpdated: new Date(toolingScore.ts || new Date()),
+      lastUpdated,
       status: getStatus(score),
       isNew: isModelNew(model),
-      usesReasoningEffort: Boolean(model.usesReasoningEffort)
+      usesReasoningEffort: Boolean(model.usesReasoningEffort),
+      // Phase 1 additions
+      isStale,
+      staleDuration: isStale ? Math.round(hoursStale) : undefined,
+      confidenceLower,
+      confidenceUpper,
+      standardError
     });
   }
   
@@ -398,6 +465,15 @@ async function computeSpeedScores(): Promise<ModelScore[]> {
     
     const score = Math.round(hourlyScore.stupidScore);
     const trend = await calculateTrend(model.id, 'hourly');
+    const lastUpdated = new Date(hourlyScore.ts || new Date());
+    
+    // PHASE 1: Get recent scores for CI
+    const recentScores = await getRecentScoresForCI(model.id, 'hourly');
+    const { confidenceLower, confidenceUpper, standardError } = calculateScoreCI(recentScores);
+    
+    // PHASE 1: Staleness detection
+    const hoursStale = (Date.now() - lastUpdated.getTime()) / (1000 * 60 * 60);
+    const isStale = hoursStale > 3;
     
     modelScores.push({
       id: String(model.id),
@@ -407,10 +483,16 @@ async function computeSpeedScores(): Promise<ModelScore[]> {
       currentScore: score,
       score: score,
       trend,
-      lastUpdated: new Date(hourlyScore.ts || new Date()),
+      lastUpdated,
       status: getStatus(score),
       isNew: isModelNew(model),
-      usesReasoningEffort: Boolean(model.usesReasoningEffort)
+      usesReasoningEffort: Boolean(model.usesReasoningEffort),
+      // Phase 1 additions
+      isStale,
+      staleDuration: isStale ? Math.round(hoursStale) : undefined,
+      confidenceLower,
+      confidenceUpper,
+      standardError
     });
   }
   
@@ -424,6 +506,41 @@ async function computeHistoricalSpeedScores(period: PeriodKey): Promise<ModelSco
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
+
+/**
+ * PHASE 1: Get recent scores for confidence interval calculation
+ * Fetches last 5 scores from appropriate suite for CI computation
+ */
+async function getRecentScoresForCI(modelId: number, suite: 'combined' | 'deep' | 'hourly' | 'tooling'): Promise<number[]> {
+  let suites: string[];
+  
+  if (suite === 'combined') {
+    // For combined, get from all three suites
+    suites = ['hourly', 'deep', 'tooling'];
+  } else if (suite === 'deep') {
+    suites = ['deep'];
+  } else if (suite === 'tooling') {
+    suites = ['tooling'];
+  } else {
+    suites = ['hourly'];
+  }
+  
+  const recentScores = await db
+    .select()
+    .from(scores)
+    .where(and(
+      eq(scores.modelId, modelId),
+      sql`suite IN (${sql.join(suites.map(s => sql`${s}`), sql`, `)})`
+    ))
+    .orderBy(desc(scores.ts))
+    .limit(5);
+  
+  const validScores = recentScores
+    .filter(s => s.stupidScore !== null && s.stupidScore >= 0)
+    .map(s => Math.max(0, Math.min(100, Math.round(s.stupidScore))));
+  
+  return validScores.length > 0 ? validScores : [50]; // Fallback to neutral if no data
+}
 
 async function getLatestScore(modelId: number, suite: string) {
   const result = await db
@@ -471,6 +588,27 @@ function calculateStability(scores: number[]): number {
   return Math.max(0, Math.min(25, Math.round(25 - (stdDev - 20) * 0.5)));
 }
 
+/**
+ * Calculate confidence interval for a set of scores
+ * PHASE 1: Helper function for drift detection
+ */
+function calculateScoreCI(scores: number[]): {
+  confidenceLower: number;
+  confidenceUpper: number;
+  standardError: number;
+} {
+  if (scores.length === 0) {
+    return { confidenceLower: 0, confidenceUpper: 0, standardError: 0 };
+  }
+  
+  const ci = calculateConfidenceInterval(scores);
+  return {
+    confidenceLower: Math.round(ci.lower * 10) / 10,
+    confidenceUpper: Math.round(ci.upper * 10) / 10,
+    standardError: Math.round(ci.standardError * 10) / 10
+  };
+}
+
 function getStatus(score: number): string {
   if (score < 40) return 'critical';
   if (score < 65) return 'warning';
@@ -509,10 +647,10 @@ async function computeHistoricalScoresForSuite(period: PeriodKey, suite: string)
   const dataLimit = getDataLimit(period);
   
   for (const model of allModels) {
-    // CRITICAL FIX: Get the LATEST score for this suite first (for currentScore field)
+    // PHASE 1 FIX: Always get LATEST score (not period-specific)
     const latestScore = await getLatestScore(model.id, suite);
-    const latestScoreValue = latestScore && latestScore.stupidScore >= 0 
-      ? Math.round(latestScore.stupidScore) 
+    const latestScoreValue = latestScore && latestScore.stupidScore >= 0
+      ? Math.round(latestScore.stupidScore)
       : null;
     
     // Get historical scores for period statistics
@@ -533,7 +671,7 @@ async function computeHistoricalScoresForSuite(period: PeriodKey, suite: string)
     
     if (validScores.length === 0) continue;
     
-    const convertedScores = validScores.map(s => 
+    const convertedScores = validScores.map(s =>
       Math.max(0, Math.min(100, Math.round(s.stupidScore)))
     );
     const periodAvg = Math.round(
@@ -545,22 +683,38 @@ async function computeHistoricalScoresForSuite(period: PeriodKey, suite: string)
     const oldest = convertedScores[convertedScores.length - 1];
     const trend = latest - oldest > 5 ? 'up' : latest - oldest < -5 ? 'down' : 'stable';
     
-    // CRITICAL FIX: Use LATEST score for currentScore, period average for periodAvg
+    // PHASE 1 FIX: currentScore MUST be latest, never period average
+    const displayScore = latestScoreValue !== null ? latestScoreValue : periodAvg;
+    
+    // Calculate confidence interval from recent scores
+    const { confidenceLower, confidenceUpper, standardError } = calculateScoreCI(convertedScores.slice(0, 5));
+    
+    // Staleness detection
+    const lastUpdate = new Date(historicalScores[0].ts || new Date());
+    const hoursStale = (Date.now() - lastUpdate.getTime()) / (1000 * 60 * 60);
+    const isStale = hoursStale > 3;
+    
     modelScores.push({
       id: String(model.id),
       name: model.name,
       provider: model.vendor,
       vendor: model.vendor,
-      currentScore: latestScoreValue || periodAvg, // Use latest, fallback to period avg
-      score: latestScoreValue || periodAvg,
+      currentScore: displayScore,
+      score: displayScore,
       trend,
-      lastUpdated: new Date(historicalScores[0].ts || new Date()),
-      status: getStatus(latestScoreValue || periodAvg),
-      periodAvg, // Keep period average as separate field for statistics
+      lastUpdated: lastUpdate,
+      status: getStatus(displayScore),
+      periodAvg, // Period average as SEPARATE field
       stability,
       dataPoints: validScores.length,
       isNew: isModelNew(model),
-      usesReasoningEffort: Boolean(model.usesReasoningEffort)
+      usesReasoningEffort: Boolean(model.usesReasoningEffort),
+      // Phase 1 additions
+      isStale,
+      staleDuration: isStale ? Math.round(hoursStale) : undefined,
+      confidenceLower,
+      confidenceUpper,
+      standardError
     });
   }
   
