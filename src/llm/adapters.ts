@@ -130,7 +130,7 @@ export class OpenAIAdapter implements LLMAdapter {
 
     if (!r.ok) {
       const errTxt = await r.text().catch(()=>'');
-      throw new Error(`OpenAI ${r.status}: ${errTxt}`);
+      throw new Error(`OpenAI ${r.status} ${r.statusText}: ${errTxt}`);
     }
 
     const j: any = await r.json();
@@ -240,13 +240,27 @@ export class OpenAIAdapter implements LLMAdapter {
       },
       body: JSON.stringify(body)
     });
+    
+    if (!r.ok) {
+      const errTxt = await r.text().catch(()=>'');
+      throw new Error(`OpenAI ${r.status} ${r.statusText}: ${errTxt}`);
+    }
+    
     const j: any = await r.json();
     const msg = j.choices?.[0]?.message;
     const toolCalls = msg?.tool_calls?.map((t: any) => ({
       name: t.function?.name,
       arguments: JSON.parse(t.function?.arguments || '{}')
     })) || [];
-    return { text: msg?.content ?? '', toolCalls, raw: j };
+    
+    const usage = j?.usage ?? {};
+    return {
+      text: msg?.content ?? '',
+      tokensIn: usage?.prompt_tokens ?? 0,
+      tokensOut: usage?.completion_tokens ?? 0,
+      toolCalls,
+      raw: j
+    };
   }
 }
 
