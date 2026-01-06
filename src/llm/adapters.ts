@@ -96,14 +96,18 @@ export class OpenAIAdapter implements LLMAdapter {
       body.reasoning = { effort: req.reasoning_effort }; // "low" | "medium" | "high" | "minimal"
     }
     if (req.tools?.length) {
+      // Responses API uses flat structure with type at top level
       body.tools = req.tools.map(t => ({
         type: 'function',
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.parameters || { type: 'object', properties: {} }
-        }
+        name: t.name,
+        description: t.description || '',
+        parameters: t.parameters || { type: 'object', properties: {} }
       }));
+      // Debug logging
+      if (process.env.DEBUG_TOOLS) {
+        console.log(`[OpenAI Responses API] Sending ${body.tools.length} tools:`,
+          body.tools.map((t: any) => t.name).join(', '));
+      }
     }
     if (req.toolChoice) {
       body.tool_choice = req.toolChoice === 'auto' ? 'auto' :
@@ -122,18 +126,52 @@ export class OpenAIAdapter implements LLMAdapter {
       };
     }
 
+    if (process.env.DEBUG_TOOLS) {
+      console.log('[OpenAI Responses API] Making request to:', `${this.base}/v1/responses`);
+      console.log('[OpenAI Responses API] Request body keys:', Object.keys(body).join(', '));
+    }
+
     const r = await fetch(`${this.base}/v1/responses`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
 
+    if (process.env.DEBUG_TOOLS) {
+      console.log('[OpenAI Responses API] Response status:', r.status, r.statusText);
+    }
+
     if (!r.ok) {
       const errTxt = await r.text().catch(()=>'');
+      if (process.env.DEBUG_TOOLS) {
+        console.log('[OpenAI Responses API] Error response:', errTxt);
+      }
       throw new Error(`OpenAI ${r.status} ${r.statusText}: ${errTxt}`);
     }
 
     const j: any = await r.json();
+
+    // Debug: Log raw response
+    if (process.env.DEBUG_TOOLS) {
+      console.log('[OpenAI Responses API] Response status:', r.status);
+      console.log('[OpenAI Responses API] Response keys:', Object.keys(j).join(', '));
+      if (j.output) {
+        console.log('[OpenAI Responses API] Output length:', j.output?.length);
+        if (j.output[0]) {
+          console.log('[OpenAI Responses API] Output[0] keys:', Object.keys(j.output[0]).join(', '));
+          console.log('[OpenAI Responses API] Output[0].type:', j.output[0].type);
+          console.log('[OpenAI Responses API] Output[0].name:', j.output[0].name);
+          if (j.output[0].content) {
+            console.log('[OpenAI Responses API] Output[0].content length:', j.output[0].content?.length);
+            if (Array.isArray(j.output[0].content)) {
+              console.log('[OpenAI Responses API] Content types:',
+                j.output[0].content.map((c: any) => c.type).join(', '));
+            }
+          }
+        }
+      }
+      if (j.choices) console.log('[OpenAI Responses API] Choices length:', j.choices?.length);
+    }
 
     // --- Robust text aggregation across Responses API shapes ---
     function collectText(resp: any): string {
@@ -184,12 +222,72 @@ export class OpenAIAdapter implements LLMAdapter {
 
     const text = collectText(j);
 
+    // Extract tool calls from Responses API
+    const toolCalls: Array<{ name: string; arguments: any }> = [];
+    
+    // Debug logging
+    if (process.env.DEBUG_TOOLS) {
+      console.log('[OpenAI Responses API] Raw response structure:', {
+        hasOutput: !!j?.output,
+        hasChoices: !!j?.choices,
+        hasMessage: !!j?.message,
+        outputLength: Array.isArray(j?.output) ? j.output.length : 0,
+        firstChoice: j?.choices?.[0] ? 'present' : 'absent'
+      });
+    }
+    
+    // Responses API returns tool calls directly in the output array
+    // Each tool call has: { id, type, status, arguments, call_id, name }
+    if (Array.isArray(j?.output)) {
+      for (const item of j.output) {
+        // Direct tool call format (Responses API uses 'function_call' type)
+        if (item?.name && (item?.type === 'function_call' || item?.type === 'function')) {
+          toolCalls.push({
+            name: item.name,
+            arguments: typeof item.arguments === 'string'
+              ? JSON.parse(item.arguments)
+              : item.arguments || {}
+          });
+        }
+        // Nested content format
+        else if (item?.content && Array.isArray(item.content)) {
+          for (const contentItem of item.content) {
+            if ((contentItem?.type === 'tool_use' || contentItem?.type === 'function') && contentItem?.name) {
+              toolCalls.push({
+                name: contentItem.name,
+                arguments: contentItem.input || (typeof contentItem.arguments === 'string'
+                  ? JSON.parse(contentItem.arguments)
+                  : contentItem.arguments) || {}
+              });
+            }
+          }
+        }
+      }
+    }
+    
+    // Fallback: Check for tool_calls in Chat Completions format
+    if (Array.isArray(j?.choices?.[0]?.message?.tool_calls)) {
+      for (const tc of j.choices[0].message.tool_calls) {
+        toolCalls.push({
+          name: tc.function?.name,
+          arguments: typeof tc.function?.arguments === 'string'
+            ? JSON.parse(tc.function.arguments)
+            : tc.function?.arguments || {}
+        });
+      }
+    }
+
+    if (process.env.DEBUG_TOOLS) {
+      console.log(`[OpenAI Responses API] Extracted ${toolCalls.length} tool calls:`,
+        toolCalls.map(tc => tc.name).join(', '));
+    }
+
     const usage = j?.usage ?? {};
     return {
       text,
       tokensIn: usage?.prompt_tokens ?? usage?.input_tokens ?? 0,
       tokensOut: usage?.completion_tokens ?? usage?.output_tokens ?? 0,
-      toolCalls: [],
+      toolCalls,
       raw: j
     };
   }

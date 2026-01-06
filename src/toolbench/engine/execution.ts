@@ -204,11 +204,20 @@ export class ToolExecutionEngine {
     }
   }
 
-  formatToolsForLLM(): any[] {
+  formatToolsForLLM(provider?: string, modelId?: string, context?: any): any[] {
+    // If provider and modelId are provided, use enhanced formatting
+    if (provider && modelId) {
+      return toolRegistry.formatToolsForLLM(provider, modelId, context);
+    }
+
+    // Fallback to old format for backward compatibility
     return toolRegistry.getDefinitions().map(tool => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters
+      }
     }));
   }
 

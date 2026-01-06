@@ -140,13 +140,23 @@ export class ToolBenchmarkSession {
     while (this.context.currentTurn < this.context.maxTurns) {
       this.context.currentTurn++;
 
-      // Prepare LLM request
+      // Prepare LLM request with enhanced tool formatting
+      const toolContext = {
+        cwd: this.context.workingDir,
+        sandboxId: this.context.sandboxId,
+        isMultiRoot: false
+      };
+
       const request: ChatRequest = {
         model: this.model.name, // Use the actual model name
         messages: this.context.messages,
         temperature: 0.2,
         maxTokens: 2000,
-        tools: executionEngine.formatToolsForLLM(),
+        tools: executionEngine.formatToolsForLLM(
+          this.model.vendor,
+          this.model.name,
+          toolContext
+        ),
         toolChoice: 'auto'
       };
 
