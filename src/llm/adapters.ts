@@ -791,8 +791,8 @@ export class DeepSeekAdapter implements LLMAdapter {
       stream: req.stream ?? false
     };
 
-    // Add tools if provided (but note: deepseek-reasoner doesn't support tools)
-    if (req.tools?.length && req.model !== 'deepseek-reasoner') {
+    // Add tools if provided - DeepSeek reasoning models now support tool calling
+    if (req.tools?.length) {
       body.tools = req.tools.map(t => ({
         type: 'function',
         function: {
@@ -803,7 +803,7 @@ export class DeepSeekAdapter implements LLMAdapter {
       }));
     }
 
-    if (req.toolChoice && req.model !== 'deepseek-reasoner') {
+    if (req.toolChoice) {
       body.tool_choice = req.toolChoice;
     }
 
