@@ -70,7 +70,7 @@ const DEFAULT_CONFIG: ToolBenchmarkConfig = {
   runHardTasks: true,
   maxConcurrentSessions: 3, // Limit concurrent Docker containers
   skipRecentlyTested: true,
-  recentTestThresholdHours: 24
+  recentTestThresholdHours: 20 // FIXED: Must be less than 24h for daily runs to work (runs at 4:00 AM daily)
 };
 
 export async function runToolBenchmarks(config: Partial<ToolBenchmarkConfig> = {}): Promise<void> {

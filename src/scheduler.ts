@@ -344,18 +344,29 @@ export function startBenchmarkScheduler() {
   console.log(`⏰ Next deep run: ${nextDailyRun.toLocaleString('en-US', { timeZone: 'Europe/Berlin' })}`);
   console.log(`🏗️ Time until next deep: ${Math.ceil((nextDailyRun.getTime() - now.getTime()) / (1000 * 60 * 60))} hours`);
   
+  // Calculate next tool run (4 AM)
+  const nextToolRun = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 4, 0, 0, 0);
+  if (now.getHours() >= 4) {
+    nextToolRun.setDate(nextToolRun.getDate() + 1); // Tomorrow if already past 4 AM
+  }
+  console.log(`⏰ Next tool run: ${nextToolRun.toLocaleString('en-US', { timeZone: 'Europe/Berlin' })}`);
+  console.log(`🔧 Time until next tool: ${Math.ceil((nextToolRun.getTime() - now.getTime()) / (1000 * 60 * 60))} hours`);
+  
   // Set up debug timer
   setInterval(() => {
     const currentTime = new Date();
     console.log(`🕐 Scheduler status check at ${currentTime.toISOString()}`);
     console.log(`   - Hourly running: ${isRunning}`);
     console.log(`   - Deep running: ${isDeepRunning}`);
+    console.log(`   - Tool running: ${isToolRunning}`);
     console.log(`   - Health running: ${isHealthRunning}`);
     console.log(`   - Last hourly run: ${lastRunTime ? lastRunTime.toISOString() : 'Never'}`);
     console.log(`   - Last deep run: ${lastDeepRunTime ? lastDeepRunTime.toISOString() : 'Never'}`);
+    console.log(`   - Last tool run: ${lastToolRunTime ? lastToolRunTime.toISOString() : 'Never'}`);
     console.log(`   - Last health run: ${lastHealthRunTime ? lastHealthRunTime.toISOString() : 'Never'}`);
     console.log(`   - Hourly scheduler active: ${hourlyScheduledTask ? hourlyScheduledTask.getStatus() : 'Unknown'}`);
     console.log(`   - Daily scheduler active: ${dailyScheduledTask ? dailyScheduledTask.getStatus() : 'Unknown'}`);
+    console.log(`   - Tool scheduler active: ${toolScheduledTask ? toolScheduledTask.getStatus() : 'Unknown'}`);
     console.log(`   - Health scheduler active: ${healthScheduledTask ? healthScheduledTask.getStatus() : 'Unknown'}`);
   }, 5 * 60 * 1000);
   

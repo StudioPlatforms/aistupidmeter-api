@@ -4,10 +4,10 @@ import { models, scores, runs, metrics, tasks } from '../db/schema';
 import { eq, desc, and, gte, sql } from 'drizzle-orm';
 
 export default async function (fastify: FastifyInstance, opts: any) {
-  // Get all models
+  // Get all models (only whitelisted ones shown in rankings)
   fastify.get('/', async () => {
     try {
-      const allModels = await db.select().from(models);
+      const allModels = await db.select().from(models).where(eq(models.showInRankings, true));
       
       // Add "new" badge logic - models are "new" for 7 days
       const sevenDaysAgo = new Date();
@@ -615,6 +615,347 @@ export default async function (fastify: FastifyInstance, opts: any) {
         successRate: 0,
         averageCorrectness: 0,
         averageLatency: 0
+      };
+    }
+  });
+
+  // Get hour-of-day performance analysis (Pro feature)
+  fastify.get('/:id/hour-analysis', async (req: any, reply: any) => {
+    const modelId = parseInt(req.params.id);
+    const period = req.query?.period as string || '7d'; // 24h, 7d, 30d
+    const suite = req.query?.suite as string || 'hourly'; // hourly, deep, tooling
+    
+    // Validate modelId
+    if (isNaN(modelId) || modelId <= 0) {
+      reply.code(400);
+      return { error: 'Invalid model ID' };
+    }
+    
+    // Validate suite
+    const validSuites = ['hourly', 'deep', 'tooling'];
+    if (!validSuites.includes(suite)) {
+      reply.code(400);
+      return { error: 'Invalid suite. Must be: hourly, deep, or tooling' };
+    }
+    
+    try {
+      // Determine time threshold based on period
+      const now = new Date();
+      const days = period === '24h' ? 1 : period === '7d' ? 7 : period === '30d' ? 30 : 7;
+      const since = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+      const sinceStr = since.toISOString();
+      
+      console.log(`📊 Hour analysis for model ${modelId}, period ${period}, suite ${suite}`);
+      
+      // Score conversion helper
+      const convertScore = (raw: number): number => {
+        if (Math.abs(raw) < 1 && raw !== 0) {
+          return Math.max(0, Math.min(100, Math.round(50 - raw * 100)));
+        } else {
+          return Math.max(0, Math.min(100, Math.round(raw)));
+        }
+      };
+      
+      // TIMELINE MODE for 24h: Last 24 hourly buckets (chronological)
+      if (period === '24h') {
+        console.log(`⏱️  Timeline mode: Fetching last 24 hours of data`);
+        
+        // Anchor to current UTC hour boundary
+        const currentHourStart = new Date(Date.UTC(
+          now.getUTCFullYear(),
+          now.getUTCMonth(),
+          now.getUTCDate(),
+          now.getUTCHours(), 0, 0, 0
+        ));
+        
+        // Calculate 24 hours ago from current hour start
+        const startHourBoundary = new Date(currentHourStart.getTime() - 23 * 60 * 60 * 1000);
+        
+        console.log(`📍 Anchored to UTC hour boundaries: ${startHourBoundary.toISOString()} to ${currentHourStart.toISOString()}`);
+        
+        // Fetch raw rows from last 24 hours without hour-of-day grouping
+        const rawRows = await db
+          .select({
+            ts: scores.ts,
+            stupidScore: scores.stupidScore
+          })
+          .from(scores)
+          .where(and(
+            eq(scores.modelId, modelId),
+            eq(scores.suite, suite),
+            gte(scores.ts, startHourBoundary.toISOString()),
+            sql`${scores.stupidScore} >= 0`,
+            sql`${scores.stupidScore} IS NOT NULL`,
+            sql`${scores.ts} IS NOT NULL`
+          ))
+          .orderBy(scores.ts);
+        
+        console.log(`📊 Found ${rawRows.length} raw data points in last 24 hours`);
+        
+        // Bucket by UTC hour timestamp
+        const bucketMap = new Map<string, number[]>();
+        
+        for (const row of rawRows) {
+          if (!row.ts) continue; // Skip null timestamps
+          const d = new Date(row.ts);
+          const hourStart = new Date(Date.UTC(
+            d.getUTCFullYear(),
+            d.getUTCMonth(),
+            d.getUTCDate(),
+            d.getUTCHours(), 0, 0, 0
+          ));
+          const key = hourStart.toISOString();
+          const arr = bucketMap.get(key) ?? [];
+          arr.push(row.stupidScore);
+          bucketMap.set(key, arr);
+        }
+        
+        console.log(`🗂️  Grouped into ${bucketMap.size} hour buckets`);
+        
+        // Build EXACTLY 24 hourly buckets (anchored to hour boundaries)
+        // Start from 23 hours ago to current hour (inclusive)
+        const hourBuckets = [];
+        for (let i = 0; i < 24; i++) {
+          const hourStart = new Date(startHourBoundary.getTime() + i * 60 * 60 * 1000);
+          const key = hourStart.toISOString();
+          const vals = bucketMap.get(key) ?? [];
+          
+          const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+          const min = vals.length ? Math.min(...vals) : null;
+          const max = vals.length ? Math.max(...vals) : null;
+          
+          hourBuckets.push({
+            ts: key,
+            label: `${String(hourStart.getUTCHours()).padStart(2, '0')}:00`,
+            avg: avg !== null ? convertScore(avg) : null,
+            min: min !== null ? convertScore(min) : null,
+            max: max !== null ? convertScore(max) : null,
+            count: vals.length
+          });
+        }
+        
+        console.log(`✅ Returning ${hourBuckets.length} buckets (${hourBuckets.filter(b => b.count > 0).length} with data, ${hourBuckets.filter(b => b.count === 0).length} empty)`);
+        
+        // Calculate insights for timeline mode
+        const validBuckets = hourBuckets.filter(b => b.avg !== null);
+        
+        if (validBuckets.length === 0) {
+          return {
+            mode: 'timeline',
+            modelId,
+            period,
+            suite,
+            hours: hourBuckets,
+            insights: {
+              bestHour: null,
+              bestScore: null,
+              worstHour: null,
+              worstScore: null,
+              avgScore: null,
+              coverage: 0,
+              dataPoints: 0,
+              variance: 0,
+              recommendation: 'No data available for the last 24 hours. Benchmarks may not have run yet for this model and suite combination.'
+            }
+          };
+        }
+        
+        const bestBucket = validBuckets.reduce((best, current) =>
+          (current.avg! > best.avg!) ? current : best
+        );
+        
+        const worstBucket = validBuckets.reduce((worst, current) =>
+          (current.avg! < worst.avg!) ? current : worst
+        );
+        
+        const totalAvg = validBuckets.reduce((sum, b) => sum + b.avg!, 0) / validBuckets.length;
+        const totalDataPoints = validBuckets.reduce((sum, b) => sum + b.count, 0);
+        const coverage = (validBuckets.length / 24) * 100;
+        const variance = bestBucket.avg! - worstBucket.avg!;
+        
+        const suiteLabel = suite === 'hourly' ? 'speed tests' : suite === 'deep' ? 'reasoning tests' : 'tool calling tests';
+        
+        let recommendation: string;
+        if (coverage < 50) {
+          recommendation = `Limited data over the past 24 hours (${Math.round(coverage)}% coverage). For ${suiteLabel}, benchmarks may not have run during all hours yet. Wait for more data or check 7-day view.`;
+        } else if (variance > 10) {
+          recommendation = `Over the past 24 hours, performance peaked at ${bestBucket.label} UTC (score: ${bestBucket.avg!.toFixed(1)}) and dipped at ${worstBucket.label} UTC (score: ${worstBucket.avg!.toFixed(1)}). This ${variance.toFixed(1)}-point variance suggests time-of-day sensitivity. Monitor for pattern consistency.`;
+        } else if (variance > 5) {
+          recommendation = `Over the past 24 hours, performance shows moderate variation (${variance.toFixed(1)} points). Peak: ${bestBucket.label} UTC. This pattern needs more data to confirm consistency—check 7-day view.`;
+        } else {
+          recommendation = `Performance is remarkably consistent over the past 24 hours (variance: ${variance.toFixed(1)} points). Time-of-day has minimal impact on this model's ${suiteLabel} performance. Extend to 7-day view to confirm pattern stability.`;
+        }
+        
+        return {
+          mode: 'timeline',
+          modelId,
+          period,
+          suite,
+          hours: hourBuckets,
+          insights: {
+            bestHour: bestBucket.label,
+            bestScore: bestBucket.avg,
+            worstHour: worstBucket.label,
+            worstScore: worstBucket.avg,
+            avgScore: Math.round(totalAvg),
+            coverage: Math.round(coverage),
+            dataPoints: totalDataPoints,
+            variance: Math.round(variance),
+            recommendation
+          }
+        };
+      }
+      
+      // HOUR-OF-DAY MODE for 7d/30d: Aggregated by hour (0-23)
+      console.log(`📊 Hour-of-day mode: Aggregating across ${days} days`);
+      
+      const hourlyData = await db
+        .select({
+          hour: sql<number>`CAST(strftime('%H', ${scores.ts}) AS INTEGER)`,
+          avgScore: sql<number>`AVG(${scores.stupidScore})`,
+          minScore: sql<number>`MIN(${scores.stupidScore})`,
+          maxScore: sql<number>`MAX(${scores.stupidScore})`,
+          count: sql<number>`COUNT(*)`
+        })
+        .from(scores)
+        .where(and(
+          eq(scores.modelId, modelId),
+          eq(scores.suite, suite),
+          gte(scores.ts, sinceStr),
+          sql`${scores.stupidScore} >= 0`,
+          sql`${scores.stupidScore} IS NOT NULL`
+        ))
+        .groupBy(sql`CAST(strftime('%H', ${scores.ts}) AS INTEGER)`)
+        .orderBy(sql`CAST(strftime('%H', ${scores.ts}) AS INTEGER)`);
+      
+      // Create array with all 24 hours (fill missing hours with nulls)
+      const hourBuckets = Array.from({ length: 24 }, (_, hour) => {
+        const data = hourlyData.find(d => d.hour === hour);
+        
+        if (!data || data.count === 0) {
+          return {
+            hour,
+            avg: null,
+            min: null,
+            max: null,
+            count: 0
+          };
+        }
+        
+        return {
+          hour,
+          avg: convertScore(data.avgScore),
+          min: convertScore(data.minScore),
+          max: convertScore(data.maxScore),
+          count: data.count
+        };
+      });
+      
+      // Calculate insights
+      const validBuckets = hourBuckets.filter(b => b.avg !== null);
+      
+      if (validBuckets.length === 0) {
+        return {
+          modelId,
+          period,
+          suite,
+          hours: hourBuckets,
+          insights: {
+            bestHour: null,
+            bestScore: null,
+            worstHour: null,
+            worstScore: null,
+            avgScore: null,
+            coverage: 0,
+            dataPoints: 0,
+            variance: 0,
+            recommendation: 'No data available for this model and suite combination. Try selecting a different benchmark suite or time period.'
+          }
+        };
+      }
+      
+      const bestHour = validBuckets.reduce((best, current) =>
+        (current.avg! > best.avg!) ? current : best
+      );
+      
+      const worstHour = validBuckets.reduce((worst, current) =>
+        (current.avg! < worst.avg!) ? current : worst
+      );
+      
+      const totalAvg = validBuckets.reduce((sum, b) => sum + b.avg!, 0) / validBuckets.length;
+      const totalDataPoints = validBuckets.reduce((sum, b) => sum + b.count, 0);
+      const coverage = (validBuckets.length / 24) * 100;
+      const variance = bestHour.avg! - worstHour.avg!;
+      
+      // Generate period-aware recommendation
+      const periodLabel = period === '24h' ? 'the past 24 hours' : period === '7d' ? 'the past 7 days' : 'the past 30 days';
+      const suiteLabel = suite === 'hourly' ? 'speed tests' : suite === 'deep' ? 'reasoning tests' : 'tool calling tests';
+      
+      let recommendation: string;
+      
+      if (coverage < 50) {
+        // Low data coverage
+        if (period === '24h') {
+          recommendation = `Limited data over ${periodLabel}. For ${suiteLabel}, hourly benchmarks may not have run during all hours yet. Try viewing 7-day or 30-day periods for better coverage.`;
+        } else if (suite === 'deep') {
+          recommendation = `Reasoning tests run daily at 3:00 AM UTC, providing limited hour-of-day coverage. For comprehensive hourly patterns, use the Speed Tests suite which runs every hour.`;
+        } else if (suite === 'tooling') {
+          recommendation = `Tool calling tests run daily at 4:00 AM UTC, providing limited hour-of-day coverage. For comprehensive hourly patterns, use the Speed Tests suite which runs every hour.`;
+        } else {
+          recommendation = `Insufficient data coverage (${Math.round(coverage)}%) over ${periodLabel}. Consider using the Speed Tests suite for hourly data collection.`;
+        }
+      } else if (variance > 10) {
+        // Significant variance detected
+        const scoreDir = bestHour.avg! > 75 ? 'peak' : 'optimal';
+        if (period === '24h') {
+          recommendation = `Over ${periodLabel}, performance peaked at ${bestHour.hour}:00 UTC (score: ${bestHour.avg!.toFixed(1)}) and dipped at ${worstHour.hour}:00 UTC (score: ${worstHour.avg!.toFixed(1)}). This ${variance.toFixed(1)}-point variance suggests time-of-day sensitivity. Monitor for pattern consistency.`;
+        } else if (period === '7d') {
+          recommendation = `Weekly analysis shows ${scoreDir} performance consistently around ${bestHour.hour}:00 UTC (avg: ${bestHour.avg!.toFixed(1)}) and lower performance around ${worstHour.hour}:00 UTC (avg: ${worstHour.avg!.toFixed(1)}). Consider scheduling critical workloads during peak hours for +${variance.toFixed(1)} points.`;
+        } else { // 30d
+          recommendation = `Monthly trend analysis reveals ${scoreDir} performance at ${bestHour.hour}:00 UTC (${bestHour.avg!.toFixed(1)}) vs ${worstHour.hour}:00 UTC (${worstHour.avg!.toFixed(1)}). This ${variance.toFixed(1)}-point pattern is stable over ${periodLabel}, indicating reliable time-based scheduling opportunities.`;
+        }
+      } else if (variance > 5) {
+        // Moderate variance
+        if (period === '24h') {
+          recommendation = `Over ${periodLabel}, performance shows moderate variation (${variance.toFixed(1)} points). Peak: ${bestHour.hour}:00 UTC. This pattern needs more data to confirm consistency—check 7-day view.`;
+        } else {
+          recommendation = `Performance over ${periodLabel} shows moderate time-of-day variation (${variance.toFixed(1)} points). Best hour: ${bestHour.hour}:00 UTC (${bestHour.avg!.toFixed(1)}), worst: ${worstHour.hour}:00 UTC (${worstHour.avg!.toFixed(1)}). Pattern is noticeable but not critical for scheduling decisions.`;
+        }
+      } else {
+        // Low variance - consistent performance
+        if (period === '24h') {
+          recommendation = `Performance is remarkably consistent over ${periodLabel} (variance: ${variance.toFixed(1)} points). Time-of-day has minimal impact on this model's ${suiteLabel} performance. Extend to 7-day view to confirm pattern stability.`;
+        } else if (period === '7d') {
+          recommendation = `Seven-day analysis shows consistent performance across all hours (variance: ${variance.toFixed(1)} points, avg: ${totalAvg.toFixed(1)}). This model's ${suiteLabel} performance is time-independent—schedule workloads anytime without performance concerns.`;
+        } else { // 30d
+          recommendation = `Monthly analysis confirms highly stable performance (variance: only ${variance.toFixed(1)} points over ${totalDataPoints} tests). This model delivers consistent ${suiteLabel} results regardless of time-of-day. Excellent for predictable workload scheduling.`;
+        }
+      }
+      
+      return {
+        mode: 'hourOfDay',
+        modelId,
+        period,
+        suite,
+        hours: hourBuckets,
+        insights: {
+          bestHour: bestHour.hour,
+          bestScore: bestHour.avg,
+          worstHour: worstHour.hour,
+          worstScore: worstHour.avg,
+          avgScore: Math.round(totalAvg),
+          coverage: Math.round(coverage),
+          dataPoints: totalDataPoints,
+          variance: Math.round(variance),
+          recommendation
+        }
+      };
+    } catch (error) {
+      console.error('Error fetching hour analysis:', error);
+      reply.code(500);
+      return {
+        error: 'Internal server error while fetching hour analysis',
+        message: error instanceof Error ? error.message : 'Unknown error'
       };
     }
   });
