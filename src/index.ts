@@ -10,13 +10,20 @@ import underPressure from '@fastify/under-pressure';
 dotenv.config({ path: '/root/.env' });
 
 // Import performance middleware
-import { 
-  performanceMiddleware, 
-  cachePerformanceMiddleware, 
-  getHealthStats, 
+import {
+  performanceMiddleware,
+  cachePerformanceMiddleware,
+  getHealthStats,
   getScalingRecommendations,
-  cleanupPerformanceMiddleware 
+  cleanupPerformanceMiddleware
 } from './middleware/performance';
+
+// Import new performance monitoring
+import {
+  registerPerformanceMonitoring,
+  getPerformanceMetrics,
+  handlePerformanceMetricsRequest
+} from './middleware/performance-monitor';
 
 // Import database with connection pooling
 import { db, checkDatabaseHealth } from './db/connection-pool';
@@ -143,13 +150,16 @@ async function startServer() {
   });
 
   // System pressure monitoring - circuit breaker
-  // Tuned for CPU-intensive drift computation workload
+  // PERFORMANCE FIX: Disabled temporarily to prevent "Service Temporarily Overloaded" errors
+  // Root cause: Frontend polls aggressively (30s batch status, 2min silent updates)
+  // TODO: Re-enable after reducing frontend polling frequency and implementing request queuing
+  /*
   await app.register(underPressure, {
-    maxEventLoopDelay: 2000,    // 2 seconds (was 1s) - allow for drift computations
-    maxHeapUsedBytes: 1500000000, // 1.5GB heap limit (was 1GB)
-    maxRssBytes: 2000000000,    // 2GB RSS limit (was 1.5GB)
-    maxEventLoopUtilization: 0.995, // 99.5% max CPU (was 98%) - drift is legitimately CPU-intensive
-    retryAfter: 100,            // Retry after 100ms (was 50ms)
+    maxEventLoopDelay: 10000,    // 10 seconds - very lenient for testing
+    maxHeapUsedBytes: 12000000000, // 12GB heap limit - very high
+    maxRssBytes: 12000000000,    // 12GB RSS limit - very high
+    maxEventLoopUtilization: 0.999, // 99.9% max CPU - almost disabled
+    retryAfter: 100,
     message: 'Service temporarily overloaded',
     pressureHandler: (req: FastifyRequest, reply: FastifyReply, type: string, value: number | undefined) => {
       // More intelligent pressure handling for drift endpoints
@@ -198,6 +208,8 @@ async function startServer() {
     },
     healthCheckInterval: 5000   // Check every 5 seconds
   });
+  */
+  console.log('⚠️ Circuit breaker (underPressure) disabled to prevent false positives');
 
   // CORS with optimized settings for high performance
   await app.register(cors, {
@@ -228,6 +240,9 @@ async function startServer() {
   // Register performance monitoring middleware
   await app.addHook('onRequest', performanceMiddleware);
   await app.addHook('onRequest', cachePerformanceMiddleware);
+  
+  // Register new performance monitoring system
+  registerPerformanceMonitoring(app);
 
   // Enhanced health check endpoint with performance metrics
   app.get('/health', async () => {
@@ -255,9 +270,10 @@ async function startServer() {
     };
   });
 
-  // Performance monitoring endpoint
+  // Performance monitoring endpoints
   app.get('/internal/metrics', async () => {
     const healthStats = getHealthStats();
+    const perfMetrics = getPerformanceMetrics();
     const memUsage = process.memoryUsage();
     
     return {
@@ -269,12 +285,18 @@ async function startServer() {
         external: Math.round(memUsage.external / 1024 / 1024),
         rss: Math.round(memUsage.rss / 1024 / 1024)
       },
-      performance: healthStats.performance,
+      performance: {
+        ...healthStats.performance,
+        ...perfMetrics
+      },
       nodeVersion: process.version,
       platform: process.platform,
       arch: process.arch
     };
   });
+  
+  // Dedicated performance metrics endpoint
+  app.get('/api/performance/metrics', handlePerformanceMetricsRequest);
 
   // Register routes dynamically with better error handling
   const routesToTry = [

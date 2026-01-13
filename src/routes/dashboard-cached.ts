@@ -82,7 +82,10 @@ export default async function (fastify: FastifyInstance, opts: any) {
         success: true,
         cached: result.cached,
         data: {
-          modelScores: result.data,
+          // CRITICAL FIX: Extract modelScores array from nested structure
+          // result.data contains { modelScores: [...], meta: {...} }
+          // We need to pass the array directly, not the wrapper object
+          modelScores: result.data.modelScores || result.data,
           alerts: [], // TODO: Add alerts if needed
           globalIndex: null, // TODO: Add global index if needed
           degradations: analyticsData.degradations,

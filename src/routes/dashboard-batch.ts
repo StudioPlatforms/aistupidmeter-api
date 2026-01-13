@@ -1,308 +1,147 @@
 import { FastifyInstance } from 'fastify';
-import { db } from '../db/index';
-import { models, scores } from '../db/schema';
-import { eq, desc, sql, and, gte } from 'drizzle-orm';
-import { 
-  getSingleModelCombinedScore, 
-  getDateRangeFromPeriod, 
-  calculateStdDev, 
-  calculateZScore,
-  PeriodKey 
-} from '../lib/dashboard-compute';
+import { getModelHistory } from '../lib/model-scoring';
 
-// Optimized model scores fetch using existing patterns
-async function fetchModelScores(period: string, sortBy: string) {
-  try {
-    const allModels = await db.select().from(models);
-    const modelScores = [];
+/**
+ * PERFORMANCE OPTIMIZATION: Batch History API
+ * Replaces N+1 individual history requests with a single batched endpoint
+ * 
+ * Impact: Reduces 16+ HTTP requests to 1 request
+ * Expected: 50-70% reduction in load time
+ */
+export default async function (fastify: FastifyInstance) {
+  
+  /**
+   * Batch endpoint for fetching multiple model histories at once
+   * GET /api/dashboard/history/batch?modelIds=1,2,3,4&period=latest&sortBy=combined
+   */
+  fastify.get('/history/batch', async (request, reply) => {
+    const startTime = Date.now();
     
-    for (const model of allModels) {
-      // Skip unavailable models
-      const isUnavailable = model.version === 'unavailable' || 
-        (model.notes && model.notes.includes('Unavailable')) ||
-        (model.vendor === 'xai' && (!process.env.XAI_API_KEY || process.env.XAI_API_KEY === 'your_xai_key_here'));
-        
-      if (isUnavailable) {
-        modelScores.push({
-          id: model.id,
-          name: model.name,
-          displayName: model.displayName,
-          provider: model.vendor,
-          isNew: false,
-          currentScore: 'unavailable',
-          trend: 'unavailable',
-          status: 'unavailable',
-          lastUpdated: new Date(),
-          weeklyBest: 'unavailable',
-          weeklyWorst: 'unavailable',
-          unavailableReason: 'No API access',
-          history: []
-        });
-        continue;
-      }
-      
-      // Get period-appropriate scores
-      let periodScores;
-      if (period === 'latest') {
-        periodScores = await db
-          .select()
-          .from(scores)
-          .where(eq(scores.modelId, model.id))
-          .orderBy(desc(scores.ts))
-          .limit(50);
-      } else {
-        const periodStartDate = getDateRangeFromPeriod(period as 'latest' | '24h' | '7d' | '1m');
-        periodScores = await db
-          .select()
-          .from(scores)
-          .where(
-            and(
-              eq(scores.modelId, model.id),
-              gte(scores.ts, periodStartDate.toISOString())
-            )
-          )
-          .orderBy(desc(scores.ts));
-      }
-      
-      if (periodScores.length === 0) continue;
-      
-      // Get current score based on sortBy mode
-      let currentScore: number | 'unavailable' = 'unavailable';
-      
-      if (sortBy === 'combined') {
-        const combinedScore = await getSingleModelCombinedScore(model.id);
-        if (combinedScore !== null) {
-          currentScore = combinedScore;
-        }
-      } else {
-        // For other modes, use converted scores
-        const latestScore = periodScores[0];
-        if (latestScore.stupidScore !== null && 
-            latestScore.stupidScore !== -777 && 
-            latestScore.stupidScore !== -888 && 
-            latestScore.stupidScore !== -999) {
-          currentScore = Math.max(0, Math.min(100, Math.round(latestScore.stupidScore)));
-        }
-      }
-      
-      // Calculate trend
-      let trend = 'stable';
-      if (periodScores.length >= 2) {
-        const recent = periodScores[0];
-        const older = periodScores[Math.min(5, periodScores.length - 1)];
-        
-        if (recent.stupidScore !== null && older.stupidScore !== null) {
-          const diff = recent.stupidScore - older.stupidScore;
-          if (diff > 2) trend = 'up';
-          else if (diff < -2) trend = 'down';
-        }
-      }
-      
-      // Determine status
-      let status = 'unavailable';
-      if (typeof currentScore === 'number') {
-        if (currentScore >= 80) status = 'excellent';
-        else if (currentScore >= 65) status = 'good';
-        else if (currentScore >= 45) status = 'warning';
-        else status = 'critical';
-      }
-      
-      modelScores.push({
-        id: model.id,
-        name: model.name,
-        displayName: model.displayName,
-        provider: model.vendor,
-        isNew: false,
-        currentScore,
-        trend,
-        status,
-        lastUpdated: new Date(periodScores[0].ts || new Date()),
-        weeklyBest: currentScore,
-        weeklyWorst: currentScore,
-        unavailableReason: typeof currentScore === 'string' ? 'Insufficient data' : undefined,
-        history: periodScores.slice(0, 50).map(s => ({
-          timestamp: s.ts,
-          stupidScore: s.stupidScore,
-          currentScore: s.stupidScore
-        }))
-      });
-    }
-    
-    // Sort by current score (descending)
-    modelScores.sort((a, b) => {
-      const aScore = typeof a.currentScore === 'number' ? a.currentScore : -1;
-      const bScore = typeof b.currentScore === 'number' ? b.currentScore : -1;
-      return bScore - aScore;
-    });
-    
-    return modelScores;
-  } catch (error) {
-    console.error('Error fetching model scores:', error);
-    return [];
-  }
-}
-
-// Simple alerts fetch (placeholder)
-async function fetchAlerts() {
-  return [];
-}
-
-// Simple global index calculation
-async function fetchGlobalIndex() {
-  try {
-    const allModels = await db.select().from(models);
-    let totalScore = 0;
-    let modelCount = 0;
-    let performingWell = 0;
-    
-    console.log(`🔍 fetchGlobalIndex: Processing ${allModels.length} models`);
-    
-    for (const model of allModels) {
-      const combinedScore = await getSingleModelCombinedScore(model.id);
-      console.log(`🔍 Model ${model.name}: combinedScore = ${combinedScore}`);
-      
-      if (combinedScore !== null) {
-        totalScore += combinedScore;
-        modelCount++;
-        if (combinedScore >= 70) performingWell++;
-      }
-    }
-    
-    console.log(`🔍 fetchGlobalIndex results: modelCount=${modelCount}, totalScore=${totalScore}`);
-    
-    if (modelCount === 0) {
-      console.log('❌ fetchGlobalIndex: No valid model scores found, returning null');
-      return null;
-    }
-    
-    const globalScore = Math.round(totalScore / modelCount);
-    
-    console.log(`🔍 fetchGlobalIndex: Calculated globalScore = ${globalScore}`);
-    
-    return {
-      current: {
-        globalScore,
-        totalModels: modelCount,
-        performingWell
-      },
-      trend: 'stable',
-      history: []
-    };
-  } catch (error) {
-    console.error('Error calculating global index:', error);
-    return null;
-  }
-}
-
-// Use existing degradation logic
-async function fetchDegradations(period: string, sortBy: string) {
-  return [];
-}
-
-// Use existing recommendations logic  
-async function fetchRecommendations(period: string, sortBy: string) {
-  return {
-    bestForCode: null,
-    mostReliable: null,
-    fastestResponse: null,
-    avoidNow: []
-  };
-}
-
-// Simple transparency metrics
-async function fetchTransparencyMetrics(period: string) {
-  return {
-    summary: {
-      coverage: 85,
-      confidence: 92
-    }
-  };
-}
-
-// Simple provider reliability
-async function fetchProviderReliability(period: string) {
-  return [];
-}
-
-export default async function (fastify: FastifyInstance, opts: any) {
-  // Batch endpoint that combines multiple dashboard data sources
-  fastify.get('/dashboard-all', async (request) => {
     const { 
+      modelIds, 
       period = 'latest', 
-      sortBy = 'combined', 
-      analyticsPeriod = 'latest' 
+      sortBy = 'combined' 
     } = request.query as { 
+      modelIds?: string;
       period?: 'latest' | '24h' | '7d' | '1m';
-      sortBy?: 'combined' | 'reasoning' | 'speed' | 'price';
-      analyticsPeriod?: 'latest' | '24h' | '7d' | '1m';
+      sortBy?: 'combined' | 'reasoning' | 'speed' | '7axis' | 'tooling' | 'price';
     };
-
-    try {
-      console.log(`🔄 Fetching fresh composite dashboard data for ${period}/${sortBy}/${analyticsPeriod}`);
-
-      // Parallel fetch all required data
-      const [
-        modelScores,
-        alerts,
-        globalIndex,
-        degradations,
-        recommendations,
-        transparencyMetrics,
-        providerReliability
-      ] = await Promise.allSettled([
-        fetchModelScores(period, sortBy),
-        fetchAlerts(),
-        fetchGlobalIndex(),
-        fetchDegradations(analyticsPeriod, sortBy),
-        fetchRecommendations(analyticsPeriod, sortBy),
-        fetchTransparencyMetrics(analyticsPeriod),
-        fetchProviderReliability(analyticsPeriod)
-      ]);
-
-      // Debug Promise.allSettled results
-      console.log('🔍 Promise results status:', {
-        modelScores: modelScores.status,
-        alerts: alerts.status,
-        globalIndex: globalIndex.status,
-        degradations: degradations.status,
-        recommendations: recommendations.status,
-        transparencyMetrics: transparencyMetrics.status,
-        providerReliability: providerReliability.status
+    
+    // Validate modelIds parameter
+    if (!modelIds || typeof modelIds !== 'string') {
+      return reply.code(400).send({
+        success: false,
+        error: 'Missing or invalid modelIds parameter. Expected comma-separated list of model IDs.',
+        example: '/api/dashboard/history/batch?modelIds=1,2,3&period=latest&sortBy=combined'
       });
-
-      // Log any errors
-      if (modelScores.status === 'rejected') console.error('❌ modelScores error:', modelScores.reason);
-      if (globalIndex.status === 'rejected') console.error('❌ globalIndex error:', globalIndex.reason);
-      if (alerts.status === 'rejected') console.error('❌ alerts error:', alerts.reason);
-      if (degradations.status === 'rejected') console.error('❌ degradations error:', degradations.reason);
-      if (recommendations.status === 'rejected') console.error('❌ recommendations error:', recommendations.reason);
-      if (transparencyMetrics.status === 'rejected') console.error('❌ transparencyMetrics error:', transparencyMetrics.reason);
-      if (providerReliability.status === 'rejected') console.error('❌ providerReliability error:', providerReliability.reason);
-
-      // Compile results
-      const compositeData = {
-        modelScores: modelScores.status === 'fulfilled' ? modelScores.value : [],
-        alerts: alerts.status === 'fulfilled' ? alerts.value : [],
-        globalIndex: globalIndex.status === 'fulfilled' ? globalIndex.value : null,
-        degradations: degradations.status === 'fulfilled' ? degradations.value : [],
-        recommendations: recommendations.status === 'fulfilled' ? recommendations.value : null,
-        transparencyMetrics: transparencyMetrics.status === 'fulfilled' ? transparencyMetrics.value : null,
-        providerReliability: providerReliability.status === 'fulfilled' ? providerReliability.value : []
-      };
-
+    }
+    
+    try {
+      // Parse model IDs
+      const ids = modelIds.split(',')
+        .map(id => parseInt(id.trim(), 10))
+        .filter(id => !isNaN(id) && id > 0);
+      
+      if (ids.length === 0) {
+        return reply.code(400).send({
+          success: false,
+          error: 'No valid model IDs provided',
+          received: modelIds
+        });
+      }
+      
+      // Limit to prevent abuse
+      if (ids.length > 100) {
+        return reply.code(400).send({
+          success: false,
+          error: 'Too many model IDs requested. Maximum: 100',
+          requested: ids.length
+        });
+      }
+      
+      console.log(`📦 Batch history request: ${ids.length} models (${period}/${sortBy})`);
+      
+      // PARALLEL fetch all histories
+      const historyPromises = ids.map(async (id) => {
+        try {
+          const history = await getModelHistory(id, period, sortBy);
+          return { id, history, success: true };
+        } catch (error) {
+          console.error(`❌ Failed to fetch history for model ${id}:`, error);
+          return { id, history: [], success: false, error: String(error) };
+        }
+      });
+      
+      const results = await Promise.all(historyPromises);
+      
+      // Build response map: { "1": [...history], "2": [...history], ... }
+      const historyMap: Record<string, any[]> = {};
+      const errors: Record<string, string> = {};
+      
+      results.forEach(result => {
+        if (result.success) {
+          historyMap[result.id] = result.history;
+        } else {
+          historyMap[result.id] = [];
+          errors[result.id] = result.error || 'Unknown error';
+        }
+      });
+      
+      const duration = Date.now() - startTime;
+      const successCount = results.filter(r => r.success).length;
+      const successRate = (successCount / results.length) * 100;
+      
+      console.log(`✅ Batch history complete: ${successCount}/${results.length} succeeded (${Math.round(successRate)}%) in ${duration}ms`);
+      
+      // Set cache headers for CDN/browser caching
+      reply.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
+      reply.header('X-Response-Time', `${duration}ms`);
+      reply.header('X-Success-Rate', `${successRate.toFixed(1)}%`);
+      
       return {
         success: true,
-        cached: false,
-        data: compositeData
+        data: historyMap,
+        meta: {
+          requestedModels: ids.length,
+          successfulModels: successCount,
+          failedModels: results.length - successCount,
+          successRate: Math.round(successRate),
+          period,
+          sortBy,
+          duration,
+          errors: Object.keys(errors).length > 0 ? errors : undefined
+        }
       };
-
+      
     } catch (error) {
-      console.error('Error in dashboard-all endpoint:', error);
-      return {
+      console.error('❌ Batch history endpoint error:', error);
+      return reply.code(500).send({
         success: false,
         error: 'Internal server error',
         details: String(error)
-      };
+      });
     }
+  });
+  
+  /**
+   * Health check for batch endpoint
+   */
+  fastify.get('/history/batch/health', async () => {
+    return {
+      success: true,
+      endpoint: '/api/dashboard/history/batch',
+      status: 'operational',
+      features: {
+        batchFetching: true,
+        parallelProcessing: true,
+        errorRecovery: true,
+        caching: true
+      },
+      limits: {
+        maxModelsPerRequest: 100,
+        cacheMaxAge: 30,
+        staleWhileRevalidate: 60
+      }
+    };
   });
 }
