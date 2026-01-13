@@ -108,11 +108,11 @@ async function startServer() {
       if (request.url.startsWith('/api/drift/')) {
         return 240; // 4 requests per second for drift endpoints (240/minute) - cached responses are fast
       }
+      if (request.url.startsWith('/api/models/')) {
+        return 180; // 3 requests per second for models (180/minute)
+      }
       if (request.url.startsWith('/analytics/')) {
         return 240; // 4 requests per second for analytics (240/minute)
-      }
-      if (request.url.startsWith('/models/')) {
-        return 180; // 3 requests per second for models (180/minute)
       }
       if (request.url.startsWith('/visitors/stats')) {
         return 120; // 2 requests per second for visitor stats (120/minute)
@@ -309,7 +309,7 @@ async function startServer() {
     { name: 'drift', prefix: '/api/drift' }, // PHASE 2: Drift detection endpoints
     { name: 'health', prefix: '/providers' },
     { name: 'dashboard-cached', prefix: '/dashboard' },
-    { name: 'models', prefix: '/models' },
+    { name: 'models', prefix: '/api/models' }, // Models API at /api/models/* for nginx proxy compatibility
     { name: 'benchmark', prefix: '/benchmark' },
     { name: 'dashboard', prefix: '/dashboard' },
     { name: 'reference', prefix: '/reference' },
