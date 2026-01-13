@@ -37,14 +37,15 @@ function getModelPricing(modelName: string, provider: string): { input: number; 
   const name = modelName.toLowerCase();
   const prov = provider.toLowerCase();
   
-  // Updated pricing based on actual 2025 rates (USD per 1M tokens) - CORRECTED November 2025
+  // Latest verified pricing (January 2026) - USD per 1M tokens
   if (prov === 'openai') {
-    // GPT-5 family - CORRECTED PRICING
+    // GPT-5 family - Latest verified pricing
     if (name.includes('gpt-5-nano')) return { input: 0.05, output: 0.40 };
     if (name.includes('gpt-5-mini')) return { input: 0.25, output: 2.0 };
-    if (name.includes('gpt-5')) return { input: 1.25, output: 10.0 };
+    if (name.includes('gpt-5.2') || name.includes('gpt-5-2')) return { input: 1.75, output: 14.0 }; // GPT-5.2 standard API
+    if (name.includes('gpt-5')) return { input: 1.25, output: 10.0 }; // GPT-5.1 standard API
     // O-series models
-    if (name.includes('o3-pro')) return { input: 60, output: 240 };  
+    if (name.includes('o3-pro')) return { input: 60, output: 240 };
     if (name.includes('o3-mini')) return { input: 3.5, output: 14 };
     if (name.includes('o3')) return { input: 15, output: 60 };
     // GPT-4o family
@@ -54,8 +55,12 @@ function getModelPricing(modelName: string, provider: string): { input: number; 
   }
   
   if (prov === 'anthropic') {
-    if (name.includes('opus-4')) return { input: 8, output: 40 };
-    if (name.includes('sonnet-4')) return { input: 3, output: 15 };
+    // Claude 4 series - Latest verified pricing (Opus 4.5: $5/$25 reduced from $15/$75)
+    if (name.includes('opus-4.5') || name.includes('opus-4-5')) return { input: 5, output: 25 };
+    if (name.includes('opus-4')) return { input: 5, output: 25 }; // Updated Opus 4.5 pricing
+    // Claude Sonnet 4.5: $3/$15 (confirmed)
+    if (name.includes('sonnet-4.5') || name.includes('sonnet-4-5')) return { input: 3, output: 15 };
+    if (name.includes('sonnet-4') || name.includes('3-7-sonnet')) return { input: 3, output: 15 };
     if (name.includes('haiku-4')) return { input: 0.25, output: 1.25 };
     if (name.includes('3-5-sonnet')) return { input: 3, output: 15 };
     if (name.includes('3-5-haiku')) return { input: 0.25, output: 1.25 };
@@ -63,20 +68,23 @@ function getModelPricing(modelName: string, provider: string): { input: number; 
   }
   
   if (prov === 'xai' || prov === 'x.ai') {
-    // Updated with official xAI pricing
+    // xAI / Grok - Verified $3/$15 per 1M tokens (mid-range tier)
     if (name.includes('grok-3') && name.includes('mini')) return { input: 0.30, output: 0.50 };
-    if (name.includes('grok-3')) return { input: 3, output: 15 }; // Grok 3 standard
+    if (name.includes('grok-3')) return { input: 3, output: 15 };
     if (name.includes('grok-4-0709')) return { input: 3, output: 15 };
-    if (name.includes('grok-code-fast')) return { input: 0.20, output: 1.50 };
-    if (name.includes('grok-4')) return { input: 3, output: 15 }; // Default Grok 4 pricing
+    if (name.includes('grok-4-latest')) return { input: 3, output: 15 };
+    if (name.includes('grok-code-fast')) return { input: 3, output: 15 }; // Updated from $0.20/$1.50
+    if (name.includes('grok-4')) return { input: 3, output: 15 };
     return { input: 3, output: 15 }; // Default xAI
   }
   
   if (prov === 'google') {
-    if (name.includes('2.5-pro')) return { input: 1.25, output: 10.00 }; // Fixed from 5 to 10.00
-    // FIXED: Corrected Gemini 2.5 Flash and Flash-Lite pricing based on latest Google AI pricing
+    // Gemini 3 series - Latest verified Vertex AI pricing
+    if (name.includes('gemini-3') && name.includes('pro')) return { input: 2, output: 12 }; // Gemini 3 Pro standard (≤200K)
+    // Gemini 2.5 series - Verified Vertex AI pricing
+    if (name.includes('2.5-pro')) return { input: 1.25, output: 10.00 };
     if (name.includes('2.5-flash-lite')) return { input: 0.10, output: 0.40 };
-    if (name.includes('2.5-flash')) return { input: 0.30, output: 2.50 };
+    if (name.includes('2.5-flash')) return { input: 0.30, output: 2.50 }; // Verified Vertex AI
     if (name.includes('1.5-pro')) return { input: 1.25, output: 5 };
     if (name.includes('1.5-flash')) return { input: 0.075, output: 0.3 };
     return { input: 1, output: 3 }; // Default Google
