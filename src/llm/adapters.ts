@@ -966,7 +966,12 @@ export class GLMAdapter implements LLMAdapter {
   
   async listModels() {
     // GLM doesn't have a models endpoint, return known models
-    return ['glm-4.6'];
+    return [
+      'glm-4.6',
+      'glm-4.7',           // Latest flagship model (Jan 2026) with enhanced coding capabilities
+      'glm-4.7-flash',     // Fast variant with smaller size but powerful
+      'glm-4.7-flashx'     // Ultra-fast variant
+    ];
   }
   
   async chat(req: ChatRequest): Promise<ChatResponse> {
@@ -978,8 +983,8 @@ export class GLMAdapter implements LLMAdapter {
       stream: req.stream ?? false
     };
 
-    // Enable thinking mode for GLM-4.6 reasoning capabilities (as per docs)
-    if (req.model === 'glm-4.6') {
+    // Enable thinking mode for GLM-4.6/4.7 reasoning capabilities (as per docs)
+    if (req.model === 'glm-4.6' || req.model.startsWith('glm-4.7')) {
       body.thinking = { type: 'enabled' };
     }
 
