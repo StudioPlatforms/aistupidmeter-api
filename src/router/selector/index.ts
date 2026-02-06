@@ -30,6 +30,7 @@ const MODEL_COSTS = {
   'claude-3-5-haiku-20241022': { input: 0.00025, output: 0.001 },
   'claude-3-5-sonnet-20241022': { input: 0.003, output: 0.015 },
   'claude-opus-4-1-20250805': { input: 0.015, output: 0.075 },
+  'claude-opus-4-6': { input: 0.015, output: 0.075 },
   
   // Google
   'gemini-1.5-flash': { input: 0.000075, output: 0.0003 },

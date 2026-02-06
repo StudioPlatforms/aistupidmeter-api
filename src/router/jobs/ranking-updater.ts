@@ -20,6 +20,7 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   'claude-sonnet-4-5-20250929': { input: 0.003, output: 0.015 },
   'claude-opus-4-20250514': { input: 0.015, output: 0.075 },
   'claude-opus-4-1-20250805': { input: 0.015, output: 0.075 },
+  'claude-opus-4-6': { input: 0.015, output: 0.075 },
   'claude-3-5-sonnet': { input: 0.003, output: 0.015 },
   'claude-3-5-haiku': { input: 0.0008, output: 0.004 },
   
@@ -55,7 +56,7 @@ function supportsToolCalling(modelName: string): boolean {
   // Most modern models support tool calling
   const toolCallingModels = [
     'gpt-4o', 'gpt-5-codex', 'o1', 'o1-mini',
-    'claude-sonnet-4', 'claude-opus-4', 'claude-3-5-sonnet',
+    'claude-sonnet-4', 'claude-opus-4', 'claude-opus-4-6', 'claude-3-5-sonnet',
     'grok-4-latest', 'grok-2-latest',
     'gemini-2.5-pro', 'gemini-1.5-pro'
   ];

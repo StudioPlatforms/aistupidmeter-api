@@ -16,6 +16,7 @@ export async function seed() {
     { name: 'claude-opus-4-20250514', vendor: 'anthropic', version: '2025-05-14', notes: 'Claude Opus 4' },
     { name: 'claude-sonnet-4-20250514', vendor: 'anthropic', version: '2025-05-14', notes: 'Claude Sonnet 4' },
     { name: 'claude-sonnet-4-5-20250929', vendor: 'anthropic', version: '2025-09-29', notes: 'Claude Sonnet 4.5' },
+    { name: 'claude-opus-4-6', vendor: 'anthropic', version: '2026-02-06', notes: 'Claude Opus 4.6 latest flagship' },
     
     // xAI - Latest Grok models
     { name: 'grok-4', vendor: 'xai', version: '2025-01-10', notes: 'Grok 4 flagship reasoning model' },

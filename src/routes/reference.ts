@@ -26,6 +26,7 @@ const REFERENCE_MODELS = [
   { provider: 'anthropic' as Provider, model: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5' },
   { provider: 'anthropic' as Provider, model: 'claude-opus-4-20250514', name: 'Claude Opus 4' },
   { provider: 'anthropic' as Provider, model: 'claude-opus-4-1-20250805', name: 'Claude Opus 4.1' },
+  { provider: 'anthropic' as Provider, model: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
 
   // xAI - Latest Grok family
   { provider: 'xai' as Provider, model: 'grok-4', name: 'Grok 4' },

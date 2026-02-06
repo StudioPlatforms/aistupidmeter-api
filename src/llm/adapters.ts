@@ -541,7 +541,8 @@ export class AnthropicAdapter implements LLMAdapter {
         'claude-opus-4-20250514',
         'claude-opus-4-1-20250805',
         'claude-opus-4-1',
-        'claude-opus-4-5-20251101'   // New flagship model - November 2025
+        'claude-opus-4-5-20251101',  // Flagship model - November 2025
+        'claude-opus-4-6'            // New flagship model - February 2026
       ];
     }
   }

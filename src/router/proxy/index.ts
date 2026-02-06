@@ -113,6 +113,7 @@ function estimateCost(provider: string, model: string, tokensIn: number, tokensO
     'anthropic': {
       'claude-sonnet-4': { input: 0.003, output: 0.015 },
       'claude-opus-4': { input: 0.015, output: 0.075 },
+      'claude-opus-4-6': { input: 0.015, output: 0.075 },
     },
     'xai': {
       'grok-4-latest': { input: 0.002, output: 0.01 },
