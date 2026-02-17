@@ -7,31 +7,40 @@ import { eq, desc, and, sql } from 'drizzle-orm';
  * Model pricing data (per 1k tokens)
  * Updated periodically from provider pricing pages
  */
+// OFFICIAL VERIFIED pricing per 1k tokens (Feb 17, 2026)
 const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   // OpenAI
   'gpt-4o': { input: 0.0025, output: 0.01 },
   'gpt-4o-mini': { input: 0.00015, output: 0.0006 },
-  'gpt-5-codex': { input: 0.005, output: 0.015 },
+  'gpt-5': { input: 0.00125, output: 0.01 },
+  'gpt-5.1': { input: 0.00125, output: 0.01 },
+  'gpt-5.2': { input: 0.00175, output: 0.014 },
+  'gpt-5-codex': { input: 0.00125, output: 0.01 },
   'o1': { input: 0.015, output: 0.06 },
   'o1-mini': { input: 0.003, output: 0.012 },
+  'o3': { input: 0.015, output: 0.06 },
+  'o3-mini': { input: 0.0035, output: 0.014 },
   
   // Anthropic
   'claude-sonnet-4-20250514': { input: 0.003, output: 0.015 },
   'claude-sonnet-4-5-20250929': { input: 0.003, output: 0.015 },
-  'claude-opus-4-20250514': { input: 0.015, output: 0.075 },
-  'claude-opus-4-1-20250805': { input: 0.015, output: 0.075 },
-  'claude-opus-4-6': { input: 0.015, output: 0.075 },
+  'claude-opus-4-20250514': { input: 0.005, output: 0.025 },
+  'claude-opus-4-5-20251101': { input: 0.005, output: 0.025 },
+  'claude-opus-4-1-20250805': { input: 0.015, output: 0.075 }, // Legacy
+  'claude-opus-4-6': { input: 0.005, output: 0.025 },
   'claude-3-5-sonnet': { input: 0.003, output: 0.015 },
-  'claude-3-5-haiku': { input: 0.0008, output: 0.004 },
+  'claude-3-5-haiku': { input: 0.00025, output: 0.00125 },
+  'claude-3-7-sonnet-20250219': { input: 0.003, output: 0.015 },
   
   // XAI
-  'grok-4-latest': { input: 0.002, output: 0.01 },
+  'grok-4-latest': { input: 0.003, output: 0.015 },
+  'grok-4-0709': { input: 0.003, output: 0.015 },
   'grok-2-latest': { input: 0.001, output: 0.005 },
-  'grok-code-fast-1': { input: 0.001, output: 0.005 },
+  'grok-code-fast-1': { input: 0.0002, output: 0.0015 },
   
   // Google
-  'gemini-2.5-pro': { input: 0.00125, output: 0.005 },
-  'gemini-2.5-flash': { input: 0.000075, output: 0.0003 },
+  'gemini-2.5-pro': { input: 0.00125, output: 0.01 },
+  'gemini-2.5-flash': { input: 0.0003, output: 0.0025 },
   'gemini-1.5-pro': { input: 0.00125, output: 0.005 },
   'gemini-1.5-flash': { input: 0.000075, output: 0.0003 },
 };

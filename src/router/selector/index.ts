@@ -9,36 +9,47 @@ const rankingsCache = new Map<string, { data: any[]; timestamp: number }>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // Cost data per provider (per 1k tokens)
+// OFFICIAL VERIFIED pricing per 1k tokens (Feb 17, 2026)
 const PROVIDER_COSTS = {
-  openai: { input: 0.03, output: 0.06 },     // GPT-4 average
-  anthropic: { input: 0.03, output: 0.15 },  // Claude average
-  google: { input: 0.0125, output: 0.0375 }, // Gemini average
-  xai: { input: 0.002, output: 0.002 },      // Grok average
-  glm: { input: 0.00055, output: 0.00219 },  // GLM average
-  deepseek: { input: 0.00055, output: 0.00219 }, // DeepSeek average
-  kimi: { input: 0.00015, output: 0.0025 }   // Kimi average
+  openai: { input: 0.00125, output: 0.01 },   // GPT-5.1 average
+  anthropic: { input: 0.003, output: 0.015 }, // Sonnet 4 average
+  google: { input: 0.00125, output: 0.01 },   // Gemini 2.5 Pro average
+  xai: { input: 0.003, output: 0.015 },       // Grok 4 average
+  glm: { input: 0.0006, output: 0.0022 },     // GLM-4 average
+  deepseek: { input: 0.00028, output: 0.00042 }, // DeepSeek average
+  kimi: { input: 0.0006, output: 0.0025 }     // Kimi K2 average
 } as const;
 
-// Model-specific cost overrides (per 1k tokens)
+// Model-specific cost overrides (per 1k tokens) - OFFICIAL VERIFIED Feb 17, 2026
 const MODEL_COSTS = {
   // OpenAI
   'gpt-4o-mini': { input: 0.00015, output: 0.0006 },
   'gpt-4o': { input: 0.0025, output: 0.01 },
-  'gpt-5-codex': { input: 0.005, output: 0.015 },
+  'gpt-5': { input: 0.00125, output: 0.01 },
+  'gpt-5.1': { input: 0.00125, output: 0.01 },
+  'gpt-5.2': { input: 0.00175, output: 0.014 },
+  'gpt-5-codex': { input: 0.00125, output: 0.01 },
   
   // Anthropic
-  'claude-3-5-haiku-20241022': { input: 0.00025, output: 0.001 },
+  'claude-3-5-haiku-20241022': { input: 0.00025, output: 0.00125 },
   'claude-3-5-sonnet-20241022': { input: 0.003, output: 0.015 },
-  'claude-opus-4-1-20250805': { input: 0.015, output: 0.075 },
-  'claude-opus-4-6': { input: 0.015, output: 0.075 },
+  'claude-opus-4-1-20250805': { input: 0.015, output: 0.075 }, // Legacy
+  'claude-opus-4-20250514': { input: 0.005, output: 0.025 },
+  'claude-opus-4-5-20251101': { input: 0.005, output: 0.025 },
+  'claude-opus-4-6': { input: 0.005, output: 0.025 },
+  'claude-sonnet-4-20250514': { input: 0.003, output: 0.015 },
   
   // Google
   'gemini-1.5-flash': { input: 0.000075, output: 0.0003 },
-  'gemini-2.5-pro': { input: 0.00125, output: 0.005 },
+  'gemini-1.5-pro': { input: 0.00125, output: 0.005 },
+  'gemini-2.5-pro': { input: 0.00125, output: 0.01 },
+  'gemini-2.5-flash': { input: 0.0003, output: 0.0025 },
   
   // xAI
   'grok-2-latest': { input: 0.001, output: 0.005 },
-  'grok-4-latest': { input: 0.002, output: 0.01 }
+  'grok-4-latest': { input: 0.003, output: 0.015 },
+  'grok-4-0709': { input: 0.003, output: 0.015 },
+  'grok-code-fast-1': { input: 0.0002, output: 0.0015 }
 } as const;
 
 interface ModelRanking {

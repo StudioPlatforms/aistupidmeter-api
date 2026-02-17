@@ -104,36 +104,52 @@ function createAdapter(provider: string, apiKey: string) {
  * Estimate cost per 1k tokens
  */
 function estimateCost(provider: string, model: string, tokensIn: number, tokensOut: number): number {
+  // OFFICIAL VERIFIED pricing per 1k tokens (Feb 17, 2026)
   const PRICING: Record<string, Record<string, { input: number; output: number }>> = {
     'openai': {
       'gpt-4o': { input: 0.0025, output: 0.01 },
       'gpt-4o-mini': { input: 0.00015, output: 0.0006 },
-      'gpt-5-codex': { input: 0.005, output: 0.015 },
+      'gpt-5': { input: 0.00125, output: 0.01 },
+      'gpt-5.1': { input: 0.00125, output: 0.01 },
+      'gpt-5.2': { input: 0.00175, output: 0.014 },
+      'gpt-5-codex': { input: 0.00125, output: 0.01 },
     },
     'anthropic': {
       'claude-sonnet-4': { input: 0.003, output: 0.015 },
-      'claude-opus-4': { input: 0.015, output: 0.075 },
-      'claude-opus-4-6': { input: 0.015, output: 0.075 },
+      'claude-opus-4': { input: 0.005, output: 0.025 }, // Current pricing
+      'claude-opus-4-1': { input: 0.015, output: 0.075 }, // Legacy
+      'claude-opus-4-5': { input: 0.005, output: 0.025 },
+      'claude-opus-4-6': { input: 0.005, output: 0.025 },
     },
     'xai': {
-      'grok-4-latest': { input: 0.002, output: 0.01 },
+      'grok-4-latest': { input: 0.003, output: 0.015 },
+      'grok-4-0709': { input: 0.003, output: 0.015 },
       'grok-2-latest': { input: 0.001, output: 0.005 },
+      'grok-code-fast-1': { input: 0.0002, output: 0.0015 },
     },
     'google': {
-      'gemini-2.5-pro': { input: 0.00125, output: 0.005 },
-      'gemini-2.5-flash': { input: 0.000075, output: 0.0003 },
+      'gemini-2.5-pro': { input: 0.00125, output: 0.01 },
+      'gemini-2.5-flash': { input: 0.0003, output: 0.0025 },
+      'gemini-2.5-flash-lite': { input: 0.0001, output: 0.0004 },
+      'gemini-1.5-pro': { input: 0.00125, output: 0.005 },
+      'gemini-1.5-flash': { input: 0.000075, output: 0.0003 },
     },
     'glm': {
-      'glm-4-6': { input: 0.00055, output: 0.00219 },
+      'glm-4-6': { input: 0.0006, output: 0.0022 },
+      'glm-4.6': { input: 0.0006, output: 0.0022 },
+      'glm-4.7': { input: 0.0006, output: 0.0022 },
     },
     'deepseek': {
-      'deepseek-chat': { input: 0.00055, output: 0.00219 },
-      'deepseek-coder': { input: 0.00055, output: 0.00219 },
+      'deepseek-chat': { input: 0.00028, output: 0.00042 },
+      'deepseek-coder': { input: 0.00028, output: 0.00042 },
+      'deepseek-reasoner': { input: 0.00028, output: 0.00042 },
     },
     'kimi': {
-      'moonshot-v1-8k': { input: 0.00015, output: 0.0025 },
-      'moonshot-v1-32k': { input: 0.00015, output: 0.0025 },
-      'moonshot-v1-128k': { input: 0.00015, output: 0.0025 },
+      'kimi-k2-0905-preview': { input: 0.0006, output: 0.0025 },
+      'kimi-k2-turbo-preview': { input: 0.00115, output: 0.008 },
+      'moonshot-v1-8k': { input: 0.0006, output: 0.0025 },
+      'moonshot-v1-32k': { input: 0.0006, output: 0.0025 },
+      'moonshot-v1-128k': { input: 0.0006, output: 0.0025 },
     }
   };
   

@@ -214,33 +214,38 @@ async function benchmarkModelDeep(
 
 // Cost data per model (per 1M tokens)
 const MODEL_COSTS = {
-  // OpenAI - CORRECTED PRICING (November 2025)
+  // OpenAI - OFFICIAL VERIFIED Feb 17, 2026
   'gpt-4o-2024-11-20': { input: 2.50, output: 10.0 },
   'gpt-4o-mini': { input: 0.15, output: 0.60 },
   'gpt-5': { input: 1.25, output: 10.0 },
-  'gpt-5-auto': { input: 1.25, output: 10.0 },  // Router variant uses same pricing as base GPT-5
-  'gpt-5-2025-08-07': { input: 1.25, output: 10.0 },  // Standard GPT-5 pricing
+  'gpt-5-auto': { input: 1.25, output: 10.0 },
+  'gpt-5-2025-08-07': { input: 1.25, output: 10.0 },
   'gpt-5-mini': { input: 0.25, output: 2.0 },
   'gpt-5-nano': { input: 0.05, output: 0.40 },
+  'gpt-5.2': { input: 1.75, output: 14.0 },
+  'gpt-5.1-codex': { input: 1.25, output: 10.0 },
   
-  // Anthropic Claude
-  'claude-3-5-haiku-20241022': { input: 0.25, output: 1.0 },
+  // Anthropic Claude - OFFICIAL VERIFIED Feb 17, 2026
+  // Note: Opus 4.1 legacy $15/$75; Opus 4.5/4.6 current $5/$25
+  'claude-3-5-haiku-20241022': { input: 0.25, output: 1.25 },
   'claude-3-5-sonnet-20241022': { input: 3.0, output: 15.0 },
-  'claude-opus-4-1-20250805': { input: 15.0, output: 75.0 },
-  'claude-opus-4-20250514': { input: 15.0, output: 75.0 },
+  'claude-opus-4-1-20250805': { input: 15.0, output: 75.0 }, // Legacy pricing
+  'claude-opus-4-20250514': { input: 5.0, output: 25.0 }, // Current pricing
+  'claude-opus-4-5-20251101': { input: 5.0, output: 25.0 }, // Current pricing
   'claude-sonnet-4-20250514': { input: 3.0, output: 15.0 },
   'claude-sonnet-4-5-20250929': { input: 3.0, output: 15.0 },
-  'claude-opus-4-6': { input: 15.0, output: 75.0 },
-  'claude-3-7-sonnet-20250219': { input: 3.0, output: 15.0 },
+  'claude-opus-4-6': { input: 5.0, output: 25.0 }, // Current pricing
+  'claude-3-7-sonnet-20250219': { input: 3.0, output: 15.0 }, // Deprecated, retires 2026-02-19
   
-  // Google Gemini
-  'gemini-1.5-flash': { input: 0.15, output: 0.60 },
-  'gemini-1.5-pro': { input: 1.25, output: 10.0 },
-  'gemini-2.5-pro': { input: 1.25, output: 12.5 },
-  'gemini-2.5-flash': { input: 0.15, output: 0.60 },
+  // Google Gemini - OFFICIAL VERIFIED Feb 17, 2026
+  'gemini-1.5-flash': { input: 0.075, output: 0.30 },
+  'gemini-1.5-pro': { input: 1.25, output: 5.0 },
+  'gemini-2.5-pro': { input: 1.25, output: 10.0 },
+  'gemini-2.5-flash': { input: 0.30, output: 2.50 },
   'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
+  'gemini-3-pro-preview': { input: 2.0, output: 12.0 },
   
-  // xAI Grok (official pricing)
+  // xAI Grok - OFFICIAL VERIFIED Feb 17, 2026
   'grok-3-mini': { input: 0.30, output: 0.50 },
   'grok-3': { input: 3.0, output: 15.0 },
   'grok-4-latest': { input: 3.0, output: 15.0 },
