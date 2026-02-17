@@ -88,8 +88,9 @@ export function startBenchmarkScheduler() {
         }
       });
       
-      // Immediately release the cron lock to prevent blocking
-      isRunning = false;
+      // NOTE: Do NOT release isRunning here — the setImmediate callback
+      // owns the lock and releases it in its finally block.
+      // Releasing here caused race conditions allowing overlapping runs.
       
     } catch (error) {
       console.error(`❌ ${new Date().toISOString()} - 4-hourly benchmark setup failed:`, error);
@@ -139,8 +140,8 @@ export function startBenchmarkScheduler() {
         }
       });
       
-      // Immediately release the cron lock
-      isDeepRunning = false;
+      // NOTE: Do NOT release isDeepRunning here — the setImmediate callback
+      // owns the lock and releases it in its finally block.
       
     } catch (error) {
       console.error(`❌ ${new Date().toISOString()} - Daily deep benchmark setup failed:`, error);
@@ -190,8 +191,8 @@ export function startBenchmarkScheduler() {
         }
       });
       
-      // Immediately release the cron lock
-      isToolRunning = false;
+      // NOTE: Do NOT release isToolRunning here — the setImmediate callback
+      // owns the lock and releases it in its finally block.
       
     } catch (error) {
       console.error(`❌ ${new Date().toISOString()} - Daily tool benchmark setup failed:`, error);
@@ -236,6 +237,69 @@ export function startBenchmarkScheduler() {
             console.error(`❌ Drift computation failed:`, error);
           }
           
+          // PHASE 3: Provider correlation analysis
+          console.log(`🔗 Analyzing cross-provider correlations...`);
+          try {
+            const { analyzeProviderCorrelation, saveProviderIncident } = await import('./lib/provider-correlation');
+            const correlation = await analyzeProviderCorrelation();
+            for (const pc of correlation.providerCorrelations) {
+              if (pc.isProviderIncident) {
+                await saveProviderIncident(pc);
+                // Send webhook alert for provider incidents
+                try {
+                  const { alertProviderIncident } = await import('./lib/drift-alerts');
+                  await alertProviderIncident(
+                    pc.provider,
+                    pc.alertRate,
+                    pc.affectedModels.map(m => m.modelName),
+                    pc.severity === 'critical' ? 'critical' : 'warning',
+                    pc.recommendation
+                  );
+                } catch (alertErr) {
+                  console.warn(`⚠️ Provider alert delivery failed:`, alertErr);
+                }
+              }
+            }
+            console.log(`✅ Provider correlation: ${correlation.summary}`);
+          } catch (error) {
+            console.error(`❌ Provider correlation failed:`, error);
+          }
+          
+          // PHASE 3: Behavioral fingerprint drift detection (leading indicators)
+          console.log(`🔬 Computing behavioral fingerprints...`);
+          try {
+            const { computeAllBehavioralFingerprints } = await import('./lib/behavioral-fingerprint');
+            const fpResult = await computeAllBehavioralFingerprints();
+            if (fpResult.drifting > 0) {
+              console.log(`⚠️ Behavioral drift: ${fpResult.drifting}/${fpResult.total} models showing response characteristic changes`);
+            }
+          } catch (error) {
+            console.error(`❌ Behavioral fingerprint failed:`, error);
+          }
+          
+          // PHASE 3: Version tracking (correlate drift with API version changes)
+          console.log(`📋 Checking for version changes...`);
+          try {
+            const { detectVersionChanges } = await import('./lib/version-tracker');
+            const { db: database } = await import('./db');
+            const { models: modelsTable } = await import('./db/schema');
+            const { sql: sqlTag } = await import('drizzle-orm');
+            const allModels = await database.select().from(modelsTable).where(sqlTag`show_in_rankings = 1`);
+            let versionChanges = 0;
+            for (const model of allModels) {
+              const changes = await detectVersionChanges(model.id, 1); // Last 1 day
+              if (changes.length > 0) {
+                versionChanges += changes.length;
+                console.log(`📋 Version change detected: ${model.name} — ${changes[0].oldVersion} → ${changes[0].newVersion}`);
+              }
+            }
+            if (versionChanges > 0) {
+              console.log(`✅ Version tracking: ${versionChanges} version changes detected`);
+            }
+          } catch (error) {
+            console.error(`❌ Version tracking failed:`, error);
+          }
+          
           // Update router model rankings after canary benchmarks
           console.log(`🔄 Updating router model rankings...`);
           try {
@@ -254,8 +318,8 @@ export function startBenchmarkScheduler() {
         }
       });
       
-      // Immediately release the cron lock
-      isCanaryRunning = false;
+      // NOTE: Do NOT release isCanaryRunning here — the setImmediate callback
+      // owns the lock and releases it in its finally block.
       
     } catch (error) {
       console.error(`❌ ${new Date().toISOString()} - Hourly canary benchmark setup failed:`, error);

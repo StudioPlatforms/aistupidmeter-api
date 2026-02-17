@@ -6,7 +6,7 @@
 import { db } from '../db';
 import { scores, models, change_points } from '../db/schema';
 import { eq, desc, and, gte, sql } from 'drizzle-orm';
-import { calculateConfidenceInterval, calculateStdDev } from './statistical-tests';
+import { calculateConfidenceInterval, calculateStdDev, mannWhitneyU, welchTTest } from './statistical-tests';
 
 // ============================================================================
 // TYPE DEFINITIONS
@@ -79,6 +79,9 @@ export async function computeDriftSignature(modelId: number): Promise<DriftSigna
   const modelName = modelRecord[0].name;
   
   // Step 1: Get recent score history
+  // PHASE 1 FIX: Filter by suite to avoid mixing canary (binary 30/80) with real scores.
+  // Only use hourly, deep, and tooling scores for drift analysis.
+  // Also exclude synthetic scores (note contains 'SYNTHETIC' or is_synthetic flag).
   const twentyEightDaysAgo = new Date(Date.now() - 28 * 24 * 60 * 60 * 1000);
   const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
   
@@ -87,7 +90,9 @@ export async function computeDriftSignature(modelId: number): Promise<DriftSigna
     .from(scores)
     .where(and(
       eq(scores.modelId, modelId),
-      gte(scores.ts, twentyEightDaysAgo.toISOString())
+      gte(scores.ts, twentyEightDaysAgo.toISOString()),
+      sql`suite IN ('hourly', 'deep', 'tooling')`,
+      sql`(note IS NULL OR note NOT LIKE '%SYNTHETIC%')`
     ))
     .orderBy(desc(scores.ts))
     .limit(200); // Get enough data for analysis
@@ -127,14 +132,17 @@ export async function computeDriftSignature(modelId: number): Promise<DriftSigna
     .map(s => Math.max(0, Math.min(100, Math.round(s.stupidScore))));
   const variance24h = last24hScores.length >= 3 ? calculateStdDev(last24hScores) : 0;
   
-  // Step 6: Determine regime
-  const regime = determineRegime(currentScore, baselineScore, variance24h, ci);
+  // PHASE 2 FIX: Calculate historical standard deviation for adaptive thresholds
+  const historicalStdDev = scoreValues.length >= 5 ? calculateStdDev(scoreValues) : 5;
+  
+  // Step 6: Determine regime with ADAPTIVE thresholds based on model's own history
+  const regime = determineRegime(currentScore, baselineScore, variance24h, ci, historicalStdDev);
   
   // Step 7: Calculate Page-Hinkley CUSUM
   const pageHinkleyCUSUM = validScores[0]?.cusum || 0;
   
-  // Step 8: Determine drift status
-  const driftStatus = determineDriftStatus(regime, pageHinkleyCUSUM, variance24h);
+  // Step 8: Determine drift status with adaptive thresholds
+  const driftStatus = determineDriftStatus(regime, pageHinkleyCUSUM, variance24h, historicalStdDev);
   
   // Step 9: Find last significant change
   const lastChange = await findLastSignificantChange(modelId);
@@ -173,30 +181,40 @@ export async function computeDriftSignature(modelId: number): Promise<DriftSigna
 // ============================================================================
 
 /**
- * Determine stability regime based on metrics
+ * PHASE 2 FIX: Determine stability regime with ADAPTIVE per-model thresholds
+ *
+ * Instead of hardcoded thresholds (> 8 pts), thresholds scale with the model's
+ * historical variability. A model that typically varies ±2 pts should flag
+ * VOLATILE at ±5 pts, while one that typically varies ±10 pts should not.
  */
 function determineRegime(
   current: number,
   baseline: number,
   variance: number,
-  ci: any
+  ci: any,
+  historicalStdDev: number = 5
 ): 'STABLE' | 'VOLATILE' | 'DEGRADED' | 'RECOVERING' {
   const delta = baseline - current; // Positive = degraded, negative = improved
   const ciWidth = ci.upper - ci.lower;
   
+  // Adaptive thresholds based on model's historical standard deviation
+  const degradedDelta = Math.max(5, historicalStdDev * 2.5);   // 2.5σ below baseline
+  const volatileThreshold = Math.max(3, historicalStdDev * 2);  // 2σ above typical variance
+  const recoveringDelta = Math.max(3, historicalStdDev * 1.5);  // 1.5σ above baseline
+  const recoveringVariance = Math.max(4, historicalStdDev * 2); // Max variance for recovering
+  
   // DEGRADED: Score significantly below baseline and outside CI
-  if (delta > ciWidth && delta > 8) {
+  if (delta > ciWidth * 1.5 && delta > degradedDelta) {
     return 'DEGRADED';
   }
   
   // RECOVERING: Improving from degraded state (score above baseline)
-  if (delta < -5 && variance < 8) {
-    // Check if was previously degraded by looking at trend
+  if (delta < -recoveringDelta && variance < recoveringVariance) {
     return 'RECOVERING';
   }
   
-  // VOLATILE: High variance regardless of score
-  if (variance > 8) {
+  // VOLATILE: High variance relative to model's historical behavior
+  if (variance > volatileThreshold) {
     return 'VOLATILE';
   }
   
@@ -205,20 +223,26 @@ function determineRegime(
 }
 
 /**
- * Determine drift alert status
+ * PHASE 2 FIX: Determine drift alert status with adaptive thresholds
  */
 function determineDriftStatus(
   regime: string,
   cusum: number,
-  variance: number
+  variance: number,
+  historicalStdDev: number = 5
 ): 'NORMAL' | 'WARNING' | 'ALERT' {
+  // Adaptive CUSUM thresholds
+  const alertCusum = 0.10;
+  const warningCusum = 0.05;
+  const warningVariance = Math.max(4, historicalStdDev * 2);
+  
   // ALERT: Degraded or very high CUSUM
-  if (regime === 'DEGRADED' || cusum > 0.10) {
+  if (regime === 'DEGRADED' || cusum > alertCusum) {
     return 'ALERT';
   }
   
   // WARNING: Volatile or moderate CUSUM
-  if (regime === 'VOLATILE' || cusum > 0.05 || variance > 8) {
+  if (regime === 'VOLATILE' || cusum > warningCusum || variance > warningVariance) {
     return 'WARNING';
   }
   
@@ -352,26 +376,32 @@ function diagnoseIssue(
 // ============================================================================
 
 /**
- * Detect change-points in score history using sliding window + CI validation
- * Returns newly detected change-points (not already in database)
+ * PHASE 2 FIX: Multi-scale change-point detection
+ *
+ * Uses multiple window sizes (3, 5, 10) and requires detection at ≥2 scales
+ * to confirm. Also uses Mann-Whitney U test for proper non-parametric
+ * significance testing instead of simple CI overlap.
  */
 export async function detectChangePoints(modelId: number): Promise<ChangePoint[]> {
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   
+  // PHASE 1 FIX: Exclude canary and synthetic scores from change-point detection
   const recentScores = await db
     .select()
     .from(scores)
     .where(and(
       eq(scores.modelId, modelId),
-      gte(scores.ts, sevenDaysAgo.toISOString())
+      gte(scores.ts, sevenDaysAgo.toISOString()),
+      sql`suite IN ('hourly', 'deep', 'tooling')`,
+      sql`(note IS NULL OR note NOT LIKE '%SYNTHETIC%')`
     ))
     .orderBy(desc(scores.ts))
     .limit(100);
   
   if (recentScores.length < 10) return []; // Need minimum history
   
-  const validScores = recentScores.filter(s => 
-    s.stupidScore !== null && 
+  const validScores = recentScores.filter(s =>
+    s.stupidScore !== null &&
     s.stupidScore >= 0 &&
     s.stupidScore !== -777 &&
     s.stupidScore !== -888 &&
@@ -380,65 +410,97 @@ export async function detectChangePoints(modelId: number): Promise<ChangePoint[]
   
   if (validScores.length < 10) return [];
   
+  // Multi-scale detection: check at window sizes 3, 5, and 10
+  const windowSizes = [3, 5, 10];
+  const candidatePositions = new Map<number, { scales: number; bestDelta: number; bestSignificance: number }>();
+  
+  for (const windowSize of windowSizes) {
+    if (validScores.length < windowSize * 2) continue;
+    
+    for (let i = 0; i < validScores.length - windowSize * 2; i++) {
+      const beforeWindow = validScores.slice(i, i + windowSize);
+      const afterWindow = validScores.slice(i + windowSize, i + windowSize * 2);
+      
+      const beforeScoreVals = beforeWindow.map(s => Math.max(0, Math.min(100, Math.round(s.stupidScore))));
+      const afterScoreVals = afterWindow.map(s => Math.max(0, Math.min(100, Math.round(s.stupidScore))));
+      
+      const beforeAvg = beforeScoreVals.reduce((a, b) => a + b, 0) / beforeScoreVals.length;
+      const afterAvg = afterScoreVals.reduce((a, b) => a + b, 0) / afterScoreVals.length;
+      const delta = afterAvg - beforeAvg;
+      
+      // PHASE 2: Use Mann-Whitney U for non-parametric significance
+      const mwResult = mannWhitneyU(beforeScoreVals, afterScoreVals);
+      
+      // Also check CI overlap as secondary confirmation
+      const beforeCI = calculateConfidenceInterval(beforeScoreVals);
+      const afterCI = calculateConfidenceInterval(afterScoreVals);
+      const ciOverlap = !(beforeCI.lower > afterCI.upper || afterCI.lower > beforeCI.upper);
+      
+      // Significant if Mann-Whitney p < 0.05 AND delta > 5 points
+      const isSignificant = mwResult.significant && Math.abs(delta) > 5;
+      // Also flag if CI doesn't overlap and delta is large (catch what MW misses at small n)
+      const isSignificantCI = !ciOverlap && Math.abs(delta) > 8;
+      
+      if (isSignificant || isSignificantCI) {
+        const position = i + windowSize;
+        const existing = candidatePositions.get(position) || { scales: 0, bestDelta: 0, bestSignificance: 0 };
+        existing.scales += 1;
+        if (Math.abs(delta) > Math.abs(existing.bestDelta)) {
+          existing.bestDelta = delta;
+          existing.bestSignificance = mwResult.significant
+            ? Math.abs(mwResult.effectSize)
+            : Math.abs(delta) / Math.max(1, (beforeCI.upper - beforeCI.lower));
+        }
+        candidatePositions.set(position, existing);
+      }
+    }
+  }
+  
+  // Only keep change-points detected at ≥ 2 scales (reduces false positives)
   const newChangePoints: ChangePoint[] = [];
   
-  // Sliding window approach (window size = 5 scores)
-  const windowSize = 5;
-  for (let i = 0; i < validScores.length - windowSize * 2; i++) {
-    const beforeWindow = validScores.slice(i, i + windowSize);
-    const afterWindow = validScores.slice(i + windowSize, i + windowSize * 2);
+  // Pre-fetch existing change-points for deduplication
+  const existingChanges = await db
+    .select()
+    .from(change_points)
+    .where(eq(change_points.model_id, modelId))
+    .orderBy(desc(change_points.detected_at))
+    .limit(20);
+  
+  for (const [position, candidate] of candidatePositions.entries()) {
+    // Require detection at multiple scales for confidence (unless very strong signal)
+    if (candidate.scales < 2 && Math.abs(candidate.bestDelta) < 15) continue;
     
-    const beforeScoreVals = beforeWindow.map(s => Math.max(0, Math.min(100, Math.round(s.stupidScore))));
-    const afterScoreVals = afterWindow.map(s => Math.max(0, Math.min(100, Math.round(s.stupidScore))));
+    const changeTimestamp = new Date(validScores[position].ts || new Date());
     
-    const beforeAvg = beforeScoreVals.reduce((a, b) => a + b, 0) / beforeScoreVals.length;
-    const afterAvg = afterScoreVals.reduce((a, b) => a + b, 0) / afterScoreVals.length;
-    const delta = afterAvg - beforeAvg; // Positive = improvement, negative = degradation
+    // Check if this change-point already recorded (within 2 hour window)
+    const alreadyRecorded = existingChanges.some(cp => {
+      const timeDiff = Math.abs(new Date(cp.detected_at).getTime() - changeTimestamp.getTime());
+      return timeDiff < 2 * 60 * 60 * 1000; // Within 2 hours
+    });
     
-    // Calculate significance using confidence intervals
-    const beforeCI = calculateConfidenceInterval(beforeScoreVals);
-    const afterCI = calculateConfidenceInterval(afterScoreVals);
-    const ciOverlap = !(beforeCI.lower > afterCI.upper || afterCI.lower > beforeCI.upper);
-    
-    // Change is significant if:
-    // 1. Delta > 8 points
-    // 2. No CI overlap
-    // 3. Delta > 2x CI width
-    const avgCIWidth = (beforeCI.upper - beforeCI.lower + afterCI.upper - afterCI.lower) / 2;
-    const isSignificant = Math.abs(delta) > 8 && !ciOverlap && Math.abs(delta) > avgCIWidth * 2;
-    
-    if (isSignificant) {
-      const changeTimestamp = new Date(validScores[i + windowSize].ts || new Date());
+    if (!alreadyRecorded) {
+      // Use the widest available window for axis analysis
+      const analysisWindow = Math.min(5, Math.floor(validScores.length / 2));
+      const beforeWindow = validScores.slice(Math.max(0, position - analysisWindow), position);
+      const afterWindow = validScores.slice(position, Math.min(validScores.length, position + analysisWindow));
       
-      // Check if this change-point already recorded (within 1 hour window)
-      const existingChanges = await db
-        .select()
-        .from(change_points)
-        .where(eq(change_points.model_id, modelId))
-        .orderBy(desc(change_points.detected_at))
-        .limit(10);
+      const affectedAxes = analyzeAffectedAxes(beforeWindow, afterWindow);
       
-      const alreadyRecorded = existingChanges.some(cp => {
-        const timeDiff = Math.abs(new Date(cp.detected_at).getTime() - changeTimestamp.getTime());
-        return timeDiff < 60 * 60 * 1000; // Within 1 hour
+      const beforeAvg = beforeWindow.reduce((s, x) => s + Math.round(x.stupidScore), 0) / beforeWindow.length;
+      const afterAvg = afterWindow.reduce((s, x) => s + Math.round(x.stupidScore), 0) / afterWindow.length;
+      
+      newChangePoints.push({
+        modelId,
+        timestamp: changeTimestamp,
+        fromScore: Math.round(beforeAvg * 10) / 10,
+        toScore: Math.round(afterAvg * 10) / 10,
+        delta: Math.round(candidate.bestDelta * 10) / 10,
+        significance: Math.round(candidate.bestSignificance * 10) / 10,
+        changeType: candidate.bestDelta > 0 ? 'improvement' : candidate.bestDelta < -2 ? 'degradation' : 'shift',
+        affectedAxes,
+        suspectedCause: inferCause(affectedAxes, candidate.bestDelta)
       });
-      
-      if (!alreadyRecorded) {
-        // Analyze which axes were affected
-        const affectedAxes = analyzeAffectedAxes(beforeWindow, afterWindow);
-        
-        newChangePoints.push({
-          modelId,
-          timestamp: changeTimestamp,
-          fromScore: Math.round(beforeAvg * 10) / 10,
-          toScore: Math.round(afterAvg * 10) / 10,
-          delta: Math.round(delta * 10) / 10,
-          significance: Math.round((Math.abs(delta) / avgCIWidth) * 10) / 10,
-          changeType: delta > 0 ? 'improvement' : delta < -2 ? 'degradation' : 'shift',
-          affectedAxes,
-          suspectedCause: inferCause(affectedAxes, delta)
-        });
-      }
     }
   }
   
@@ -615,6 +677,14 @@ export async function computeAllDriftSignatures(): Promise<{
       const newChangePoints = await detectChangePoints(model.id);
       for (const cp of newChangePoints) {
         await recordChangePoint(cp);
+        
+        // PHASE 3: Send webhook alert for change-points
+        try {
+          const { alertChangePoint } = await import('./drift-alerts');
+          await alertChangePoint(cp, model.name, model.vendor);
+        } catch (alertErr) {
+          // Non-fatal — alert delivery should never block drift computation
+        }
       }
       
       console.log(`✅ ${model.name}: ${signature.regime} (${signature.driftStatus})`);

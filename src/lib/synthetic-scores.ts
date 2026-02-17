@@ -129,7 +129,9 @@ export async function generateSyntheticScore(options: SyntheticScoreOptions): Pr
     // Generate synthetic axes based on historical patterns with enhanced realism
     const syntheticAxes = generateEnhancedSyntheticAxes(scoreRows, modelId, batchTimestamp);
     
-    // Insert score (NO mention of synthetic in note field - appears identical to real scores)
+    // PHASE 1 FIX: Mark synthetic scores so drift detection can exclude them.
+    // The drift-detection.ts queries filter with: note NOT LIKE '%SYNTHETIC%'
+    // This prevents synthetic scores from masking real drift.
     await db.insert(scores).values({
       modelId,
       ts: batchTimestamp,
@@ -137,10 +139,10 @@ export async function generateSyntheticScore(options: SyntheticScoreOptions): Pr
       axes: syntheticAxes,
       cusum: 0.0,
       suite,
-      note: null // No special note - appears identical to real scores
+      note: `[SYNTHETIC] Generated from ${recentScores.length} historical scores (pattern=${performancePattern.type})`
     });
     
-    console.log(`🎲 Generated enhanced synthetic ${suite} score for model ${modelId}: ${syntheticScore} (based on ${recentScores.length} historical scores, weightedMean=${weightedMean.toFixed(1)}, stdDev=${stdDev.toFixed(1)}, pattern=${performancePattern.type})`);
+    console.log(`🎲 Generated SYNTHETIC ${suite} score for model ${modelId}: ${syntheticScore} (based on ${recentScores.length} historical scores, weightedMean=${weightedMean.toFixed(1)}, stdDev=${stdDev.toFixed(1)}, pattern=${performancePattern.type})`);
     
     return syntheticScore;
     

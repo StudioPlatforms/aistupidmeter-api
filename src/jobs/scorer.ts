@@ -2,6 +2,7 @@
 import { db } from '../db';
 import { scores, baselines, metrics, runs, tasks, models } from '../db/schema';
 import { sql, eq, desc, and, gte } from 'drizzle-orm';
+import { cache } from '../cache/redis-cache';
 
 // Metric weights (must sum to 1.0)
 const WEIGHTS = {
@@ -138,41 +139,90 @@ async function getLatestMetrics(modelId: number): Promise<Record<string, number>
   return averages;
 }
 
-// Page-Hinkley drift detection
+// ============================================================================
+// PHASE 1 FIX: Proper Page-Hinkley Change Detection
+// ============================================================================
+//
+// The Page-Hinkley test tracks cumulative deviations from the running mean.
+// State per model (persisted in Redis):
+//   - n:    number of observations
+//   - mean: running mean of all observations
+//   - mT:   cumulative sum: mT = mT_prev + (xn - mean - delta)
+//   - MT:   running minimum of mT
+// Drift is detected when: mT - MT > lambda
+//
+// This correctly detects GRADUAL drift that builds up over many observations,
+// unlike the old implementation which reduced to a constant threshold check.
+// ============================================================================
+
+interface PageHinkleyState {
+  n: number;      // observation count
+  mean: number;   // running mean
+  mT: number;     // cumulative sum of deviations
+  MT: number;     // running minimum of mT
+}
+
+const PH_DELTA = 0.01;   // Allowable deviation before counting as drift (sensitivity)
+const PH_LAMBDA = 0.15;  // Detection threshold (mT - MT must exceed this)
+const PH_CACHE_TTL = 86400 * 30; // 30 days TTL for PH state
+
+async function getPageHinkleyState(modelId: number): Promise<PageHinkleyState> {
+  try {
+    const cached = await cache.get(`ph_state:${modelId}`);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+  } catch {
+    // Cache unavailable — start fresh
+  }
+  return { n: 0, mean: 0, mT: 0, MT: 0 };
+}
+
+async function savePageHinkleyState(modelId: number, state: PageHinkleyState): Promise<void> {
+  try {
+    await cache.set(`ph_state:${modelId}`, JSON.stringify(state), PH_CACHE_TTL);
+  } catch {
+    // Best-effort — state will be rebuilt from scratch next time
+  }
+}
+
 async function updatePageHinkley(modelId: number, signal: number): Promise<{
   value: number;
   driftDetected: boolean;
 }> {
-  // For simplicity, we'll maintain state in scores table
-  // In production, you'd want a separate table for drift state
-
-  const latestScore = await db
-    .select()
-    .from(scores)
-    .where(eq(scores.modelId, modelId))
-    .orderBy(desc(scores.ts))
-    .limit(1);
-
-  // Simplified PH without historical state
-  // In production: implement proper mt, Mt tracking per model
-  const lambda = 0.05; // Threshold
-  const delta = 0.005; // Sensitivity
-
-  if (latestScore.length > 0) {
-    const last = latestScore[0];
-    const mt = last.cusum + (signal - delta);
-    const PH = mt - last.cusum; // Simplified
-    const driftDetected = PH > lambda;
-
-    return {
-      value: mt,
-      driftDetected
-    };
+  const state = await getPageHinkleyState(modelId);
+  
+  // Update running mean incrementally: mean_new = mean_old + (xn - mean_old) / n
+  state.n += 1;
+  state.mean += (signal - state.mean) / state.n;
+  
+  // Update cumulative sum: mT = mT + (xn - mean - delta)
+  // delta is a small tolerance that prevents false alarms from normal variance
+  state.mT += (signal - state.mean - PH_DELTA);
+  
+  // Track running minimum of mT
+  state.MT = Math.min(state.MT, state.mT);
+  
+  // Detect drift: the gap between current mT and its historical minimum
+  // exceeds the threshold lambda
+  const phStatistic = state.mT - state.MT;
+  const driftDetected = state.n >= 10 && phStatistic > PH_LAMBDA;
+  
+  // Persist state
+  await savePageHinkleyState(modelId, state);
+  
+  if (driftDetected) {
+    console.log(`🔔 Page-Hinkley drift detected for model ${modelId}: PH=${phStatistic.toFixed(4)}, n=${state.n}, mean=${state.mean.toFixed(4)}`);
+    
+    // Reset after detection to allow detecting the next drift event
+    state.mT = 0;
+    state.MT = 0;
+    await savePageHinkleyState(modelId, state);
   }
-
+  
   return {
-    value: 0,
-    driftDetected: false
+    value: phStatistic,
+    driftDetected
   };
 }
 
