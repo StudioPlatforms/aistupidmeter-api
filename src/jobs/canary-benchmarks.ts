@@ -18,6 +18,37 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 
+// ---- Credit exhaustion detection (mirrors real-benchmarks.ts) ----
+function isCreditExhaustedCanary(error: any): boolean {
+  const status = error?.status || error?.response?.status;
+  const errorMsg = String(error?.message || error).toLowerCase();
+  if (status === 402) return true;
+  if (status === 429) {
+    return errorMsg.includes('credit') || errorMsg.includes('quota') ||
+           errorMsg.includes('billing') || errorMsg.includes('balance');
+  }
+  if (status === 403) {
+    return errorMsg.includes('credit') || errorMsg.includes('quota') ||
+           errorMsg.includes('insufficient') || errorMsg.includes('balance') ||
+           errorMsg.includes('billing');
+  }
+  return errorMsg.includes('insufficient credits') ||
+         errorMsg.includes('insufficient_quota') ||
+         errorMsg.includes('quota exceeded') ||
+         errorMsg.includes('quota_exceeded') ||
+         (errorMsg.includes('credit') && errorMsg.includes('exhaust')) ||
+         errorMsg.includes('billing') ||
+         errorMsg.includes('payment required') ||
+         errorMsg.includes('account_deactivated') ||
+         errorMsg.includes('subscription') ||
+         errorMsg.includes('suspended due to insufficient balance');
+}
+
+// ---- Determine if a model is a reasoning/GPT-5 model that needs longer timeouts ----
+function isReasoningModel(modelName: string): boolean {
+  return /^(gpt-5|o\d|o-mini|o-)/.test(modelName);
+}
+
 const execAsync = promisify(exec);
 
 // ---------- Safety Sentinel Tasks ----------
@@ -314,77 +345,95 @@ async function benchmarkModelCanaryLightning(
 
   const startTime = Date.now();
   
+  // Reasoning models (GPT-5, o-series) need longer timeouts due to think-before-answer
+  const isReasoning = isReasoningModel(model.name);
+  // Ping: 30s for reasoning models, 10s for standard
+  const pingTimeoutMs = isReasoning ? 30000 : 10000;
+  // Per-task: 90s for reasoning models, 30s for standard
+  const taskTimeoutMs = isReasoning ? 90000 : 30000;
+  // Global: all tasks combined
+  const globalTimeoutMs = isReasoning ? 180000 : 60000;
+
   try {
-    // LIGHTNING PING: Ultra-fast connectivity check with 5s timeout
+    // PING: Connectivity check with model-appropriate timeout
     const pingPromise = adapter.chat({
       model: model.name,
       messages: [{ role: 'user', content: 'Hi' }],
       temperature: 0,
-      maxTokens: 5
+      maxTokens: isReasoning ? 100 : 5  // reasoning models need more output tokens even for simple responses
     });
     
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Timeout')), 5000)
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Ping timeout')), pingTimeoutMs)
     );
     
-    const ping = await Promise.race([pingPromise, timeoutPromise]) as any;
+    let ping: any;
+    try {
+      ping = await Promise.race([pingPromise, timeoutPromise]);
+    } catch (pingErr: any) {
+      // Only synthesize on credit exhaustion - transient errors/timeouts = just skip
+      if (isCreditExhaustedCanary(pingErr)) {
+        console.log(`💳 ${model.name}: Credits exhausted during canary ping - generating synthetic score`);
+        await generateSyntheticScore({ modelId: model.id, suite: 'hourly', batchTimestamp });
+        return;
+      }
+      console.log(`⚠️ ${model.name}: Ping failed (${String(pingErr).slice(0, 80)}) - skipping canary (will retry next hour)`);
+      return;
+    }
+
     if (!ping?.text?.trim()) {
-      console.log(`⚠️ ${model.name}: Ping failed`);
+      console.log(`⚠️ ${model.name}: Ping returned empty response - skipping canary`);
       return;
     }
     
-    // LIGHTNING TASKS: Run only 2 minimal tasks with aggressive timeouts
+    // TASKS: Run canary tasks with model-appropriate timeouts
     interface TaskResult {
       taskId: string;
       score: number;
       latency: number;
       success: boolean;
+      error?: string;
     }
     
     const taskPromises = CANARY_TASKS.map(async (task): Promise<TaskResult> => {
       try {
         const taskStartTime = Date.now();
         
-        // Ultra-aggressive timeout: 15 seconds max per task
         const taskPromise = adapter.chat({
           model: model.name,
           messages: [{ role: 'user', content: task.prompt }],
           temperature: 0.3,
-          maxTokens: Math.min(task.maxTokens || 300, 300) // Allow enough tokens for real code
+          maxTokens: Math.min(task.maxTokens || 500, isReasoning ? 1500 : 500)
         });
         
         const taskTimeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Task timeout')), 15000)
+          setTimeout(() => reject(new Error('Task timeout')), taskTimeoutMs)
         );
         
         const response = await Promise.race([taskPromise, taskTimeoutPromise]) as any;
         const latency = Date.now() - taskStartTime;
         
-        // PHASE 1 FIX: Replace binary scoring with actual code evaluation
-        // Extract Python code and run against test cases for real correctness signal
         const rawText = response?.text?.trim() || '';
         const score = await quickEvaluateCanaryTask(rawText, task);
         
-        return {
-          taskId: task.id,
-          score,
-          latency,
-          success: true
-        };
+        return { taskId: task.id, score, latency, success: true };
         
-      } catch (error) {
+      } catch (error: any) {
+        // Bubble up credit exhaustion so the outer handler can synthesize
+        if (isCreditExhaustedCanary(error)) throw error;
         return {
           taskId: task.id,
           score: 0,
-          latency: 15000,
-          success: false
+          latency: taskTimeoutMs,
+          success: false,
+          error: String(error).slice(0, 80)
         };
       }
     });
     
     // Wait for all tasks with global timeout
-    const globalTimeout = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Global timeout')), 30000)
+    const globalTimeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Global canary timeout')), globalTimeoutMs)
     );
     
     const taskResults = await Promise.race([
@@ -446,20 +495,29 @@ async function benchmarkModelCanaryLightning(
     
   } catch (error: any) {
     const duration = Date.now() - startTime;
-    console.log(`⚠️ ${model.name}: Failed in ${duration}ms - ${String(error).slice(0, 50)}`);
-    
-    // Generate synthetic score when canary benchmark fails to prevent data gaps
-    try {
-      const syntheticScore = await generateSyntheticScore({
-        modelId: model.id,
-        suite: 'hourly', // Use hourly suite for synthetic (canary excluded from drift)
-        batchTimestamp
-      });
-      if (syntheticScore !== null) {
-        console.log(`🎲 ${model.name}: Synthetic score ${syntheticScore} generated after canary failure`);
+    const errMsg = String(error?.message || error).slice(0, 120);
+
+    // CRITICAL: Only generate synthetic scores when credits are actually exhausted.
+    // Transient failures (timeouts, network errors, temporary 5xx) should just be skipped —
+    // the real benchmark will run on the next scheduled cycle.
+    if (isCreditExhaustedCanary(error)) {
+      console.log(`💳 ${model.name}: Credits exhausted after ${duration}ms - generating synthetic score`);
+      try {
+        const syntheticScore = await generateSyntheticScore({
+          modelId: model.id,
+          suite: 'hourly',
+          batchTimestamp
+        });
+        if (syntheticScore !== null) {
+          console.log(`🎲 ${model.name}: Synthetic score ${syntheticScore} (credit exhaustion)`);
+        }
+      } catch (synthErr) {
+        console.warn(`⚠️ ${model.name}: Synthetic fallback also failed: ${String(synthErr).slice(0, 80)}`);
       }
-    } catch (synthErr) {
-      console.warn(`⚠️ ${model.name}: Synthetic fallback also failed`);
+    } else {
+      // Transient error (timeout, network hiccup, etc.) — skip, don't synthesize.
+      // The scheduler will retry on the next hourly/4-hourly cycle.
+      console.log(`⚠️ ${model.name}: Transient canary failure in ${duration}ms (${errMsg}) - skipping (will retry next cycle)`);
     }
   }
 }
