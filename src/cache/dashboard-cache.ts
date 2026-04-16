@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 import { computeDashboardScores, PeriodKey, SortKey } from '../lib/dashboard-compute';
+import { getModelHistory } from '../lib/model-scoring';
 
 // Import performance tracking
 let trackCacheHit: (() => void) | undefined;
@@ -21,7 +22,7 @@ async function loadPerformanceTracking() {
 }
 
 const CACHE_DIR = process.env.DASHBOARD_CACHE_DIR || '/tmp/stupidmeter-cache';
-const CACHE_SCHEMA_VERSION = 6; // BUMPED: Now includes analytics in cache
+const CACHE_SCHEMA_VERSION = 7; // BUMPED: Now includes historyMap in cached response
 const BUILD_ID = process.env.BUILD_ID || safeGitSha() || 'dev';
 const CACHE_TTL_SEC = parseInt(process.env.DASHBOARD_CACHE_TTL_SEC || '300', 10); // 5 minutes default
 const STALE_WHILE_REVALIDATE_SEC = CACHE_TTL_SEC * 2; // Serve stale for 2x TTL while revalidating
@@ -54,6 +55,10 @@ type CacheFile = {
 
 // Track background revalidation to prevent duplicate work
 const revalidating = new Set<string>();
+
+// THUNDERING HERD PREVENTION: If a computation is already in progress for a key,
+// subsequent requests wait for the same Promise instead of starting their own computation.
+const computing = new Map<string, Promise<any>>();
 
 const memory = new Map<string, CacheFile>();
 
@@ -159,29 +164,50 @@ export async function getCachedData(period: string, sortBy: string, analyticsPer
     return { success: true, cached: true, stale: false, data: fileCache.data };
   }
 
-  // 3) MISS → Compute fresh data
-  console.log(`🔄 Cache miss for ${key}, computing fresh data...`);
+  // 3) MISS → Compute fresh data (with thundering herd prevention)
   await loadPerformanceTracking();
   trackCacheMiss?.();
   
-  const data = await computeFullDashboardData(period as PeriodKey, sortBy as SortKey, analyticsPeriod || period);
+  // THUNDERING HERD LOCK: If another request is already computing this key,
+  // wait for its result instead of starting a duplicate computation.
+  if (computing.has(key)) {
+    console.log(`⏳ Waiting for in-flight computation of ${key}...`);
+    const data = await computing.get(key)!;
+    return { success: true, cached: false, stale: false, data };
+  }
   
-  const fresh: CacheFile = {
-    meta: {
-      schema: CACHE_SCHEMA_VERSION,
-      build: BUILD_ID,
-      createdAt: new Date().toISOString(),
-      ttlSec: CACHE_TTL_SEC,
-      key,
-      includesAnalytics: true
-    },
-    data
-  };
+  console.log(`🔄 Cache miss for ${key}, computing fresh data...`);
   
-  memory.set(key, fresh);
-  await saveToFile(key, fresh);
+  const computePromise = (async () => {
+    const data = await computeFullDashboardData(period as PeriodKey, sortBy as SortKey, analyticsPeriod || period);
+    
+    const fresh: CacheFile = {
+      meta: {
+        schema: CACHE_SCHEMA_VERSION,
+        build: BUILD_ID,
+        createdAt: new Date().toISOString(),
+        ttlSec: CACHE_TTL_SEC,
+        key,
+        includesAnalytics: true
+      },
+      data
+    };
+    
+    memory.set(key, fresh);
+    await saveToFile(key, fresh);
+    
+    return data;
+  })();
   
-  return { success: true, cached: false, stale: false, data };
+  // Register the promise so concurrent requests can piggyback
+  computing.set(key, computePromise);
+  
+  try {
+    const data = await computePromise;
+    return { success: true, cached: false, stale: false, data };
+  } finally {
+    computing.delete(key);
+  }
 }
 
 /**
@@ -213,29 +239,54 @@ async function revalidateCache(key: string, period: string, sortBy: string, anal
 }
 
 /**
- * Compute full dashboard data including analytics
- *
- * TODO: Add analytics caching here - requires refactoring analytics routes
- * into reusable functions (currently they're coupled to Fastify route handlers)
- * Expected impact: Eliminate 650-1,500ms overhead from 5 uncached API calls
+ * Compute full dashboard data including model history for all models.
+ * History is fetched in parallel and included in the cached response so the
+ * frontend can render leaderboard + charts + radar/heatmap in a single request.
  */
 async function computeFullDashboardData(period: PeriodKey, sortBy: SortKey, analyticsPeriod: string) {
   const startTime = Date.now();
   
-  // For now, just compute model scores
-  // Analytics will still be fetched separately by dashboard-cached route
-  // TODO: Refactor analytics routes and add them here
+  // Step 1: Compute model scores
   const modelScores = await computeDashboardScores(period, sortBy);
   
+  // Step 2: Fetch history for ALL models in parallel
+  const historyStartTime = Date.now();
+  const historyMap: Record<string, any[]> = {};
+  
+  if (modelScores.length > 0) {
+    const historyPromises = modelScores.map(async (model: any) => {
+      try {
+        const modelId = parseInt(model.id || model.modelId, 10);
+        if (isNaN(modelId)) return { id: model.id, history: [] };
+        const history = await getModelHistory(modelId, period, sortBy);
+        return { id: String(model.id), history };
+      } catch (error) {
+        console.error(`❌ History fetch failed for model ${model.id}:`, error);
+        return { id: String(model.id), history: [] };
+      }
+    });
+    
+    const results = await Promise.all(historyPromises);
+    for (const r of results) {
+      if (r.history.length > 0) {
+        historyMap[r.id] = r.history;
+      }
+    }
+    console.log(`📊 History fetched for ${Object.keys(historyMap).length}/${modelScores.length} models in ${Date.now() - historyStartTime}ms`);
+  }
+  
   const duration = Date.now() - startTime;
-  console.log(`✅ Dashboard data computed in ${duration}ms (${modelScores.length} models)`);
+  console.log(`✅ Dashboard data computed in ${duration}ms (${modelScores.length} models + history)`);
   
   return {
     modelScores,
+    historyMap,
     meta: {
       computedAt: new Date().toISOString(),
       duration,
-      includesAnalytics: false // TODO: Set to true once analytics are integrated
+      includesHistory: true,
+      historyModels: Object.keys(historyMap).length,
+      includesAnalytics: false
     }
   };
 }

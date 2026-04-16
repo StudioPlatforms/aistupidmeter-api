@@ -159,13 +159,44 @@ export async function getModelHistory(
     .limit(dataLimit * suites.length);
   
   // Filter valid scores
-  const validHistory = history.filter(h =>
+  let validHistory = history.filter(h =>
     h.stupidScore !== null &&
     h.stupidScore !== -777 &&
     h.stupidScore !== -888 &&
     h.stupidScore !== -999 &&
     h.stupidScore >= 0
   );
+  
+  // FALLBACK: If no data in the requested time window (e.g. 24h/reasoning when deep benchmarks
+  // haven't run in 24h), fetch the most recent available entries regardless of time window.
+  // This ensures the radar chart and heatmap always have axes data to render.
+  if (validHistory.length === 0) {
+    const fallbackHistory = await db
+      .select({
+        stupidScore: scores.stupidScore,
+        ts: scores.ts,
+        axes: scores.axes,
+        suite: scores.suite,
+        note: scores.note,
+        confidence_lower: scores.confidenceLower,
+        confidence_upper: scores.confidenceUpper
+      })
+      .from(scores)
+      .where(and(
+        eq(scores.modelId, modelId),
+        sql`suite IN (${sql.join(suites.map(s => sql`${s}`), sql`, `)})`
+      ))
+      .orderBy(desc(scores.ts))
+      .limit(5); // Just need a few entries for the radar/heatmap
+    
+    validHistory = fallbackHistory.filter(h =>
+      h.stupidScore !== null &&
+      h.stupidScore !== -777 &&
+      h.stupidScore !== -888 &&
+      h.stupidScore !== -999 &&
+      h.stupidScore >= 0
+    );
+  }
   
   // Convert to display format
   return validHistory.map(h => ({
@@ -669,19 +700,38 @@ async function computeHistoricalScoresForSuite(period: PeriodKey, suite: string)
       s.stupidScore !== null && s.stupidScore >= 0
     );
     
-    if (validScores.length === 0) continue;
+    // FIX: If no scores in this time window but we have a latest score,
+    // still include the model using its latest score. This prevents
+    // filter combos like 24h/reasoning from returning 0 models when
+    // deep benchmarks haven't run in the last 24h.
+    if (validScores.length === 0 && latestScoreValue === null) continue;
     
-    const convertedScores = validScores.map(s =>
-      Math.max(0, Math.min(100, Math.round(s.stupidScore)))
-    );
-    const periodAvg = Math.round(
-      convertedScores.reduce((sum, s) => sum + s, 0) / convertedScores.length
-    );
+    let convertedScores: number[];
+    let periodAvg: number;
+    let stability: number;
+    let trend: string;
+    let lastUpdate: Date;
     
-    const stability = calculateStability(convertedScores);
-    const latest = convertedScores[0];
-    const oldest = convertedScores[convertedScores.length - 1];
-    const trend = latest - oldest > 5 ? 'up' : latest - oldest < -5 ? 'down' : 'stable';
+    if (validScores.length > 0) {
+      convertedScores = validScores.map(s =>
+        Math.max(0, Math.min(100, Math.round(s.stupidScore)))
+      );
+      periodAvg = Math.round(
+        convertedScores.reduce((sum, s) => sum + s, 0) / convertedScores.length
+      );
+      stability = calculateStability(convertedScores);
+      const latest = convertedScores[0];
+      const oldest = convertedScores[convertedScores.length - 1];
+      trend = latest - oldest > 5 ? 'up' : latest - oldest < -5 ? 'down' : 'stable';
+      lastUpdate = new Date(historicalScores[0].ts || new Date());
+    } else {
+      // No period-specific data, but we have a latest score — use it as a fallback
+      convertedScores = [latestScoreValue!];
+      periodAvg = latestScoreValue!;
+      stability = 100; // Single data point = stable by default
+      trend = 'stable';
+      lastUpdate = latestScore?.ts ? new Date(latestScore.ts) : new Date();
+    }
     
     // PHASE 1 FIX: currentScore MUST be latest, never period average
     const displayScore = latestScoreValue !== null ? latestScoreValue : periodAvg;
@@ -690,7 +740,6 @@ async function computeHistoricalScoresForSuite(period: PeriodKey, suite: string)
     const { confidenceLower, confidenceUpper, standardError } = calculateScoreCI(convertedScores.slice(0, 5));
     
     // Staleness detection
-    const lastUpdate = new Date(historicalScores[0].ts || new Date());
     const hoursStale = (Date.now() - lastUpdate.getTime()) / (1000 * 60 * 60);
     const isStale = hoursStale > 3;
     

@@ -71,8 +71,14 @@ export default async function (fastify: FastifyInstance, opts: any) {
         // Continue with empty analytics data rather than failing the whole request
       }
       
-      // allow short CDN cache if you want; otherwise keep private
-      reply.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+      // Only cache responses with actual data; empty results get a short TTL
+      const hasData = (result.data.modelScores || result.data || []).length > 0;
+      if (hasData) {
+        reply.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+      } else {
+        // Don't let nginx cache empty responses for long — allow quick retry
+        reply.header('Cache-Control', 'public, max-age=5, stale-while-revalidate=10');
+      }
       
       // CRITICAL FIX: Ensure metadata accurately reflects the sortBy used for computation
       // The frontend expects the ACTUAL sortBy used, not the requested one
@@ -83,9 +89,11 @@ export default async function (fastify: FastifyInstance, opts: any) {
         cached: result.cached,
         data: {
           // CRITICAL FIX: Extract modelScores array from nested structure
-          // result.data contains { modelScores: [...], meta: {...} }
+          // result.data contains { modelScores: [...], historyMap: {...}, meta: {...} }
           // We need to pass the array directly, not the wrapper object
           modelScores: result.data.modelScores || result.data,
+          // Include history map so frontend can render charts without a separate batch call
+          historyMap: result.data.historyMap || {},
           alerts: [], // TODO: Add alerts if needed
           globalIndex: null, // TODO: Add global index if needed
           degradations: analyticsData.degradations,
@@ -100,7 +108,9 @@ export default async function (fastify: FastifyInstance, opts: any) {
           analyticsPeriod,
           cachedAt: new Date().toISOString(),
           cached: result.cached,
-          analyticsRealTime: true
+          analyticsRealTime: true,
+          includesHistory: !!(result.data.historyMap && Object.keys(result.data.historyMap).length > 0),
+          historyModels: result.data.historyMap ? Object.keys(result.data.historyMap).length : 0
         }
       };
 
