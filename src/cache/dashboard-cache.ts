@@ -332,12 +332,19 @@ export async function refreshAllCache() {
   };
 }
 
-export function refreshHotCache() {
+export async function refreshHotCache() {
+  // FIX: Clear BOTH memory AND file cache to ensure fresh data is served
+  // Previously only cleared memory, leaving stale file cache that would be
+  // loaded on next request (defeating the purpose of the refresh)
   memory.clear();
-  return { 
-    success: true, 
-    message: 'Memory cache cleared',
-    refreshed: memory.size,
+  try {
+    const files = await fs.readdir(CACHE_DIR);
+    await Promise.all(files.map(f => fs.unlink(path.join(CACHE_DIR, f)).catch(()=>{})));
+  } catch {}
+  return {
+    success: true,
+    message: 'Memory + file cache cleared',
+    refreshed: Date.now(),
     duration: 0,
     type: 'hot'
   };

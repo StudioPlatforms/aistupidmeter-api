@@ -248,7 +248,16 @@ async function computeCombinedScores(): Promise<ModelScore[]> {
     // Get trend and other metrics
     const trend = await calculateTrend(model.id, 'hourly');
     const status = getStatus(combinedScore);
-    const lastUpdated = new Date(hourlyScore?.ts || deepScore?.ts || new Date());
+    
+    // FIX: Use the most recent VALID score timestamp (not sentinel -777/-888/-999)
+    const validTimestamps = [
+      hasHourly && hourlyScore?.ts ? new Date(hourlyScore.ts).getTime() : 0,
+      hasDeep && deepScore?.ts ? new Date(deepScore.ts).getTime() : 0,
+      hasTooling && toolingScore?.ts ? new Date(toolingScore.ts).getTime() : 0,
+    ].filter(t => t > 0);
+    const lastUpdated = validTimestamps.length > 0
+      ? new Date(Math.max(...validTimestamps))
+      : new Date();
     
     // PHASE 1: Get recent scores for CI calculation
     const recentScores = await getRecentScoresForCI(model.id, 'combined');
