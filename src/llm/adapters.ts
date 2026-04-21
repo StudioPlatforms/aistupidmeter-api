@@ -556,12 +556,19 @@ export class AnthropicAdapter implements LLMAdapter {
         content: [{ type: 'text', text: m.content }]
       }));
 
+    // Anthropic reasoning models (claude-opus-4-7+) reject the temperature parameter
+    const isReasoningModel = /^claude-opus-4-([7-9]|\d{2,})/.test(req.model);
+
     const body: any = {
       model: req.model,
       max_tokens: req.maxTokens ?? 1200,
-      temperature: req.temperature ?? 0.2,
       messages: turns
     };
+
+    // Only set temperature for non-reasoning models (reasoning models reject it with 400)
+    if (!isReasoningModel) {
+      body.temperature = req.temperature ?? 0.2;
+    }
     if (systemMsg) body.system = systemMsg;
     if (req.tools?.length) {
       body.tools = req.tools.map(t => ({
