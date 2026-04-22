@@ -104,6 +104,7 @@ export class ToolBenchmarkSession {
       modelId: this.model.id,
       taskId: await this.getTaskId(),
       taskSlug: this.task.slug,
+      ts: new Date().toISOString(), // FIX: Explicit ISO timestamp (not SQLite CURRENT_TIMESTAMP literal)
       status: 'running',
       sandboxId: this.sandboxId
     }).returning();
