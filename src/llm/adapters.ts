@@ -528,21 +528,23 @@ export class AnthropicAdapter implements LLMAdapter {
         .map((m: any) => m.id)
         // include 3.5, 3.7 sonnet + sonnet-4/opus/haiku families
         .filter((id: string) =>
-          /^claude-(3-5-sonnet|3-5-haiku|3-7-sonnet|sonnet-4|opus)/.test(id)
+          /^claude-(3-5-sonnet|3-5-haiku|3-7-sonnet|sonnet-4|opus-4)/.test(id)
         );
     } catch {
-      // Fallback to known models including 2025 ones
+      // Fallback to known models including 2025/2026 ones
       return [
         'claude-3-5-sonnet',
         'claude-3-5-haiku',
         'claude-3-7-sonnet',         // rely on live list for exact suffixes
         'claude-sonnet-4-20250514',
         'claude-sonnet-4-5-20250929',
+        'claude-sonnet-4-6',
         'claude-opus-4-20250514',
         'claude-opus-4-1-20250805',
         'claude-opus-4-1',
         'claude-opus-4-5-20251101',  // Flagship model - November 2025
-        'claude-opus-4-6'            // New flagship model - February 2026
+        'claude-opus-4-6',           // February 2026
+        'claude-opus-4-7'            // April 2026 reasoning model
       ];
     }
   }
@@ -556,19 +558,34 @@ export class AnthropicAdapter implements LLMAdapter {
         content: [{ type: 'text', text: m.content }]
       }));
 
-    // Anthropic reasoning models (claude-opus-4-7+) reject the temperature parameter
+    // Anthropic reasoning models (claude-opus-4-7+) reject temperature/top_p/top_k
+    // and support adaptive thinking + effort parameters
     const isReasoningModel = /^claude-opus-4-([7-9]|\d{2,})/.test(req.model);
 
     const body: any = {
       model: req.model,
-      max_tokens: req.maxTokens ?? 1200,
       messages: turns
     };
 
-    // Only set temperature for non-reasoning models (reasoning models reject it with 400)
-    if (!isReasoningModel) {
+    if (isReasoningModel) {
+      // REASONING MODEL CONFIG (Opus 4.7+):
+      // 1. Higher token limits — reasoning consumes tokens for internal thinking
+      body.max_tokens = Math.max(4096, (req.maxTokens || 1200) * 3);
+      
+      // 2. Adaptive thinking — enables extended reasoning with summarized output
+      body.thinking = { type: 'adaptive', display: 'summarized' };
+      
+      // 3. Effort level — controls reasoning depth (high for benchmarks)
+      body.output_config = { effort: 'high' };
+      
+      // 4. No temperature/top_p/top_k — these are rejected with 400
+      // (intentionally omitted)
+    } else {
+      // Standard model config
+      body.max_tokens = req.maxTokens ?? 1200;
       body.temperature = req.temperature ?? 0.2;
     }
+
     if (systemMsg) body.system = systemMsg;
     if (req.tools?.length) {
       body.tools = req.tools.map(t => ({
@@ -594,12 +611,20 @@ export class AnthropicAdapter implements LLMAdapter {
     }
 
     const j: any = await r.json();
+
+    // Extract thinking blocks (reasoning models return these with display:'summarized')
+    const thinkingTexts = (j?.content ?? [])
+      .filter((c: any) => c.type === 'thinking' && typeof c.thinking === 'string')
+      .map((c: any) => c.thinking);
+
+    // Extract text content blocks
     const text =
       (j?.content ?? [])
         .filter((c: any) => c.type === 'text' && typeof c.text === 'string')
         .map((c: any) => c.text)
         .join('\n') || '';
 
+    // Extract tool calls
     const toolCalls =
       (j?.content ?? [])
         .filter((c: any) => c.type === 'tool_use')
@@ -610,7 +635,7 @@ export class AnthropicAdapter implements LLMAdapter {
       tokensIn: j?.usage?.input_tokens ?? 0,
       tokensOut: j?.usage?.output_tokens ?? 0,
       toolCalls,
-      raw: j
+      raw: { ...j, thinkingTexts } // Include thinking for downstream analysis
     };
   }
 }

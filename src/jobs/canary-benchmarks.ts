@@ -46,7 +46,8 @@ function isCreditExhaustedCanary(error: any): boolean {
 
 // ---- Determine if a model is a reasoning/GPT-5 model that needs longer timeouts ----
 function isReasoningModel(modelName: string): boolean {
-  return /^(gpt-5|o\d|o-mini|o-)/.test(modelName);
+  return /^(gpt-5|o\d|o-mini|o-)/.test(modelName) ||
+         /^claude-opus-4-([7-9]|\d{2,})/.test(modelName);
 }
 
 const execAsync = promisify(exec);
