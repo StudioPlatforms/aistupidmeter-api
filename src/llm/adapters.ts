@@ -18,7 +18,8 @@ export interface ChatRequest {
   jsonSchema?: any;
   stream?: boolean;
   // GPT-5 new parameters
-  reasoning_effort?: 'low' | 'medium' | 'high' | 'minimal';
+  reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'minimal';
+  reasoning_summary?: 'auto' | 'concise' | 'detailed';
   verbosity?: 'low' | 'medium' | 'high';
 }
 export interface ChatResponse {
@@ -50,7 +51,7 @@ export class OpenAIAdapter implements LLMAdapter {
         );
     } catch {
       // Conservative fallback: only generally available models
-      return ['gpt-4o', 'gpt-4o-mini'];
+      return ['gpt-4o', 'gpt-4o-mini', 'gpt-5.5'];
     }
   }
   async chat(req: ChatRequest): Promise<ChatResponse> {
@@ -66,11 +67,15 @@ export class OpenAIAdapter implements LLMAdapter {
   private async chatResponsesAPI(req: ChatRequest): Promise<ChatResponse> {
     const isReasoning = /^(gpt-5|o\d|o-mini|o-)/.test(req.model);
     const isGPT5 = /^gpt-5/.test(req.model);
+    const isGPT55 = /^gpt-5\.5(?:-|$)/.test(req.model);
 
-    // GPT-5 needs much higher token limits due to reasoning consumption
+    // GPT-5 needs much higher token limits because max_output_tokens includes reasoning tokens.
+    // GPT-5.5: OpenAI recommends reserving at least 25k for reasoning+answer on deep tasks.
     let maxTokens = req.maxTokens ?? 1200;
-    if (isGPT5) {
-      // GPT-5 can consume 1000+ tokens for reasoning alone, so we need much higher limits
+    if (isGPT55) {
+      // GPT-5.5 reasoning can consume many tokens; scale based on task complexity
+      maxTokens = Math.max(25000, (req.maxTokens || 1200) * 5);
+    } else if (isGPT5) {
       maxTokens = Math.max(8000, (req.maxTokens || 1200) * 5);
     }
 
@@ -79,9 +84,9 @@ export class OpenAIAdapter implements LLMAdapter {
       // Proper content blocks for Responses API
       input: req.messages.map(m => ({
         role: m.role,
-        content: [{ 
-          type: m.role === 'assistant' ? "output_text" : "input_text", 
-          text: m.content 
+        content: [{
+          type: m.role === 'assistant' ? "output_text" : "input_text",
+          text: m.content
         }]
       })),
       max_output_tokens: maxTokens
@@ -91,9 +96,31 @@ export class OpenAIAdapter implements LLMAdapter {
     if (!isReasoning && typeof req.temperature === 'number') {
       body.temperature = req.temperature;
     }
-    // Reasoning models accept a reasoning config instead
-    if (isReasoning && req.reasoning_effort) {
-      body.reasoning = { effort: req.reasoning_effort }; // "low" | "medium" | "high" | "minimal"
+    // Reasoning models accept a reasoning config
+    if (isReasoning) {
+      const reasoningConfig: any = {};
+      // GPT-5.5 defaults to medium; allow override
+      if (req.reasoning_effort) {
+        reasoningConfig.effort = req.reasoning_effort;
+      } else if (isGPT55) {
+        reasoningConfig.effort = 'medium'; // GPT-5.5 default per OpenAI docs
+      }
+      // GPT-5.5 supports reasoning summaries for observability
+      if (req.reasoning_summary) {
+        reasoningConfig.summary = req.reasoning_summary;
+      } else if (isGPT55) {
+        reasoningConfig.summary = 'auto'; // Enable reasoning summaries by default for GPT-5.5
+      }
+      if (Object.keys(reasoningConfig).length > 0) {
+        body.reasoning = reasoningConfig;
+      }
+    }
+    // GPT-5.5 supports text.verbosity for controlling output conciseness
+    if (isGPT55) {
+      body.text = {
+        format: { type: 'text' },
+        ...(req.verbosity ? { verbosity: req.verbosity } : { verbosity: 'medium' })
+      };
     }
     if (req.tools?.length) {
       // Responses API uses flat structure with type at top level
@@ -117,13 +144,26 @@ export class OpenAIAdapter implements LLMAdapter {
         });
     }
     if (req.jsonSchema) {
-      body.response_format = {
-        type: "json_schema",
-        json_schema: {
-          name: req.jsonSchemaName || 'Result',
-          schema: req.jsonSchema
-        }
-      };
+      // GPT-5.5 on Responses API uses text.format for structured outputs (not response_format)
+      if (isGPT55) {
+        body.text = {
+          ...(body.text || {}),
+          format: {
+            type: 'json_schema',
+            name: req.jsonSchemaName || 'Result',
+            schema: req.jsonSchema,
+            strict: true
+          }
+        };
+      } else {
+        body.response_format = {
+          type: "json_schema",
+          json_schema: {
+            name: req.jsonSchemaName || 'Result',
+            schema: req.jsonSchema
+          }
+        };
+      }
     }
 
     if (process.env.DEBUG_TOOLS) {
@@ -288,7 +328,15 @@ export class OpenAIAdapter implements LLMAdapter {
       tokensIn: usage?.prompt_tokens ?? usage?.input_tokens ?? 0,
       tokensOut: usage?.completion_tokens ?? usage?.output_tokens ?? 0,
       toolCalls,
-      raw: j
+      raw: {
+        ...j,
+        // Expose GPT-5.5 reasoning token telemetry for cost tracking and observability
+        reasoningTokens: usage?.output_tokens_details?.reasoning_tokens ?? 0,
+        cachedInputTokens: usage?.input_tokens_details?.cached_tokens ?? 0,
+        // Expose response status and incomplete details for debugging truncated responses
+        responseStatus: j?.status,
+        incompleteDetails: j?.incomplete_details ?? null,
+      }
     };
   }
 
