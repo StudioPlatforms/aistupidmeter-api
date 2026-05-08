@@ -250,13 +250,36 @@ async function computeCombinedScores(): Promise<ModelScore[]> {
     const status = getStatus(combinedScore);
     
     // FIX: Use the most recent VALID score timestamp (not sentinel -777/-888/-999)
+    // Also check the most recent score of ANY suite for this model (including canary)
+    // to avoid showing stale "7h ago" when canary scores ran 30m ago
     const validTimestamps = [
       hasHourly && hourlyScore?.ts ? new Date(hourlyScore.ts).getTime() : 0,
       hasDeep && deepScore?.ts ? new Date(deepScore.ts).getTime() : 0,
       hasTooling && toolingScore?.ts ? new Date(toolingScore.ts).getTime() : 0,
     ].filter(t => t > 0);
-    const lastUpdated = validTimestamps.length > 0
-      ? new Date(Math.max(...validTimestamps))
+    
+    // Also get the absolute most recent score for this model (any suite)
+    // This ensures freshly-run canary scores update the "last updated" display
+    let mostRecentAnyTs = 0;
+    try {
+      const anyRecent = await db
+        .select({ ts: scores.ts })
+        .from(scores)
+        .where(and(eq(scores.modelId, model.id), sql`stupid_score >= 0`))
+        .orderBy(desc(scores.ts))
+        .limit(1);
+      if (anyRecent[0]?.ts) {
+        mostRecentAnyTs = new Date(anyRecent[0].ts).getTime();
+      }
+    } catch { /* ignore */ }
+    
+    if (mostRecentAnyTs > 0) validTimestamps.push(mostRecentAnyTs);
+    
+    // Guard against epoch dates: if timestamp is before 2024, it's invalid
+    const MIN_VALID_TS = new Date('2024-01-01').getTime();
+    const filteredTimestamps = validTimestamps.filter(t => t > MIN_VALID_TS);
+    const lastUpdated = filteredTimestamps.length > 0
+      ? new Date(Math.max(...filteredTimestamps))
       : new Date();
     
     // PHASE 1: Get recent scores for CI calculation
@@ -393,7 +416,9 @@ async function computeReasoningScores(): Promise<ModelScore[]> {
     
     const reasoningScore = Math.round(deepScore.stupidScore);
     const trend = await calculateTrend(model.id, 'deep');
-    const lastUpdated = new Date(deepScore.ts || new Date());
+    const MIN_VALID_TS_DEEP = new Date('2024-01-01').getTime();
+    const rawTsDeep = new Date(deepScore.ts || new Date()).getTime();
+    const lastUpdated = rawTsDeep > MIN_VALID_TS_DEEP ? new Date(rawTsDeep) : new Date();
     
     // PHASE 1: Get recent scores for CI
     const recentScores = await getRecentScoresForCI(model.id, 'deep');
@@ -449,7 +474,9 @@ async function computeToolingScores(): Promise<ModelScore[]> {
     
     const score = Math.round(toolingScore.stupidScore);
     const trend = await calculateTrend(model.id, 'tooling');
-    const lastUpdated = new Date(toolingScore.ts || new Date());
+    const MIN_VALID_TS_TOOL = new Date('2024-01-01').getTime();
+    const rawTsTool = new Date(toolingScore.ts || new Date()).getTime();
+    const lastUpdated = rawTsTool > MIN_VALID_TS_TOOL ? new Date(rawTsTool) : new Date();
     
     // PHASE 1: Get recent scores for CI
     const recentScores = await getRecentScoresForCI(model.id, 'tooling');
@@ -505,7 +532,11 @@ async function computeSpeedScores(): Promise<ModelScore[]> {
     
     const score = Math.round(hourlyScore.stupidScore);
     const trend = await calculateTrend(model.id, 'hourly');
-    const lastUpdated = new Date(hourlyScore.ts || new Date());
+    
+    // Guard against epoch/invalid timestamps
+    const MIN_VALID_TS = new Date('2024-01-01').getTime();
+    const rawTs = new Date(hourlyScore.ts || new Date()).getTime();
+    const lastUpdated = rawTs > MIN_VALID_TS ? new Date(rawTs) : new Date();
     
     // PHASE 1: Get recent scores for CI
     const recentScores = await getRecentScoresForCI(model.id, 'hourly');
@@ -583,14 +614,29 @@ async function getRecentScoresForCI(modelId: number, suite: 'combined' | 'deep' 
 }
 
 async function getLatestScore(modelId: number, suite: string) {
-  const result = await db
+  // First try to find the latest VALID score (skip sentinel values -777, -888, -999)
+  const validResult = await db
+    .select()
+    .from(scores)
+    .where(and(
+      eq(scores.modelId, modelId),
+      eq(scores.suite, suite),
+      sql`stupid_score >= 0`
+    ))
+    .orderBy(desc(scores.ts))
+    .limit(1);
+  
+  if (validResult[0]) return validResult[0];
+  
+  // Fallback: return any score (including sentinel) so callers can detect "no data"
+  const anyResult = await db
     .select()
     .from(scores)
     .where(and(eq(scores.modelId, modelId), eq(scores.suite, suite)))
     .orderBy(desc(scores.ts))
     .limit(1);
   
-  return result[0] || null;
+  return anyResult[0] || null;
 }
 
 async function calculateTrend(modelId: number, suite: string): Promise<string> {

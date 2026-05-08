@@ -14,6 +14,34 @@ let lastRunTime: Date | null = null;
 let lastDeepRunTime: Date | null = null;
 let lastToolRunTime: Date | null = null;
 let lastHealthRunTime: Date | null = null;
+
+// Safety timeout tracking - automatically release stuck flags
+let runningStartTime: number = 0;
+let deepRunningStartTime: number = 0;
+let toolRunningStartTime: number = 0;
+
+const MAX_BENCHMARK_DURATION_MS = 3 * 60 * 60 * 1000; // 3 hours max for regular benchmarks
+const MAX_DEEP_DURATION_MS = 4 * 60 * 60 * 1000;      // 4 hours max for deep benchmarks
+const MAX_TOOL_DURATION_MS = 4 * 60 * 60 * 1000;      // 4 hours max for tool benchmarks
+
+function checkAndResetStuckFlags() {
+  const now = Date.now();
+  if (isRunning && runningStartTime > 0 && (now - runningStartTime) > MAX_BENCHMARK_DURATION_MS) {
+    console.error(`🚨 SAFETY: isRunning stuck for ${Math.round((now - runningStartTime) / 60000)}min — force-releasing!`);
+    isRunning = false;
+    runningStartTime = 0;
+  }
+  if (isDeepRunning && deepRunningStartTime > 0 && (now - deepRunningStartTime) > MAX_DEEP_DURATION_MS) {
+    console.error(`🚨 SAFETY: isDeepRunning stuck for ${Math.round((now - deepRunningStartTime) / 60000)}min — force-releasing!`);
+    isDeepRunning = false;
+    deepRunningStartTime = 0;
+  }
+  if (isToolRunning && toolRunningStartTime > 0 && (now - toolRunningStartTime) > MAX_TOOL_DURATION_MS) {
+    console.error(`🚨 SAFETY: isToolRunning stuck for ${Math.round((now - toolRunningStartTime) / 60000)}min — force-releasing!`);
+    isToolRunning = false;
+    toolRunningStartTime = 0;
+  }
+}
 let hourlyScheduledTask: any = null;
 let dailyScheduledTask: any = null;
 let toolScheduledTask: any = null;
@@ -35,6 +63,9 @@ export function startBenchmarkScheduler() {
     const now = new Date();
     console.log(`🔔 4-hourly benchmark cron triggered at ${now.toISOString()}`);
     
+    // Safety: check and reset stuck flags before deciding to skip
+    checkAndResetStuckFlags();
+    
     if (isRunning) {
       console.log('⏸️ Hourly benchmark already running, skipping this cycle...');
       return;
@@ -42,6 +73,7 @@ export function startBenchmarkScheduler() {
 
     try {
       isRunning = true;
+      runningStartTime = Date.now();
       lastRunTime = now;
       console.log(`🕐 ${now.toISOString()} - Starting scheduled 4-hourly benchmark run...`);
       console.log(`📊 Previous run was: ${lastRunTime ? lastRunTime.toISOString() : 'Never'}`);
@@ -85,6 +117,7 @@ export function startBenchmarkScheduler() {
           console.error(`❌ ${new Date().toISOString()} - 4-hourly benchmark run failed:`, error);
         } finally {
           isRunning = false;
+          runningStartTime = 0;
         }
       });
       
@@ -95,6 +128,7 @@ export function startBenchmarkScheduler() {
     } catch (error) {
       console.error(`❌ ${new Date().toISOString()} - 4-hourly benchmark setup failed:`, error);
       isRunning = false;
+      runningStartTime = 0;
     }
   }, {
     timezone: 'Europe/Berlin'
@@ -107,6 +141,9 @@ export function startBenchmarkScheduler() {
     console.log(`🔔 Daily deep benchmark cron triggered at ${now.toISOString()} (Berlin: ${berlinTime})`);
     console.log(`🏗️ This should create scores with suite='deep' for REASONING mode display`);
     
+    // Safety: check and reset stuck flags
+    checkAndResetStuckFlags();
+    
     if (isDeepRunning || isDeepBenchmarkActive()) {
       console.log('⏸️ Deep benchmark already running, skipping this cycle...');
       return;
@@ -114,6 +151,7 @@ export function startBenchmarkScheduler() {
 
     try {
       isDeepRunning = true;
+      deepRunningStartTime = Date.now();
       lastDeepRunTime = now;
       console.log(`🕐 ${now.toISOString()} - Starting scheduled daily deep benchmark run...`);
       console.log(`🏗️ Previous deep run was: ${lastDeepRunTime ? lastDeepRunTime.toISOString() : 'Never'}`);
@@ -137,6 +175,7 @@ export function startBenchmarkScheduler() {
           console.error(`🚨 This will affect REASONING mode display until next successful run`);
         } finally {
           isDeepRunning = false;
+          deepRunningStartTime = 0;
         }
       });
       
@@ -146,6 +185,7 @@ export function startBenchmarkScheduler() {
     } catch (error) {
       console.error(`❌ ${new Date().toISOString()} - Daily deep benchmark setup failed:`, error);
       isDeepRunning = false;
+      deepRunningStartTime = 0;
     }
   }, {
     timezone: 'Europe/Berlin'
@@ -158,6 +198,9 @@ export function startBenchmarkScheduler() {
     console.log(`🔔 Daily tool benchmark cron triggered at ${now.toISOString()} (Berlin: ${berlinTime})`);
     console.log(`🔧 This should create scores with suite='tooling' for TOOLING mode display`);
     
+    // Safety: check and reset stuck flags
+    checkAndResetStuckFlags();
+    
     if (isToolRunning) {
       console.log('⏸️ Tool benchmark already running, skipping this cycle...');
       return;
@@ -165,6 +208,7 @@ export function startBenchmarkScheduler() {
 
     try {
       isToolRunning = true;
+      toolRunningStartTime = Date.now();
       lastToolRunTime = now;
       console.log(`🕐 ${now.toISOString()} - Starting scheduled daily tool benchmark run...`);
       console.log(`🔧 Previous tool run was: ${lastToolRunTime ? lastToolRunTime.toISOString() : 'Never'}`);
@@ -188,6 +232,7 @@ export function startBenchmarkScheduler() {
           console.error(`🚨 This will affect TOOLING mode display until next successful run`);
         } finally {
           isToolRunning = false;
+          toolRunningStartTime = 0;
         }
       });
       
@@ -197,6 +242,7 @@ export function startBenchmarkScheduler() {
     } catch (error) {
       console.error(`❌ ${new Date().toISOString()} - Daily tool benchmark setup failed:`, error);
       isToolRunning = false;
+      toolRunningStartTime = 0;
     }
   }, {
     timezone: 'Europe/Berlin'
@@ -416,9 +462,11 @@ export function startBenchmarkScheduler() {
   console.log(`⏰ Next tool run: ${nextToolRun.toLocaleString('en-US', { timeZone: 'Europe/Berlin' })}`);
   console.log(`🔧 Time until next tool: ${Math.ceil((nextToolRun.getTime() - now.getTime()) / (1000 * 60 * 60))} hours`);
   
-  // Set up debug timer
+  // Set up debug timer + safety check for stuck flags
   setInterval(() => {
     const currentTime = new Date();
+    // Safety: automatically release stuck flags every 5 minutes
+    checkAndResetStuckFlags();
     console.log(`🕐 Scheduler status check at ${currentTime.toISOString()}`);
     console.log(`   - Hourly running: ${isRunning}`);
     console.log(`   - Deep running: ${isDeepRunning}`);

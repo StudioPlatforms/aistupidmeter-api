@@ -191,23 +191,35 @@ async function benchmarkModelDeep(
     
     deepBenchmarkProgress.errors.push(`${model.name}: ${errorMsg}`);
     
-    // Store failed session with zero score for non-credit errors
-    try {
-      await db.insert(deep_sessions).values({
-        modelId: model.id,
-        taskSlug: task.slug,
-        ts: batchTimestamp,
-        turns: 0,
-        totalLatencyMs: 0,
-        totalTokensIn: 0,
-        totalTokensOut: 0,
-        passed: false,
-        conversationData: [{ role: 'system', content: `Failed: ${errorMsg}` }],
-        stepResults: [],
-        finalScore: 0
-      });
-    } catch (dbError) {
-      console.error(`Failed to store error session: ${String(dbError).slice(0, 100)}`);
+    // Try synthetic score for ALL failures (not just credit exhaustion)
+    console.log(`⚠️ ${model.name}: Deep benchmark failed — attempting synthetic score`);
+    const syntheticDeep = await generateSyntheticScore({
+      modelId: model.id,
+      suite: 'deep',
+      batchTimestamp: batchTimestamp
+    });
+    
+    if (syntheticDeep !== null) {
+      console.log(`✅ ${model.name}: Synthetic deep score generated after failure: ${syntheticDeep}`);
+    } else {
+      // Store failed session with zero score only if no synthetic available
+      try {
+        await db.insert(deep_sessions).values({
+          modelId: model.id,
+          taskSlug: task.slug,
+          ts: batchTimestamp,
+          turns: 0,
+          totalLatencyMs: 0,
+          totalTokensIn: 0,
+          totalTokensOut: 0,
+          passed: false,
+          conversationData: [{ role: 'system', content: `Failed: ${errorMsg}` }],
+          stepResults: [],
+          finalScore: 0
+        });
+      } catch (dbError) {
+        console.error(`Failed to store error session: ${String(dbError).slice(0, 100)}`);
+      }
     }
   }
 }

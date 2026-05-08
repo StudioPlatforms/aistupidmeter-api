@@ -1998,16 +1998,29 @@ export async function benchmarkModel(
       throw new Error(`Retryable canary failure: ${String(e).slice(0,100)}`);
     }
     
-    // Only record N/A for non-retryable errors (missing API keys, auth issues, etc.)
-    await db.insert(scores).values({
+    // Instead of recording N/A sentinel, try synthetic score first
+    console.log(`⚠️ ${model.name}: Adapter validation failed — attempting synthetic score generation`);
+    const syntheticScore = await generateSyntheticScore({
       modelId: model.id,
-      ts: batchTimestamp || new Date().toISOString(),
-      stupidScore: -777,  // Sentinel value for adapter failures
-      axes: { correctness: -1, complexity: -1, codeQuality: -1, efficiency: -1, stability: -1, edgeCases: -1, debugging: -1 },
-      cusum: 0.0,
-      note: `N/A - Adapter validation failed: ${String(e).slice(0,100)}`
+      suite: 'hourly',
+      batchTimestamp: batchTimestamp || new Date().toISOString()
     });
-    console.log(`❌ ${model.name}: N/A (adapter validation failed)`);
+    
+    if (syntheticScore !== null) {
+      console.log(`✅ ${model.name}: Synthetic score generated after adapter failure: ${syntheticScore}`);
+      await refreshCache(`synthetic-adapter-fail-${model.name}`);
+    } else {
+      // Only record sentinel as a last resort when no history exists at all
+      await db.insert(scores).values({
+        modelId: model.id,
+        ts: batchTimestamp || new Date().toISOString(),
+        stupidScore: -777,
+        axes: { correctness: -1, complexity: -1, codeQuality: -1, efficiency: -1, stability: -1, edgeCases: -1, debugging: -1 },
+        cusum: 0.0,
+        note: `N/A - Adapter validation failed: ${String(e).slice(0,100)}`
+      });
+      console.log(`❌ ${model.name}: N/A (adapter validation failed, no history for synthetic)`);
+    }
     return;
   }
 
@@ -2251,16 +2264,29 @@ export async function benchmarkModel(
       return; // Exit benchmark for this model
     }
     
-    // Only insert -888 if failures were NOT due to credit exhaustion
-    await db.insert(scores).values({
+    // Try synthetic score first, only use sentinel as absolute last resort
+    console.log(`⚠️ ${model.name}: All tasks failed — attempting synthetic score generation`);
+    const allFailedSynthetic = await generateSyntheticScore({
       modelId: model.id,
-      ts: batchTimestamp || new Date().toISOString(),
-      stupidScore: -888,  // Different sentinel value for task failures
-      axes: { correctness: -1, complexity: -1, codeQuality: -1, efficiency: -1, stability: -1, edgeCases: -1, debugging: -1 },
-      cusum: 0.0,
-      note: `N/A - All benchmark tasks failed`
+      suite: 'hourly',
+      batchTimestamp: batchTimestamp || new Date().toISOString()
     });
-    console.log(`❌ ${model.name}: N/A (all tasks failed)`);
+    
+    if (allFailedSynthetic !== null) {
+      console.log(`✅ ${model.name}: Synthetic score generated after all-tasks-failed: ${allFailedSynthetic}`);
+      await refreshCache(`synthetic-all-failed-${model.name}`);
+    } else {
+      // Only insert -888 if no history exists for synthetic generation
+      await db.insert(scores).values({
+        modelId: model.id,
+        ts: batchTimestamp || new Date().toISOString(),
+        stupidScore: -888,
+        axes: { correctness: -1, complexity: -1, codeQuality: -1, efficiency: -1, stability: -1, edgeCases: -1, debugging: -1 },
+        cusum: 0.0,
+        note: `N/A - All benchmark tasks failed`
+      });
+      console.log(`❌ ${model.name}: N/A (all tasks failed, no history for synthetic)`);
+    }
     return;
   }
 
@@ -2640,15 +2666,25 @@ async function benchmarkModelWithEnhancedParams(
   const adapter = getAdapter(model.vendor);
   
   if (!adapter) {
-    // Still no API key - record N/A
-    await db.insert(scores).values({
+    // No API key - try synthetic score first
+    console.log(`⚠️ ${model.name}: No API key — attempting synthetic score`);
+    const noKeySynthetic = await generateSyntheticScore({
       modelId: model.id,
-      ts: batchTimestamp,
-      stupidScore: -999,
-      axes: { correctness: -1, complexity: -1, codeQuality: -1, efficiency: -1, stability: -1, edgeCases: -1, debugging: -1 },
-      cusum: 0.0,
-      note: `N/A - ${model.vendor} API not configured`
+      suite: 'hourly',
+      batchTimestamp
     });
+    if (noKeySynthetic !== null) {
+      console.log(`✅ ${model.name}: Synthetic score generated (no API key): ${noKeySynthetic}`);
+    } else {
+      await db.insert(scores).values({
+        modelId: model.id,
+        ts: batchTimestamp,
+        stupidScore: -999,
+        axes: { correctness: -1, complexity: -1, codeQuality: -1, efficiency: -1, stability: -1, edgeCases: -1, debugging: -1 },
+        cusum: 0.0,
+        note: `N/A - ${model.vendor} API not configured`
+      });
+    }
     return;
   }
 
@@ -2697,15 +2733,24 @@ async function benchmarkModelWithEnhancedParams(
     
   } catch (e) {
     console.log(`❌ ${model.name} enhanced canary failed: ${String(e).slice(0, 200)}`);
-    // Record failure but don't throw
-    await db.insert(scores).values({
+    // Try synthetic score before falling back to sentinel
+    const retrySynthetic = await generateSyntheticScore({
       modelId: model.id,
-      ts: batchTimestamp,
-      stupidScore: -777,
-      axes: { correctness: -1, complexity: -1, codeQuality: -1, efficiency: -1, stability: -1, edgeCases: -1, debugging: -1 },
-      cusum: 0.0,
-      note: `Enhanced retry failed: ${String(e).slice(0, 100)}`
+      suite: 'hourly',
+      batchTimestamp
     });
+    if (retrySynthetic !== null) {
+      console.log(`✅ ${model.name}: Synthetic score generated after enhanced retry failure: ${retrySynthetic}`);
+    } else {
+      await db.insert(scores).values({
+        modelId: model.id,
+        ts: batchTimestamp,
+        stupidScore: -777,
+        axes: { correctness: -1, complexity: -1, codeQuality: -1, efficiency: -1, stability: -1, edgeCases: -1, debugging: -1 },
+        cusum: 0.0,
+        note: `Enhanced retry failed: ${String(e).slice(0, 100)}`
+      });
+    }
     return;
   }
 

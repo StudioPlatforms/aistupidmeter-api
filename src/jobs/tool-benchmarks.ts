@@ -258,11 +258,19 @@ async function calculateAggregateScores(results: any[]): Promise<void> {
   console.log('📊 Calculating aggregate scores...');
   
   const byModel = new Map<number, any[]>();
+  const allModelIds = new Set<number>();
+  
   for (const r of results) {
     if (!r) continue; // Skip null results
+    allModelIds.add(r.modelId);
     if (!byModel.has(r.modelId)) byModel.set(r.modelId, []);
     byModel.get(r.modelId)!.push(r);
   }
+
+  // Get all models that SHOULD have been benchmarked
+  const toolCapableModels = await db.select()
+    .from(models)
+    .where(eq(models.showInRankings, true));
 
   for (const [modelId, rows] of byModel) {
     if (!rows.length) continue; // Skip empty model results
@@ -276,12 +284,27 @@ async function calculateAggregateScores(results: any[]): Promise<void> {
       axes: metrics,
       cusum: 0,
       suite: 'tooling',
-      ts: new Date().toISOString(), // FIXED: Add proper timestamp for dashboard display
+      ts: new Date().toISOString(),
       note: `Tool calling benchmark: ${rows.length} tasks completed`
     });
 
     const name = rows[0]?.modelName ?? `Model ${modelId}`;
     console.log(`📈 ${name}: Stupid Score = ${stupidScore.toFixed(3)}`);
+  }
+  
+  // Generate synthetic scores for models that had NO successful results
+  for (const model of toolCapableModels) {
+    if (!byModel.has(model.id)) {
+      console.log(`⚠️ ${model.name}: No tooling results — generating synthetic score`);
+      const syntheticScore = await generateSyntheticScore({
+        modelId: model.id,
+        suite: 'tooling',
+        batchTimestamp: new Date().toISOString()
+      });
+      if (syntheticScore !== null) {
+        console.log(`✅ ${model.name}: Synthetic tooling score generated: ${syntheticScore}`);
+      }
+    }
   }
 
   // AUTOMATIC ROUTER CACHE INVALIDATION: Invalidate router cache after tool benchmark completion
