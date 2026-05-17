@@ -83,7 +83,7 @@ async function checkProviderHealth(provider: string, adapter: any): Promise<Heal
         testModel = 'grok-4'; // Latest Grok 4
         break;
       case 'deepseek':
-        testModel = 'deepseek-chat'; // Fast DeepSeek model
+        testModel = 'deepseek-v4-flash'; // V4 Flash (replaces legacy deepseek-chat)
         break;
       case 'glm':
         testModel = 'glm-4.6'; // GLM-4.6

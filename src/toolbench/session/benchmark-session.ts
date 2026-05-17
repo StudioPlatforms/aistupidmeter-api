@@ -152,14 +152,19 @@ export class ToolBenchmarkSession {
       const isGPT55 = /^gpt-5\.5(?:-|$)/.test(this.model.name);
       const isGPT5 = /^gpt-5/.test(this.model.name);
       const isOSeries = /^o\d|^o-mini|^o-/.test(this.model.name);
-      const isReasoningModel = isGPT5 || isOSeries;
+      const isDeepSeekThinking = this.model.name === 'deepseek-reasoner' || /^deepseek-v4/.test(this.model.name);
+      const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking;
 
-      // GPT-5.5 tool benchmarks need higher token budgets for reasoning
+      // Reasoning models need higher token budgets for thinking + tool calling
       let maxTokens = 2000;
       if (isGPT55) {
         // Scale based on task difficulty
         const difficultyBudget: Record<string, number> = { easy: 15000, medium: 25000, hard: 35000 };
         maxTokens = difficultyBudget[this.task.difficulty] || 25000;
+      } else if (isDeepSeekThinking) {
+        // DeepSeek thinking models need room for CoT + tool call output
+        const difficultyBudget: Record<string, number> = { easy: 8192, medium: 12288, hard: 16384 };
+        maxTokens = difficultyBudget[this.task.difficulty] || 12288;
       } else if (isGPT5) {
         maxTokens = Math.max(8000, 2000 * 3);
       }
@@ -188,6 +193,9 @@ export class ToolBenchmarkSession {
         request.verbosity = 'low';               // Concise tool outputs preferred
         request.store = false;                    // Don't store benchmark data
         request.max_tool_calls = 15;              // Cap runaway tool loops
+      } else if (isDeepSeekThinking) {
+        // DeepSeek thinking models: medium reasoning for tool benchmarks
+        request.reasoning_effort = 'medium';
       } else if (isOSeries) {
         request.reasoning_effort = 'low';
       }

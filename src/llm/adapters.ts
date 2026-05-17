@@ -50,6 +50,23 @@ export function isGPT55Model(modelName: string): boolean {
   return /^gpt-5\.5(?:-|$)/.test(modelName);
 }
 
+// ---------- DeepSeek Model Detection ----------
+// DeepSeek V4 models support dual modes (thinking/non-thinking).
+// Legacy aliases deepseek-chat/deepseek-reasoner map to V4-Flash and will be
+// deprecated by mid-2026. We support both legacy and new model names.
+
+// Helper: check if DeepSeek model uses thinking (chain-of-thought) mode.
+// In thinking mode: temperature/top_p have no effect, reasoning_content is returned.
+export function isDeepSeekThinkingModel(modelName: string): boolean {
+  return modelName === 'deepseek-reasoner' ||
+         /^deepseek-v4/.test(modelName);  // V4 models default to thinking mode
+}
+
+// Helper: check if model is any DeepSeek model
+export function isDeepSeekModel(modelName: string): boolean {
+  return /^deepseek-/.test(modelName);
+}
+
 // ---------- OPENAI (Responses API) ----------
 export class OpenAIAdapter implements LLMAdapter {
   constructor(private apiKey: string, private base = 'https://api.openai.com') {}
@@ -906,27 +923,61 @@ export class GoogleAdapter implements LLMAdapter {
 }
 
 // ---------- DEEPSEEK ----------
+// Supports both legacy models (deepseek-chat, deepseek-reasoner) and
+// new V4 models (deepseek-v4-flash, deepseek-v4-pro) with thinking mode.
+// V4 models support dual modes: thinking (chain-of-thought) and non-thinking.
+// In thinking mode, temperature/top_p have no effect per DeepSeek docs.
 export class DeepSeekAdapter implements LLMAdapter {
   constructor(private apiKey: string, private base = 'https://api.deepseek.com') {}
   
   async listModels() {
     // DeepSeek doesn't have a models endpoint, return known models
     return [
-      'deepseek-chat',
-      'deepseek-reasoner'
+      'deepseek-chat',         // Legacy alias → V4-Flash (non-thinking), deprecated mid-2026
+      'deepseek-reasoner',     // Legacy alias → V4-Flash (thinking), deprecated mid-2026
+      'deepseek-v4-flash',     // 284B total / 13B active, dual mode
+      'deepseek-v4-pro'        // 1.6T total / 49B active, dual mode
     ];
   }
   
   async chat(req: ChatRequest): Promise<ChatResponse> {
+    // Detect model capabilities
+    const isThinkingModel = isDeepSeekThinkingModel(req.model);
+    const isV4 = /^deepseek-v4/.test(req.model);
+
+    // V4 models support higher token limits (up to 1M context)
+    let maxTokens = req.maxTokens ?? 4096;
+    if (isThinkingModel && maxTokens < 8192) {
+      // Thinking models need room for chain-of-thought reasoning tokens
+      maxTokens = Math.max(8192, maxTokens);
+    }
+
     const body: any = {
       model: req.model,
       messages: req.messages,
-      temperature: req.temperature ?? 1.0, // DeepSeek default is 1.0
-      max_tokens: req.maxTokens ?? 4096,
+      max_tokens: maxTokens,
       stream: req.stream ?? false
     };
 
-    // Add tools if provided - DeepSeek reasoning models now support tool calling
+    // --- Temperature handling ---
+    // In thinking mode, temperature has no effect (DeepSeek docs).
+    // Only set temperature for non-thinking models.
+    if (!isThinkingModel) {
+      body.temperature = req.temperature ?? 0.0; // Use 0 for deterministic benchmark results
+    }
+
+    // --- Thinking mode configuration (V4 models) ---
+    // V4 models support explicit thinking toggle via extra parameter.
+    // Legacy deepseek-reasoner always uses thinking mode implicitly.
+    if (isV4) {
+      body.thinking = { type: 'enabled' };
+      // V4 supports reasoning_effort for controlling thinking depth
+      if (req.reasoning_effort) {
+        body.reasoning_effort = req.reasoning_effort;
+      }
+    }
+
+    // Add tools if provided - DeepSeek V4 models support tool calling in both modes
     if (req.tools?.length) {
       body.tools = req.tools.map(t => ({
         type: 'function',
@@ -944,11 +995,7 @@ export class DeepSeekAdapter implements LLMAdapter {
 
     if (req.jsonSchema) {
       body.response_format = {
-        type: "json_schema",
-        json_schema: {
-          name: req.jsonSchemaName || 'Result',
-          schema: req.jsonSchema
-        }
+        type: 'json_object'  // DeepSeek uses json_object, not json_schema
       };
     }
 
@@ -970,26 +1017,55 @@ export class DeepSeekAdapter implements LLMAdapter {
     
     const choice = j?.choices?.[0];
     const message = choice?.message;
-    // Handle reasoning models that put content in reasoning_content field
+
+    // --- Response text extraction ---
+    // Thinking models return reasoning in message.reasoning_content (CoT)
+    // and the final answer in message.content.
+    // IMPORTANT: Do NOT feed reasoning_content back as input — the API errors.
     let text = message?.content || '';
-    if (!text && message?.reasoning_content) {
-      text = message.reasoning_content;
+    const reasoningContent = message?.reasoning_content || '';
+
+    // Only use reasoning_content as fallback if content is completely empty
+    if (!text && reasoningContent) {
+      text = reasoningContent;
     }
     
     // Extract tool calls if present
     const toolCalls = (message?.tool_calls ?? []).map((t: any) => ({
       name: t.function?.name,
-      arguments: typeof t.function?.arguments === 'string' 
-        ? JSON.parse(t.function.arguments) 
+      arguments: typeof t.function?.arguments === 'string'
+        ? JSON.parse(t.function.arguments)
         : t.function?.arguments
     }));
 
+    // --- Token usage extraction ---
+    const usage = j?.usage ?? {};
+    // DeepSeek V4 reports reasoning_tokens separately in completion_tokens_details
+    const reasoningTokens = usage?.completion_tokens_details?.reasoning_tokens ?? 0;
+
+    // Log reasoning token telemetry for thinking models
+    if (reasoningTokens > 0) {
+      console.log(`🧠 [DeepSeek] ${req.model}: ${reasoningTokens} reasoning tokens, ${usage?.completion_tokens ?? 0} total output`);
+    }
+
+    // Detect truncated responses
+    if (choice?.finish_reason === 'length') {
+      console.warn(`⚠️ [DeepSeek] ${req.model} response truncated (finish_reason=length). max_tokens was ${maxTokens}`);
+    }
+
     return {
       text,
-      tokensIn: j?.usage?.prompt_tokens ?? 0,
-      tokensOut: j?.usage?.completion_tokens ?? 0,
+      tokensIn: usage?.prompt_tokens ?? 0,
+      tokensOut: usage?.completion_tokens ?? 0,
       toolCalls,
-      raw: j
+      raw: {
+        ...j,
+        // Expose reasoning token telemetry for cost tracking
+        reasoningTokens,
+        reasoningContent: reasoningContent || null,
+        // Expose cache hit info if available
+        cachedInputTokens: usage?.prompt_tokens_details?.cached_tokens ?? 0
+      }
     };
   }
 }

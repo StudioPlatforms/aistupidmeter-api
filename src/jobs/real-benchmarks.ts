@@ -1181,6 +1181,10 @@ async function runSingleBenchmarkStreaming(
       chatRequest.verbosity = 'low';  // Prefer concise code output
       chatRequest.store = false;       // Don't store benchmark data on OpenAI
     }
+
+    // DeepSeek thinking models: temperature has no effect in thinking mode (handled by adapter)
+    // The adapter internally skips temperature for thinking models but accepts it in ChatRequest.
+    // No additional params needed — fairness mode keeps it fair.
     
     // FAIRNESS CHECK: Assert no forbidden parameters
     assertFairRequest(chatRequest, model.name);

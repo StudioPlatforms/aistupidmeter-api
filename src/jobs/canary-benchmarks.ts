@@ -47,7 +47,9 @@ function isCreditExhaustedCanary(error: any): boolean {
 // ---- Determine if a model is a reasoning/GPT-5 model that needs longer timeouts ----
 function isReasoningModel(modelName: string): boolean {
   return /^(gpt-5|o\d|o-mini|o-)/.test(modelName) ||
-         /^claude-opus-4-([7-9]|\d{2,})/.test(modelName);
+         /^claude-opus-4-([7-9]|\d{2,})/.test(modelName) ||
+         modelName === 'deepseek-reasoner' ||
+         /^deepseek-v4/.test(modelName);  // V4 models use thinking mode
 }
 
 const execAsync = promisify(exec);
@@ -357,6 +359,8 @@ async function benchmarkModelCanaryLightning(
 
   // GPT-5.5 specific detection
   const isGPT55 = /^gpt-5\.5(?:-|$)/.test(model.name);
+  // DeepSeek thinking model detection (deepseek-reasoner, deepseek-v4-*)
+  const isDeepSeekThinking = model.name === 'deepseek-reasoner' || /^deepseek-v4/.test(model.name);
 
   try {
     // PING: Connectivity check with model-appropriate timeout
@@ -374,6 +378,11 @@ async function benchmarkModelCanaryLightning(
       pingRequest.reasoning_effort = 'low';
       pingRequest.verbosity = 'low';
       pingRequest.store = false;
+    }
+    // DeepSeek thinking models: use low reasoning effort for canary speed
+    if (isDeepSeekThinking) {
+      pingRequest.reasoning_effort = 'low';
+      pingRequest.maxTokens = 5000; // Room for reasoning tokens even on simple pings
     }
     const pingPromise = adapter.chat(pingRequest);
     
@@ -427,6 +436,11 @@ async function benchmarkModelCanaryLightning(
           taskRequest.reasoning_effort = 'low';
           taskRequest.verbosity = 'low';
           taskRequest.store = false;
+        }
+        // DeepSeek thinking models: low reasoning effort for canary speed
+        if (isDeepSeekThinking) {
+          taskRequest.reasoning_effort = 'low';
+          taskRequest.maxTokens = 8000; // Room for reasoning tokens
         }
         const taskPromise = adapter.chat(taskRequest);
         

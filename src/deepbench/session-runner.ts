@@ -42,7 +42,7 @@ export interface SessionResult {
 export interface ModelInfo {
   id: number;
   name: string;
-  vendor: 'openai' | 'anthropic' | 'google' | 'xai';
+  vendor: 'openai' | 'anthropic' | 'google' | 'xai' | 'deepseek' | 'glm' | 'kimi';
 }
 
 // Detect credit/quota exhaustion so callers can swap in synthetic scores
@@ -187,12 +187,15 @@ export class MultiTurnSession {
     const isGPT55 = /^gpt-5\.5(?:-|$)/.test(this.model.name);
     const isGPT5 = /^gpt-5/.test(this.model.name);
     const isOSeries = /^o\d|^o-mini|^o-/.test(this.model.name);
-    const isReasoningModel = isGPT5 || isOSeries;
+    const isDeepSeekThinking = this.model.name === 'deepseek-reasoner' || /^deepseek-v4/.test(this.model.name);
+    const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking;
 
-    // GPT-5.5 deep benchmarks need higher token budgets (reasoning tokens + answer tokens)
+    // Deep benchmarks need higher token budgets for reasoning models
     let maxTokens = step.maxTokens || 1500;
     if (isGPT55) {
       maxTokens = Math.max(25000, maxTokens * 5); // Deep tasks need room for reasoning
+    } else if (isDeepSeekThinking) {
+      maxTokens = Math.max(16384, maxTokens * 4); // DeepSeek thinking needs room for CoT
     } else if (isGPT5) {
       maxTokens = Math.max(8000, maxTokens * 3);
     }
@@ -224,6 +227,11 @@ export class MultiTurnSession {
       } else if (isOSeries) {
         chatRequest.reasoning_effort = 'low'; // Minimal reasoning for speed
       }
+    }
+
+    // DeepSeek V4 thinking models: high reasoning effort for deep benchmarks
+    if (this.model.vendor === 'deepseek' && isDeepSeekThinking) {
+      chatRequest.reasoning_effort = 'high'; // Deep benchmarks benefit from thorough reasoning
     }
 
     const startTime = Date.now();

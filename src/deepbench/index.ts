@@ -267,7 +267,26 @@ const MODEL_COSTS = {
   'grok-4-latest': { input: 3.0, output: 15.0 },
   'grok-4-0709': { input: 3.0, output: 15.0 },
   'grok-4-0709-eu': { input: 3.0, output: 15.0 },
-  'grok-code-fast-1': { input: 0.20, output: 1.50 }
+  'grok-code-fast-1': { input: 0.20, output: 1.50 },
+  
+  // DeepSeek - OFFICIAL from deep research (May 2026)
+  // Legacy aliases (deprecated mid-2026, route to V4-Flash)
+  'deepseek-chat': { input: 0.0028, output: 0.28 },       // Same as V4-Flash
+  'deepseek-reasoner': { input: 0.0028, output: 0.28 },   // Same as V4-Flash (thinking)
+  // V4 models
+  'deepseek-v4-flash': { input: 0.0028, output: 0.28 },   // 284B total / 13B active
+  'deepseek-v4-pro': { input: 0.003625, output: 0.87 },   // 1.6T total / 49B active
+
+  // Kimi (Moonshot AI) - estimated pricing
+  'kimi-k2-0905-preview': { input: 0.30, output: 1.50 },
+  'kimi-latest': { input: 0.30, output: 1.50 },
+  'kimi-thinking-preview': { input: 0.30, output: 1.50 },
+  
+  // GLM (Z.AI) - estimated pricing
+  'glm-4.6': { input: 0.10, output: 0.50 },
+  'glm-4.7': { input: 0.15, output: 0.75 },
+  'glm-4.7-flash': { input: 0.05, output: 0.25 },
+  'glm-4.7-flashx': { input: 0.03, output: 0.15 }
 };
 
 function calculateCostMetrics(result: SessionResult, score: number, modelName: string) {
