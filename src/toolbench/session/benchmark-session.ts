@@ -148,11 +148,26 @@ export class ToolBenchmarkSession {
         isMultiRoot: false
       };
 
+      // Determine if this is a reasoning model (GPT-5.5 rejects temperature)
+      const isGPT55 = /^gpt-5\.5(?:-|$)/.test(this.model.name);
+      const isGPT5 = /^gpt-5/.test(this.model.name);
+      const isOSeries = /^o\d|^o-mini|^o-/.test(this.model.name);
+      const isReasoningModel = isGPT5 || isOSeries;
+
+      // GPT-5.5 tool benchmarks need higher token budgets for reasoning
+      let maxTokens = 2000;
+      if (isGPT55) {
+        // Scale based on task difficulty
+        const difficultyBudget: Record<string, number> = { easy: 15000, medium: 25000, hard: 35000 };
+        maxTokens = difficultyBudget[this.task.difficulty] || 25000;
+      } else if (isGPT5) {
+        maxTokens = Math.max(8000, 2000 * 3);
+      }
+
       const request: ChatRequest = {
-        model: this.model.name, // Use the actual model name
+        model: this.model.name,
         messages: this.context.messages,
-        temperature: 0.2,
-        maxTokens: 2000,
+        maxTokens,
         tools: executionEngine.formatToolsForLLM(
           this.model.vendor,
           this.model.name,
@@ -160,6 +175,22 @@ export class ToolBenchmarkSession {
         ),
         toolChoice: 'auto'
       };
+
+      // Only set temperature for non-reasoning models
+      if (!isReasoningModel) {
+        request.temperature = 0.2;
+      }
+
+      // GPT-5.5 specific tooling benchmark configuration
+      if (isGPT55) {
+        request.reasoning_effort = 'medium';     // Balance speed vs quality for tooling
+        request.reasoning_summary = 'auto';
+        request.verbosity = 'low';               // Concise tool outputs preferred
+        request.store = false;                    // Don't store benchmark data
+        request.max_tool_calls = 15;              // Cap runaway tool loops
+      } else if (isOSeries) {
+        request.reasoning_effort = 'low';
+      }
 
       // Execute conversation turn
       const { response, toolResults } = await executionEngine.runConversationTurn(

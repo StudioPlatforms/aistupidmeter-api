@@ -21,6 +21,11 @@ export interface ChatRequest {
   reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'minimal';
   reasoning_summary?: 'auto' | 'concise' | 'detailed';
   verbosity?: 'low' | 'medium' | 'high';
+  // Responses API parameters (GPT-5.5+)
+  store?: boolean;          // Whether to store response on OpenAI side (default false for benchmarks)
+  truncation?: 'auto' | 'disabled'; // How to handle context overflow
+  max_tool_calls?: number;  // Cap on tool calls per response
+  instructions?: string;    // Developer-level system message (Responses API native)
 }
 export interface ChatResponse {
   text: string;
@@ -33,6 +38,16 @@ export interface ChatResponse {
 export interface LLMAdapter {
   listModels(): Promise<string[]>;
   chat(req: ChatRequest): Promise<ChatResponse>;
+}
+
+// ---------- GPT-5.5 Pinned Snapshot ----------
+// Use the pinned snapshot for reproducible benchmark results.
+// The floating alias 'gpt-5.5' can change behavior without notice.
+export const GPT55_PINNED_SNAPSHOT = 'gpt-5.5-2026-04-23';
+
+// Helper: check if model is GPT-5.5 (including pinned snapshots)
+export function isGPT55Model(modelName: string): boolean {
+  return /^gpt-5\.5(?:-|$)/.test(modelName);
 }
 
 // ---------- OPENAI (Responses API) ----------
@@ -69,28 +84,53 @@ export class OpenAIAdapter implements LLMAdapter {
     const isGPT5 = /^gpt-5/.test(req.model);
     const isGPT55 = /^gpt-5\.5(?:-|$)/.test(req.model);
 
-    // GPT-5 needs much higher token limits because max_output_tokens includes reasoning tokens.
-    // GPT-5.5: OpenAI recommends reserving at least 25k for reasoning+answer on deep tasks.
+    // GPT-5 needs higher token limits because max_output_tokens includes reasoning tokens.
+    // Each benchmark suite now sets its own appropriate budget; the adapter applies
+    // a minimum floor to prevent accidental truncation of reasoning.
     let maxTokens = req.maxTokens ?? 1200;
     if (isGPT55) {
-      // GPT-5.5 reasoning can consume many tokens; scale based on task complexity
-      maxTokens = Math.max(25000, (req.maxTokens || 1200) * 5);
+      // If the caller already set a high value (deep/tool benchmarks), respect it.
+      // Otherwise apply a floor of 8000 (suitable for coding benchmarks where fairness
+      // mode sends maxTokens=1500 — reasoning tokens need room to think).
+      if (maxTokens < 8000) {
+        maxTokens = 8000; // Minimum floor for GPT-5.5 (coding benchmarks)
+      }
+      // Cap at 128000 (GPT-5.5 max output limit)
+      maxTokens = Math.min(maxTokens, 128000);
     } else if (isGPT5) {
-      maxTokens = Math.max(8000, (req.maxTokens || 1200) * 5);
+      maxTokens = Math.max(8000, (req.maxTokens || 1200) * 3);
     }
+
+    // Use instructions field for system messages (Responses API native) when available
+    const systemMsg = req.instructions || req.messages.find(m => m.role === 'system')?.content;
+    const nonSystemMessages = req.messages.filter(m => m.role !== 'system');
 
     const body: any = {
       model: req.model,
       // Proper content blocks for Responses API
-      input: req.messages.map(m => ({
+      input: nonSystemMessages.map(m => ({
         role: m.role,
         content: [{
           type: m.role === 'assistant' ? "output_text" : "input_text",
           text: m.content
         }]
       })),
-      max_output_tokens: maxTokens
+      max_output_tokens: maxTokens,
+      // Benchmark safety: don't store responses on OpenAI servers
+      store: req.store !== undefined ? req.store : false,
+      // Fail loudly on context overflow instead of silent truncation
+      truncation: req.truncation || 'disabled'
     };
+
+    // Use instructions field for system-level prompt (Responses API best practice)
+    if (systemMsg) {
+      body.instructions = systemMsg;
+    }
+
+    // Cap tool calls per response to prevent runaway loops
+    if (req.max_tool_calls) {
+      body.max_tool_calls = req.max_tool_calls;
+    }
     
     // Only non-reasoning models accept temperature
     if (!isReasoning && typeof req.temperature === 'number') {
@@ -323,6 +363,20 @@ export class OpenAIAdapter implements LLMAdapter {
     }
 
     const usage = j?.usage ?? {};
+
+    // --- Incomplete response detection (GPT-5.5 deep research fix) ---
+    if (j?.incomplete_details || j?.status === 'incomplete') {
+      const reason = j?.incomplete_details?.reason || 'unknown';
+      const reasoningTokens = usage?.output_tokens_details?.reasoning_tokens ?? 0;
+      console.warn(`⚠️ [GPT-5.5] Response incomplete! Reason: ${reason}`);
+      console.warn(`   Model: ${req.model} | Status: ${j?.status}`);
+      console.warn(`   Reasoning tokens used: ${reasoningTokens}`);
+      console.warn(`   max_output_tokens was: ${maxTokens}`);
+      if (reason === 'max_output_tokens') {
+        console.warn(`   💡 Consider increasing max_output_tokens (currently ${maxTokens})`);
+      }
+    }
+
     return {
       text,
       tokensIn: usage?.prompt_tokens ?? usage?.input_tokens ?? 0,

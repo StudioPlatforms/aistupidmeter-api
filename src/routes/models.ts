@@ -698,6 +698,7 @@ export default async function (fastify: FastifyInstance, opts: any) {
         for (const row of rawRows) {
           if (!row.ts) continue; // Skip null timestamps
           const d = new Date(row.ts);
+          if (isNaN(d.getTime())) continue; // Skip invalid timestamps (e.g. corrupted data)
           const hourStart = new Date(Date.UTC(
             d.getUTCFullYear(),
             d.getUTCMonth(),

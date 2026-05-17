@@ -355,14 +355,27 @@ async function benchmarkModelCanaryLightning(
   // Global: all tasks combined
   const globalTimeoutMs = isReasoning ? 180000 : 60000;
 
+  // GPT-5.5 specific detection
+  const isGPT55 = /^gpt-5\.5(?:-|$)/.test(model.name);
+
   try {
     // PING: Connectivity check with model-appropriate timeout
-    const pingPromise = adapter.chat({
+    const pingRequest: any = {
       model: model.name,
       messages: [{ role: 'user', content: 'Hi' }],
-      temperature: 0,
-      maxTokens: isReasoning ? 100 : 5  // reasoning models need more output tokens even for simple responses
-    });
+      maxTokens: isReasoning ? 5000 : 5  // GPT-5.5 needs room for reasoning tokens even on simple pings
+    };
+    // Only set temperature for non-reasoning models (GPT-5.5 rejects it)
+    if (!isReasoning) {
+      pingRequest.temperature = 0;
+    }
+    // GPT-5.5 canary: use minimal reasoning for fastest possible response
+    if (isGPT55) {
+      pingRequest.reasoning_effort = 'low';
+      pingRequest.verbosity = 'low';
+      pingRequest.store = false;
+    }
+    const pingPromise = adapter.chat(pingRequest);
     
     const timeoutPromise = new Promise((_, reject) =>
       setTimeout(() => reject(new Error('Ping timeout')), pingTimeoutMs)
@@ -400,12 +413,22 @@ async function benchmarkModelCanaryLightning(
       try {
         const taskStartTime = Date.now();
         
-        const taskPromise = adapter.chat({
+        const taskRequest: any = {
           model: model.name,
           messages: [{ role: 'user', content: task.prompt }],
-          temperature: 0.3,
-          maxTokens: Math.min(task.maxTokens || 500, isReasoning ? 1500 : 500)
-        });
+          maxTokens: isGPT55 ? 8000 : Math.min(task.maxTokens || 500, isReasoning ? 1500 : 500)
+        };
+        // Only set temperature for non-reasoning models (GPT-5.5 rejects it)
+        if (!isReasoning) {
+          taskRequest.temperature = 0.3;
+        }
+        // GPT-5.5 canary: low reasoning effort for speed, concise output
+        if (isGPT55) {
+          taskRequest.reasoning_effort = 'low';
+          taskRequest.verbosity = 'low';
+          taskRequest.store = false;
+        }
+        const taskPromise = adapter.chat(taskRequest);
         
         const taskTimeoutPromise = new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Task timeout')), taskTimeoutMs)

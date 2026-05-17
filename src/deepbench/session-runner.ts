@@ -183,17 +183,47 @@ export class MultiTurnSession {
       artifacts: this.artifacts
     });
 
+    // Determine if this is a GPT-5.5 or reasoning model
+    const isGPT55 = /^gpt-5\.5(?:-|$)/.test(this.model.name);
+    const isGPT5 = /^gpt-5/.test(this.model.name);
+    const isOSeries = /^o\d|^o-mini|^o-/.test(this.model.name);
+    const isReasoningModel = isGPT5 || isOSeries;
+
+    // GPT-5.5 deep benchmarks need higher token budgets (reasoning tokens + answer tokens)
+    let maxTokens = step.maxTokens || 1500;
+    if (isGPT55) {
+      maxTokens = Math.max(25000, maxTokens * 5); // Deep tasks need room for reasoning
+    } else if (isGPT5) {
+      maxTokens = Math.max(8000, maxTokens * 3);
+    }
+
     // Prepare chat request with anti-caching
     const chatRequest: ChatRequest = {
       model: this.model.name,
       messages: [...this.conversation, { role: 'user', content: prompt }],
-      temperature: step.temperature || 0.1,
-      maxTokens: step.maxTokens || 1500
+      maxTokens
     };
 
-    // Add reasoning effort for OpenAI o-series models
-    if (this.model.vendor === 'openai' && /^o\d|^o-mini|^o-/.test(this.model.name)) {
-      (chatRequest as any).reasoning_effort = 'low'; // Minimal reasoning for speed
+    // Only set temperature for non-reasoning models (GPT-5.5 rejects temperature)
+    if (!isReasoningModel) {
+      chatRequest.temperature = step.temperature || 0.1;
+    }
+
+    // Configure reasoning effort per model family
+    if (this.model.vendor === 'openai') {
+      if (isGPT55) {
+        // GPT-5.5 benefits from high reasoning effort in deep benchmarks
+        chatRequest.reasoning_effort = 'high';
+        chatRequest.reasoning_summary = 'detailed';
+        chatRequest.verbosity = 'medium'; // Allow detailed explanations for deep tasks
+        chatRequest.store = false;        // Don't store benchmark data
+        chatRequest.truncation = 'disabled'; // Fail loudly on overflow
+      } else if (isGPT5) {
+        chatRequest.reasoning_effort = 'medium';
+        chatRequest.reasoning_summary = 'auto';
+      } else if (isOSeries) {
+        chatRequest.reasoning_effort = 'low'; // Minimal reasoning for speed
+      }
     }
 
     const startTime = Date.now();
@@ -206,12 +236,26 @@ export class MultiTurnSession {
       throw new Error('Failed to get response from LLM after retries');
     }
 
+    // GPT-5.5 incomplete response detection
+    if (response.raw?.incompleteDetails || response.raw?.responseStatus === 'incomplete') {
+      const reason = response.raw?.incompleteDetails?.reason || 'unknown';
+      const reasoningTokens = response.raw?.reasoningTokens ?? 0;
+      console.warn(`⚠️ [Deep Benchmark] ${this.model.name} response incomplete at turn ${turnIndex}!`);
+      console.warn(`   Reason: ${reason} | Reasoning tokens: ${reasoningTokens} | Max tokens: ${maxTokens}`);
+    }
+
     // Extract response text and token counts
     const responseText = this.extractResponseText(response);
     const tokensIn = this.extractTokensIn(response) || this.estimateTokens(
       chatRequest.messages.map(m => m.content).join('\n')
     );
     const tokensOut = this.extractTokensOut(response) || this.estimateTokens(responseText);
+
+    // Track reasoning tokens separately for GPT-5.5 cost analysis
+    const reasoningTokens = response.raw?.reasoningTokens ?? 0;
+    if (reasoningTokens > 0) {
+      console.log(`   🧠 ${this.model.name} turn ${turnIndex}: ${reasoningTokens} reasoning tokens, ${tokensOut} total output tokens`);
+    }
 
     // Update totals
     this.totalLatencyMs += latencyMs;

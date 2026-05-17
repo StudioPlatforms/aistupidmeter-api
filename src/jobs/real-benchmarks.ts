@@ -168,9 +168,14 @@ const STD_EPS = 1e-6;                // avoid div-by-zero
 const FAIR_MODE = true;
 const UNIFIED_MAX_TOKENS = 1500;     // Hard cap for everyone
 const UNIFIED_TEMPERATURE = 0.1;
-const ALLOWED_PARAMS = new Set(['model', 'messages', 'temperature', 'max_tokens', 'maxTokens']);
-const FORBIDDEN_PARAMS = ['reasoning_effort', 'thinking', 'thinkingConfig', 'top_p', 'stop', 
-                         'tool_choice', 'response_format', 'logprobs', 'frequency_penalty', 
+// GPT-5.5 observability params (verbosity, store, truncation, reasoning_summary) are allowed
+// because they don't affect model reasoning capability — they control output format and storage
+const ALLOWED_PARAMS = new Set([
+  'model', 'messages', 'temperature', 'max_tokens', 'maxTokens',
+  'verbosity', 'store', 'truncation', 'reasoning_summary', 'instructions'
+]);
+const FORBIDDEN_PARAMS = ['reasoning_effort', 'thinking', 'thinkingConfig', 'top_p', 'stop',
+                         'tool_choice', 'response_format', 'logprobs', 'frequency_penalty',
                          'presence_penalty', 'logit_bias', 'seed'];
 
 // --- Simple global score calibration (rank-preserving) ---
@@ -1169,6 +1174,13 @@ async function runSingleBenchmarkStreaming(
       temperature,
       maxTokens
     };
+
+    // GPT-5.5 specific: set verbosity low for concise code output, disable storage
+    // Note: reasoning_effort is FORBIDDEN in fairness mode — the adapter sets its own default ('medium')
+    if (/^gpt-5\.5(?:-|$)/.test(model.name)) {
+      chatRequest.verbosity = 'low';  // Prefer concise code output
+      chatRequest.store = false;       // Don't store benchmark data on OpenAI
+    }
     
     // FAIRNESS CHECK: Assert no forbidden parameters
     assertFairRequest(chatRequest, model.name);
@@ -1187,7 +1199,7 @@ async function runSingleBenchmarkStreaming(
     const latencyMs = Date.now() - t0;
     
     streamLog('info', `      ⏱️ Response received in ${latencyMs}ms`);
-    
+
     if (!res) {
       if (retryAttempt < maxRetries) {
         streamLog('warning', `      ⚠️ Empty response from ${model.vendor}/${model.name} - retrying in a moment...`);
@@ -1201,6 +1213,19 @@ async function runSingleBenchmarkStreaming(
     // Extract text using the normalizer function
     const rawText = extractTextFromAdapter(res);
     
+    // GPT-5.5 incomplete response detection (after null check)
+    if (res.raw?.incompleteDetails || res.raw?.responseStatus === 'incomplete') {
+      const reason = res.raw?.incompleteDetails?.reason || 'unknown';
+      const reasoningTokens = res.raw?.reasoningTokens ?? 0;
+      streamLog('warning', `      ⚠️ GPT-5.5 response INCOMPLETE! Reason: ${reason}`);
+      streamLog('warning', `      🧠 Reasoning tokens: ${reasoningTokens} | Model: ${model.name}`);
+    }
+
+    // Log reasoning token telemetry for GPT-5.5 cost tracking
+    if (res.raw?.reasoningTokens > 0) {
+      streamLog('info', `      🧠 Reasoning tokens: ${res.raw.reasoningTokens} (billed as output at $30/1M)`);
+    }
+
     if (!rawText) {
       if (retryAttempt < maxRetries) {
         streamLog('warning', `      ⚠️ No text in response from ${model.vendor}/${model.name} - trying again...`);

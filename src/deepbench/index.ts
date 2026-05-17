@@ -237,6 +237,7 @@ const MODEL_COSTS = {
   'gpt-5.2': { input: 1.75, output: 14.0 },
   'gpt-5.4': { input: 2.50, output: 15.0 },
   'gpt-5.5': { input: 5.0, output: 30.0 },  // April 2026 — reasoning tokens billed as output
+  'gpt-5.5-2026-04-23': { input: 5.0, output: 30.0 },  // Pinned snapshot (same pricing)
   'gpt-5.1-codex': { input: 1.25, output: 10.0 },
   
   // Anthropic Claude - OFFICIAL VERIFIED Feb 17, 2026
