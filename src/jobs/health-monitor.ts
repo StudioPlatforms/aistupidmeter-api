@@ -77,7 +77,7 @@ async function checkProviderHealth(provider: string, adapter: any): Promise<Heal
         testModel = 'claude-sonnet-4-20250514'; // Latest Claude Sonnet 4
         break;
       case 'google':
-        testModel = 'gemini-2.5-flash'; // Latest Gemini 2.5 Flash
+        testModel = 'gemini-3.1-flash-lite'; // Latest Gemini 3.1 Flash-Lite (GA, Mar 2026)
         break;
       case 'xai':
         testModel = 'grok-4'; // Latest Grok 4

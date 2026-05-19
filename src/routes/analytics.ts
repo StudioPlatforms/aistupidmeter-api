@@ -83,8 +83,13 @@ function getModelPricing(modelName: string, provider: string): { input: number; 
   }
   
   if (prov === 'google') {
-    // Google Gemini - Official pricing (verified 2026-02-17)
+    // Google Gemini - Official pricing (verified May 2026)
+    // Gemini 3.1 series
+    if (name.includes('3.1-pro')) return { input: 2, output: 12 };
+    if (name.includes('3.1-flash-lite') || name.includes('3.1-flash')) return { input: 0.25, output: 1.50 };
+    // Gemini 3.0 series
     if (name.includes('gemini-3') && name.includes('pro')) return { input: 2, output: 12 };
+    if (name.includes('gemini-3') && name.includes('flash')) return { input: 0.50, output: 3.00 };
     // Gemini 2.5 series
     if (name.includes('2.5-pro')) return { input: 1.25, output: 10.00 };
     if (name.includes('2.5-flash-lite')) return { input: 0.10, output: 0.40 };

@@ -253,13 +253,18 @@ const MODEL_COSTS = {
   'claude-opus-4-7': { input: 5.0, output: 25.0 }, // April 2026 reasoning model
   'claude-3-7-sonnet-20250219': { input: 3.0, output: 15.0 }, // Deprecated, retires 2026-02-19
   
-  // Google Gemini - OFFICIAL VERIFIED Feb 17, 2026
+  // Google Gemini - OFFICIAL VERIFIED May 2026
   'gemini-1.5-flash': { input: 0.075, output: 0.30 },
   'gemini-1.5-pro': { input: 1.25, output: 5.0 },
   'gemini-2.5-pro': { input: 1.25, output: 10.0 },
   'gemini-2.5-flash': { input: 0.30, output: 2.50 },
   'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
   'gemini-3-pro-preview': { input: 2.0, output: 12.0 },
+  // Gemini 3.1 series (Feb/Mar 2026) — from deep research
+  'gemini-3.1-pro-preview': { input: 2.0, output: 12.0 },     // Flagship, 1M context
+  'gemini-3.1-flash-lite': { input: 0.25, output: 1.50 },     // GA, cost-efficient, 2.5× faster
+  'gemini-3.1-flash-lite-preview': { input: 0.25, output: 1.50 },
+  'gemini-3-flash-preview': { input: 0.50, output: 3.0 },     // Estimated
   
   // xAI Grok - OFFICIAL VERIFIED Feb 17, 2026
   'grok-3-mini': { input: 0.30, output: 0.50 },

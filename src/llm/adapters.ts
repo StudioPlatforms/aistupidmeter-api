@@ -782,13 +782,18 @@ export class GoogleAdapter implements LLMAdapter {
     try {
       const r = await fetch(`${this.base}/v1beta/models?key=${this.apiKey}`);
       const j: any = await r.json();
-      // Only return models your key is actually entitled to
+      // Filter to only Gemini chat LLM models (exclude embeddings, imagen, veo, gemma, etc.)
       const discovered = (j.models ?? [])
-        .map((m: any) => String(m.name).replace('models/', ''));
+        .map((m: any) => String(m.name).replace('models/', ''))
+        .filter((id: string) => /^gemini-/.test(id) &&
+          !id.includes('embedding') && !id.includes('-tts') &&
+          !id.includes('-live') && !id.includes('-image') &&
+          !id.includes('native-audio') && !id.includes('robotics') &&
+          !id.includes('computer-use'));
       return discovered;
     } catch {
-      // Conservative fallback: 1.5 family only
-      return ['gemini-1.5-flash', 'gemini-1.5-pro'];
+      // Fallback to current recommended models (3.1 series as of May 2026)
+      return ['gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-2.5-flash'];
     }
   }
   async chat(req: ChatRequest): Promise<ChatResponse> {
@@ -821,13 +826,15 @@ export class GoogleAdapter implements LLMAdapter {
       ]
     };
 
-    // If 2.5, give each request a harmless unique salt to avoid prompt dedupe
+    // Give each request a harmless unique salt to avoid prompt dedupe (2.5+ and 3.x)
     let salt = '';
-    if (req.model.includes('gemini-2.5')) {
+    if (req.model.includes('gemini-2.5') || req.model.includes('gemini-3')) {
       salt = `\n\n<!-- salt:${Math.random().toString(36).slice(2, 8)} -->`;
     }
 
     // Adjust thinking config for Gemini 2.5 models
+    // Gemini 3.x: Google recommends default temperature=1.0 and no explicit thinkingConfig.
+    // Thinking is built-in (returns thoughtSignature in parts). No thinkingBudget needed.
     if (req.model.includes("gemini-2.5-pro")) {
       body.generationConfig.thinkingConfig = { thinkingBudget: 128 };
     } else if (req.model.includes("gemini-2.5-flash")) {
@@ -910,7 +917,7 @@ export class GoogleAdapter implements LLMAdapter {
       return { t2, j2 };
     };
 
-    if (!text && req.model.includes('gemini-2.5')) {
+    if (!text && (req.model.includes('gemini-2.5') || req.model.includes('gemini-3'))) {
       const { t2, j2 } = await trySmartRetry(1);
       text = t2;
       if (!text) {
