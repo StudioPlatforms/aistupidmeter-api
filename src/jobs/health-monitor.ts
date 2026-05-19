@@ -89,7 +89,7 @@ async function checkProviderHealth(provider: string, adapter: any): Promise<Heal
         testModel = 'glm-4.6'; // GLM-4.6
         break;
       case 'kimi':
-        testModel = 'kimi-latest'; // Latest Kimi model
+        testModel = 'kimi-k2.6'; // Latest Kimi K2.6 model (April 2026)
         break;
       default:
         // Fallback to listModels for unknown providers

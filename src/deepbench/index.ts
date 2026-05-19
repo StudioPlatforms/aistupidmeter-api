@@ -277,10 +277,14 @@ const MODEL_COSTS = {
   'deepseek-v4-flash': { input: 0.0028, output: 0.28 },   // 284B total / 13B active
   'deepseek-v4-pro': { input: 0.003625, output: 0.87 },   // 1.6T total / 49B active
 
-  // Kimi (Moonshot AI) - estimated pricing
+  // Kimi (Moonshot AI) — estimated pricing (K2.5/K2.6 are 1T MoE, 32B active)
+  // Legacy models (deprecated — blacklisted)
   'kimi-k2-0905-preview': { input: 0.30, output: 1.50 },
   'kimi-latest': { input: 0.30, output: 1.50 },
   'kimi-thinking-preview': { input: 0.30, output: 1.50 },
+  // Current models (K2.5/K2.6 — whitelisted, thinking mode with reasoning_content)
+  'kimi-k2.5': { input: 0.30, output: 1.50 },
+  'kimi-k2.6': { input: 0.30, output: 1.50 },
   
   // GLM (Z.AI) - estimated pricing
   'glm-4.6': { input: 0.10, output: 0.50 },

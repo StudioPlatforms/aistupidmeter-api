@@ -67,6 +67,22 @@ export function isDeepSeekModel(modelName: string): boolean {
   return /^deepseek-/.test(modelName);
 }
 
+// ---------- Kimi (Moonshot AI) Model Detection ----------
+// Kimi K2.5/K2.6 are reasoning models (supports_reasoning: true from API).
+// Thinking mode (default): temperature MUST be 1.0, returns reasoning_content + content.
+// Disabled mode: thinking: {type: 'disabled'}, temperature MUST be 0.6.
+// We always use thinking mode for K2 reasoning models in benchmarks.
+
+// Helper: check if Kimi model uses thinking (chain-of-thought) mode.
+export function isKimiThinkingModel(modelName: string): boolean {
+  return /^kimi-k2\.[56]/.test(modelName);
+}
+
+// Helper: check if model is any Kimi model
+export function isKimiModel(modelName: string): boolean {
+  return /^kimi-/.test(modelName);
+}
+
 // ---------- OPENAI (Responses API) ----------
 export class OpenAIAdapter implements LLMAdapter {
   constructor(private apiKey: string, private base = 'https://api.openai.com') {}
@@ -1071,6 +1087,10 @@ export class DeepSeekAdapter implements LLMAdapter {
 }
 
 // ---------- KIMI (Moonshot AI) ----------
+// K2.5/K2.6 are thinking models (supports_reasoning: true).
+// Thinking mode (default): temperature MUST be 1.0, returns reasoning_content + content.
+// Disabled mode: thinking: {type: 'disabled'}, temperature MUST be 0.6.
+// IMPORTANT: Do NOT feed reasoning_content back as conversation input.
 export class KimiAdapter implements LLMAdapter {
   constructor(private apiKey: string, private base = 'https://api.moonshot.ai') {}
   
@@ -1085,25 +1105,48 @@ export class KimiAdapter implements LLMAdapter {
         .map((m: any) => m.id)
         .filter((id: string) => /^kimi/.test(id));
     } catch {
-      // Fallback to known working models
+      // Fallback to current recommended models (K2.5/K2.6 are latest as of May 2026)
       return [
-        'kimi-k2-0905-preview',
-        'kimi-latest',
-        'kimi-thinking-preview'
+        'kimi-k2.5',
+        'kimi-k2.6'
       ];
     }
   }
   
   async chat(req: ChatRequest): Promise<ChatResponse> {
+    // Detect model capabilities
+    const isThinking = isKimiThinkingModel(req.model);
+
+    // Thinking models need room for chain-of-thought reasoning tokens
+    let maxTokens = req.maxTokens ?? 4096;
+    if (isThinking && maxTokens < 8192) {
+      maxTokens = Math.max(8192, maxTokens);
+    }
+
     const body: any = {
       model: req.model,
       messages: req.messages,
-      temperature: req.temperature ?? 0.6, // Kimi recommended default
-      max_tokens: req.maxTokens ?? 4096,
+      max_tokens: maxTokens,
       stream: req.stream ?? false
     };
 
-    // Add tools if provided
+    // --- Temperature handling ---
+    // Kimi K2.5/K2.6 thinking mode: temperature MUST be 1.0 (API rejects anything else).
+    // Kimi K2.5/K2.6 disabled mode: temperature MUST be 0.6.
+    // Older models (kimi-latest, etc.): accept normal temperature range.
+    if (isThinking) {
+      // Always use thinking mode with forced temp=1.0
+      body.temperature = 1.0;
+    } else {
+      body.temperature = req.temperature ?? 0.6;  // Kimi recommended default for non-thinking
+    }
+
+    // --- Thinking mode configuration (K2.5/K2.6 models) ---
+    // K2.5/K2.6 default to thinking mode (reasoning_content returned).
+    // We keep thinking enabled for all benchmarks — it's their natural mode.
+    // To disable: body.thinking = { type: 'disabled' } + temp=0.6.
+
+    // Add tools if provided — K2.5/K2.6 support tool calling in thinking mode
     if (req.tools?.length) {
       body.tools = req.tools.map(t => ({
         type: 'function',
@@ -1121,11 +1164,7 @@ export class KimiAdapter implements LLMAdapter {
 
     if (req.jsonSchema) {
       body.response_format = {
-        type: "json_schema",
-        json_schema: {
-          name: req.jsonSchemaName || 'Result',
-          schema: req.jsonSchema
-        }
+        type: 'json_object'  // Kimi supports json_object (not full json_schema)
       };
     }
 
@@ -1147,26 +1186,52 @@ export class KimiAdapter implements LLMAdapter {
     
     const choice = j?.choices?.[0];
     const message = choice?.message;
-    // Handle reasoning models that put content in reasoning_content field
+
+    // --- Response text extraction ---
+    // Thinking models return reasoning in message.reasoning_content (CoT)
+    // and the final answer in message.content.
+    // IMPORTANT: Do NOT feed reasoning_content back as input — it's internal CoT.
     let text = message?.content || '';
-    if (!text && message?.reasoning_content) {
-      text = message.reasoning_content;
+    const reasoningContent = message?.reasoning_content || '';
+
+    // Only use reasoning_content as fallback if content is completely empty
+    if (!text && reasoningContent) {
+      text = reasoningContent;
     }
     
     // Extract tool calls if present
     const toolCalls = (message?.tool_calls ?? []).map((t: any) => ({
       name: t.function?.name,
-      arguments: typeof t.function?.arguments === 'string' 
-        ? JSON.parse(t.function.arguments) 
+      arguments: typeof t.function?.arguments === 'string'
+        ? JSON.parse(t.function.arguments)
         : t.function?.arguments
     }));
 
+    // --- Token usage extraction ---
+    const usage = j?.usage ?? {};
+    // Kimi K2.5/K2.6 do NOT report reasoning_tokens separately (all in completion_tokens)
+
+    // Log reasoning content telemetry for thinking models
+    if (reasoningContent) {
+      const reasoningChars = reasoningContent.length;
+      console.log(`🧠 [Kimi] ${req.model}: ~${reasoningChars} chars reasoning, ${usage?.completion_tokens ?? 0} total output tokens`);
+    }
+
+    // Detect truncated responses
+    if (choice?.finish_reason === 'length') {
+      console.warn(`⚠️ [Kimi] ${req.model} response truncated (finish_reason=length). max_tokens was ${maxTokens}`);
+    }
+
     return {
       text,
-      tokensIn: j?.usage?.prompt_tokens ?? 0,
-      tokensOut: j?.usage?.completion_tokens ?? 0,
+      tokensIn: usage?.prompt_tokens ?? 0,
+      tokensOut: usage?.completion_tokens ?? 0,
       toolCalls,
-      raw: j
+      raw: {
+        ...j,
+        // Expose reasoning content for cost tracking and debugging
+        reasoningContent: reasoningContent || null
+      }
     };
   }
 }

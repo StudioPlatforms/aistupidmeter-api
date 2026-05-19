@@ -188,7 +188,8 @@ export class MultiTurnSession {
     const isGPT5 = /^gpt-5/.test(this.model.name);
     const isOSeries = /^o\d|^o-mini|^o-/.test(this.model.name);
     const isDeepSeekThinking = this.model.name === 'deepseek-reasoner' || /^deepseek-v4/.test(this.model.name);
-    const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking;
+    const isKimiThinking = /^kimi-k2\.[56]/.test(this.model.name);
+    const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking;
 
     // Deep benchmarks need higher token budgets for reasoning models
     let maxTokens = step.maxTokens || 1500;
@@ -196,6 +197,8 @@ export class MultiTurnSession {
       maxTokens = Math.max(25000, maxTokens * 5); // Deep tasks need room for reasoning
     } else if (isDeepSeekThinking) {
       maxTokens = Math.max(16384, maxTokens * 4); // DeepSeek thinking needs room for CoT
+    } else if (isKimiThinking) {
+      maxTokens = Math.max(16384, maxTokens * 4); // Kimi K2.5/K2.6 thinking needs room for CoT
     } else if (isGPT5) {
       maxTokens = Math.max(8000, maxTokens * 3);
     }
@@ -233,6 +236,9 @@ export class MultiTurnSession {
     if (this.model.vendor === 'deepseek' && isDeepSeekThinking) {
       chatRequest.reasoning_effort = 'high'; // Deep benchmarks benefit from thorough reasoning
     }
+
+    // Kimi K2.5/K2.6 thinking models: temperature handled by adapter (forced to 1.0).
+    // No reasoning_effort parameter available — Kimi always uses full thinking in thinking mode.
 
     const startTime = Date.now();
     

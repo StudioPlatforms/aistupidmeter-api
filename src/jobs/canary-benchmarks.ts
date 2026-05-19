@@ -49,7 +49,8 @@ function isReasoningModel(modelName: string): boolean {
   return /^(gpt-5|o\d|o-mini|o-)/.test(modelName) ||
          /^claude-opus-4-([7-9]|\d{2,})/.test(modelName) ||
          modelName === 'deepseek-reasoner' ||
-         /^deepseek-v4/.test(modelName);  // V4 models use thinking mode
+         /^deepseek-v4/.test(modelName) ||  // DeepSeek V4 models use thinking mode
+         /^kimi-k2\.[56]/.test(modelName);  // Kimi K2.5/K2.6 are thinking models (temp=1, reasoning_content)
 }
 
 const execAsync = promisify(exec);
@@ -361,6 +362,8 @@ async function benchmarkModelCanaryLightning(
   const isGPT55 = /^gpt-5\.5(?:-|$)/.test(model.name);
   // DeepSeek thinking model detection (deepseek-reasoner, deepseek-v4-*)
   const isDeepSeekThinking = model.name === 'deepseek-reasoner' || /^deepseek-v4/.test(model.name);
+  // Kimi K2.5/K2.6 thinking model detection (temp=1, reasoning_content returned)
+  const isKimiThinking = /^kimi-k2\.[56]/.test(model.name);
 
   try {
     // PING: Connectivity check with model-appropriate timeout
@@ -383,6 +386,11 @@ async function benchmarkModelCanaryLightning(
     if (isDeepSeekThinking) {
       pingRequest.reasoning_effort = 'low';
       pingRequest.maxTokens = 5000; // Room for reasoning tokens even on simple pings
+    }
+    // Kimi K2.5/K2.6 thinking models: temp handled by adapter (forced to 1.0)
+    // Need extra token budget for reasoning_content
+    if (isKimiThinking) {
+      pingRequest.maxTokens = 5000; // Room for CoT reasoning tokens
     }
     const pingPromise = adapter.chat(pingRequest);
     
@@ -441,6 +449,10 @@ async function benchmarkModelCanaryLightning(
         if (isDeepSeekThinking) {
           taskRequest.reasoning_effort = 'low';
           taskRequest.maxTokens = 8000; // Room for reasoning tokens
+        }
+        // Kimi K2.5/K2.6 thinking models: temp handled by adapter (forced to 1.0)
+        if (isKimiThinking) {
+          taskRequest.maxTokens = 8000; // Room for CoT reasoning tokens
         }
         const taskPromise = adapter.chat(taskRequest);
         

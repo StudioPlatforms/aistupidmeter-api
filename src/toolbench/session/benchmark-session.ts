@@ -153,7 +153,8 @@ export class ToolBenchmarkSession {
       const isGPT5 = /^gpt-5/.test(this.model.name);
       const isOSeries = /^o\d|^o-mini|^o-/.test(this.model.name);
       const isDeepSeekThinking = this.model.name === 'deepseek-reasoner' || /^deepseek-v4/.test(this.model.name);
-      const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking;
+      const isKimiThinking = /^kimi-k2\.[56]/.test(this.model.name);
+      const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking;
 
       // Reasoning models need higher token budgets for thinking + tool calling
       let maxTokens = 2000;
@@ -163,6 +164,10 @@ export class ToolBenchmarkSession {
         maxTokens = difficultyBudget[this.task.difficulty] || 25000;
       } else if (isDeepSeekThinking) {
         // DeepSeek thinking models need room for CoT + tool call output
+        const difficultyBudget: Record<string, number> = { easy: 8192, medium: 12288, hard: 16384 };
+        maxTokens = difficultyBudget[this.task.difficulty] || 12288;
+      } else if (isKimiThinking) {
+        // Kimi K2.5/K2.6 thinking models: similar CoT budget as DeepSeek
         const difficultyBudget: Record<string, number> = { easy: 8192, medium: 12288, hard: 16384 };
         maxTokens = difficultyBudget[this.task.difficulty] || 12288;
       } else if (isGPT5) {
@@ -196,6 +201,9 @@ export class ToolBenchmarkSession {
       } else if (isDeepSeekThinking) {
         // DeepSeek thinking models: medium reasoning for tool benchmarks
         request.reasoning_effort = 'medium';
+      } else if (isKimiThinking) {
+        // Kimi K2.5/K2.6: no reasoning_effort param — always full thinking.
+        // Temperature handled by adapter (forced to 1.0 for thinking mode).
       } else if (isOSeries) {
         request.reasoning_effort = 'low';
       }

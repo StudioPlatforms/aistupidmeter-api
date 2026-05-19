@@ -1186,6 +1186,11 @@ async function runSingleBenchmarkStreaming(
     // The adapter internally skips temperature for thinking models but accepts it in ChatRequest.
     // No additional params needed — fairness mode keeps it fair.
     
+    // Kimi K2.5/K2.6 thinking models: adapter forces temperature=1.0 for thinking mode.
+    // In fairness mode the benchmark sends temperature=0.1, but the adapter overrides to 1.0
+    // because the Kimi API rejects any temperature other than 1.0 in thinking mode.
+    // This is analogous to DeepSeek's behavior where temperature has no effect in thinking mode.
+    
     // FAIRNESS CHECK: Assert no forbidden parameters
     assertFairRequest(chatRequest, model.name);
     const cleanRequest = sanitizeParams(chatRequest);
