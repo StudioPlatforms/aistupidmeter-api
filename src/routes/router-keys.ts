@@ -267,7 +267,7 @@ export default async function routerKeysRoutes(fastify: FastifyInstance) {
         });
       }
       
-      const validProviders = ['openai', 'anthropic', 'xai', 'google'];
+      const validProviders = ['openai', 'anthropic', 'xai', 'google', 'deepseek', 'kimi', 'glm'];
       if (!validProviders.includes(provider)) {
         return reply.code(400).send({
           error: 'Invalid request',
