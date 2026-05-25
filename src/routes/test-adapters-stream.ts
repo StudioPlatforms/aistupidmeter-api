@@ -15,8 +15,31 @@ export default async function testAdaptersStreamRoutes(fastify: FastifyInstance)
     // serialize/close the response itself - this prevents ERR_INCOMPLETE_CHUNKED_ENCODING.
     reply.hijack();
 
+    const raw = reply.raw;
+    const socket = raw.socket;
+
+    // Disable Nagle's algorithm so every write() flushes immediately instead
+    // of being coalesced. Without this, SSE events arrive in big bursts
+    // (e.g. all messages stamped with the same client timestamp) and nginx
+    // can't forward them in real time.
+    try {
+      if (socket && typeof (socket as any).setNoDelay === 'function') {
+        (socket as any).setNoDelay(true);
+      }
+      if (socket && typeof (socket as any).setKeepAlive === 'function') {
+        (socket as any).setKeepAlive(true, 30000);
+      }
+      // Disable Node's per-socket request/keep-alive timeouts for this long
+      // running response - benchmarks routinely take 5-10 minutes.
+      if (socket && typeof (socket as any).setTimeout === 'function') {
+        (socket as any).setTimeout(0);
+      }
+    } catch {
+      // best effort
+    }
+
     // Set SSE headers
-    reply.raw.writeHead(200, {
+    raw.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
       'Connection': 'keep-alive',
@@ -24,16 +47,28 @@ export default async function testAdaptersStreamRoutes(fastify: FastifyInstance)
       'X-Accel-Buffering': 'no', // Disable nginx buffering for SSE
     });
 
+    // Force headers + an initial padding so any proxy that buffers until it
+    // sees real bytes starts forwarding immediately.
+    try {
+      raw.flushHeaders?.();
+    } catch {
+      // ignore
+    }
+
     let closed = false;
 
     const safeWrite = (chunk: string) => {
       if (closed) return;
       try {
-        reply.raw.write(chunk);
+        raw.write(chunk);
       } catch {
         closed = true;
       }
     };
+
+    // 2KB of padding as a leading SSE comment helps any intermediate proxy
+    // that holds the response until the buffer fills before flushing.
+    safeWrite(`: ${' '.repeat(2048)}\n\n`);
 
     // Send initial connection message
     safeWrite(
@@ -54,10 +89,11 @@ export default async function testAdaptersStreamRoutes(fastify: FastifyInstance)
     // Listen for progress events
     benchmarkEventEmitter.on('progress', progressHandler);
 
-    // Send heartbeat every 15 seconds to keep nginx/EventSource from dropping the connection
+    // Heartbeat every 10 seconds keeps nginx / EventSource alive even when a
+    // single benchmark trial takes a while between progress events.
     const heartbeat = setInterval(() => {
       safeWrite(`: heartbeat ${Date.now()}\n\n`);
-    }, 15000);
+    }, 10000);
 
     const cleanup = () => {
       if (closed) return;
@@ -65,16 +101,21 @@ export default async function testAdaptersStreamRoutes(fastify: FastifyInstance)
       benchmarkEventEmitter.removeListener('progress', progressHandler);
       clearInterval(heartbeat);
       try {
-        reply.raw.end();
+        raw.end();
       } catch {
         // ignore
       }
     };
 
-    // Cleanup on disconnect / error
+    // Only react to the client actually closing the underlying TCP connection
+    // (or a socket error). NOTE: do NOT listen for req.raw 'end' here - on a
+    // GET request the IncomingMessage emits 'end' as soon as the (empty) body
+    // is consumed, which would tear down the SSE stream before any progress
+    // events fire.
     req.raw.on('close', cleanup);
-    req.raw.on('end', cleanup);
-    reply.raw.on('error', cleanup);
+    req.raw.on('aborted', cleanup);
+    raw.on('error', cleanup);
+    raw.on('close', cleanup);
   });
 }
 
