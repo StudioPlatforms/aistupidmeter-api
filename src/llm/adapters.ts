@@ -98,8 +98,8 @@ export class OpenAIAdapter implements LLMAdapter {
           /^(gpt-5|gpt-4o|o\d|o-mini|o-)/.test(id)
         );
     } catch {
-      // Conservative fallback: only generally available models
-      return ['gpt-4o', 'gpt-4o-mini', 'gpt-5.5'];
+      // Conservative fallback: only generally available models (May 2026)
+      return ['gpt-4o', 'gpt-4o-mini', 'gpt-5.5', 'gpt-5.5-pro'];
     }
   }
   async chat(req: ChatRequest): Promise<ChatResponse> {
@@ -510,7 +510,9 @@ export class XAIAdapter implements LLMAdapter {
       const j: any = await r.json();
       return (j?.data ?? []).map((m: any) => m.id).filter((id: string) => /^grok(-|$)/.test(id));
     } catch {
-      return ['grok-4-latest', 'grok-2-latest', 'grok-code-fast-1'];
+      // May 2026: grok-4-0709, grok-code-fast-1, grok-2-latest all retired May 15 2026
+      // grok-code-fast-1 redirects to grok-build-0.1 (NOT grok-4.3)
+      return ['grok-4.3', 'grok-build-0.1'];
     }
   }
 
@@ -663,23 +665,21 @@ export class AnthropicAdapter implements LLMAdapter {
         .map((m: any) => m.id)
         // include 3.5, 3.7 sonnet + sonnet-4/opus/haiku families
         .filter((id: string) =>
-          /^claude-(3-5-sonnet|3-5-haiku|3-7-sonnet|sonnet-4|opus-4)/.test(id)
+          /^claude-(3-5-sonnet|3-5-haiku|3-7-sonnet|sonnet-4|opus-4|haiku-4)/.test(id)
         );
     } catch {
-      // Fallback to known models including 2025/2026 ones
+      // Fallback to known models (May 2026)
+      // REMOVED: claude-sonnet-4-20250514, claude-opus-4-20250514 — retire June 15, 2026
+      // KEPT: claude-opus-4-1-20250805 and claude-opus-4-5-20251101 — still live (verify deprecation dates)
       return [
-        'claude-3-5-sonnet',
         'claude-3-5-haiku',
-        'claude-3-7-sonnet',         // rely on live list for exact suffixes
-        'claude-sonnet-4-20250514',
-        'claude-sonnet-4-5-20250929',
-        'claude-sonnet-4-6',
-        'claude-opus-4-20250514',
-        'claude-opus-4-1-20250805',
-        'claude-opus-4-1',
-        'claude-opus-4-5-20251101',  // Flagship model - November 2025
-        'claude-opus-4-6',           // February 2026
-        'claude-opus-4-7'            // April 2026 reasoning model
+        'claude-haiku-4-5',           // Current Haiku — fast & cheap
+        'claude-sonnet-4-5',          // Dateless alias (replaces -20250929 dated ID)
+        'claude-sonnet-4-5-20250929', // Pinned snapshot — still live
+        'claude-sonnet-4-6',          // February 2026
+        'claude-opus-4-5-20251101',   // November 2025 — verify deprecation date
+        'claude-opus-4-6',            // February 2026
+        'claude-opus-4-7'             // April 2026 reasoning model
       ];
     }
   }
@@ -792,8 +792,10 @@ export class GoogleAdapter implements LLMAdapter {
           !id.includes('computer-use'));
       return discovered;
     } catch {
-      // Fallback to current recommended models (3.1 series as of May 2026)
-      return ['gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-2.5-flash'];
+      // Fallback to current recommended models (May 2026)
+      // REMOVED: gemini-1.5-pro, gemini-1.5-flash — shut down June 1, 2026
+      // ADDED: gemini-3.5-flash — GA May 19, 2026 (strongest agentic/coding model)
+      return ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-2.5-flash'];
     }
   }
   async chat(req: ChatRequest): Promise<ChatResponse> {
@@ -832,10 +834,16 @@ export class GoogleAdapter implements LLMAdapter {
       salt = `\n\n<!-- salt:${Math.random().toString(36).slice(2, 8)} -->`;
     }
 
-    // Adjust thinking config for Gemini 2.5 models
-    // Gemini 3.x: Google recommends default temperature=1.0 and no explicit thinkingConfig.
-    // Thinking is built-in (returns thoughtSignature in parts). No thinkingBudget needed.
-    if (req.model.includes("gemini-2.5-pro")) {
+    // Adjust thinking config per Gemini generation:
+    // - Gemini 2.5: uses integer thinkingBudget (still supported)
+    // - Gemini 3.x: Google switched to enum thinking_level (none/low/medium/high)
+    //   3.5 Flash and 3.1 Pro are thinking models — configure appropriate level.
+    //   3.1 Pro does NOT support "minimal" level.
+    if (req.model.includes("gemini-3.5") || req.model.includes("gemini-3.1-pro")) {
+      body.generationConfig.thinkingConfig = { thinkingLevel: 'medium' };
+    } else if (req.model.includes("gemini-3.1-flash")) {
+      body.generationConfig.thinkingConfig = { thinkingLevel: 'low' };
+    } else if (req.model.includes("gemini-2.5-pro")) {
       body.generationConfig.thinkingConfig = { thinkingBudget: 128 };
     } else if (req.model.includes("gemini-2.5-flash")) {
       body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
@@ -955,11 +963,11 @@ export class DeepSeekAdapter implements LLMAdapter {
   
   async listModels() {
     // DeepSeek doesn't have a models endpoint, return known models
+    // REMOVED: deepseek-chat, deepseek-reasoner — hard retire July 24, 2026 15:59 UTC
+    // (currently routing to deepseek-v4-flash non-thinking/thinking, will hard-fail after deadline)
     return [
-      'deepseek-chat',         // Legacy alias → V4-Flash (non-thinking), deprecated mid-2026
-      'deepseek-reasoner',     // Legacy alias → V4-Flash (thinking), deprecated mid-2026
-      'deepseek-v4-flash',     // 284B total / 13B active, dual mode
-      'deepseek-v4-pro'        // 1.6T total / 49B active, dual mode
+      'deepseek-v4-flash',     // 284B total / 13B active, dual mode, 1M context
+      'deepseek-v4-pro'        // 1.6T total / 49B active, dual mode, 1M context
     ];
   }
   
@@ -1249,11 +1257,13 @@ export class GLMAdapter implements LLMAdapter {
   
   async listModels() {
     // GLM doesn't have a models endpoint, return known models
+    // REMOVED: glm-4.7-flash, glm-4.7-flashx — NOT in Z.AI's published catalog
+    // ADDED: glm-5, glm-5.1 — released April 7, 2026 (GLM-5.1 leads SWE-Bench Pro at 58.4)
     return [
       'glm-4.6',
-      'glm-4.7',           // Latest flagship model (Jan 2026) with enhanced coding capabilities
-      'glm-4.7-flash',     // Fast variant with smaller size but powerful
-      'glm-4.7-flashx'     // Ultra-fast variant
+      'glm-4.7',           // Flagship model (Jan 2026) with enhanced coding capabilities
+      'glm-5',             // April 2026 release
+      'glm-5.1'            // April 2026 — top SWE-Bench Pro performer (58.4)
     ];
   }
   
@@ -1266,8 +1276,9 @@ export class GLMAdapter implements LLMAdapter {
       stream: req.stream ?? false
     };
 
-    // Enable thinking mode for GLM-4.6/4.7 reasoning capabilities (as per docs)
-    if (req.model === 'glm-4.6' || req.model.startsWith('glm-4.7')) {
+    // Enable thinking mode for GLM reasoning capabilities (as per docs)
+    // GLM-4.6/4.7 and GLM-5/5.1 all support thinking mode
+    if (req.model === 'glm-4.6' || req.model.startsWith('glm-4.7') || req.model.startsWith('glm-5')) {
       body.thinking = { type: 'enabled' };
     }
 

@@ -112,6 +112,15 @@ export function startBenchmarkScheduler() {
             console.warn('Cache verification failed:', error);
           }
           
+          // Invalidate router cache so the smart router picks up fresh benchmark scores
+          try {
+            const { invalidateRouterCache } = await import('./router/selector');
+            invalidateRouterCache('hourly');
+            console.log('🗑️ Router cache invalidated for hourly suite after 4-hourly benchmarks');
+          } catch (error) {
+            console.warn('⚠️ Router cache invalidation failed:', error);
+          }
+          
           console.log(`✅ ${new Date().toISOString()} - 4-hourly benchmark run completed successfully`);
         } catch (error) {
           console.error(`❌ ${new Date().toISOString()} - 4-hourly benchmark run failed:`, error);
@@ -225,6 +234,15 @@ export function startBenchmarkScheduler() {
           console.log(`🔄 Refreshing dashboard cache after tool benchmark completion...`);
           const cacheResult = await refreshAllCache();
           console.log(`✅ Cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms`);
+          
+          // Invalidate router cache so the smart router picks up fresh tooling scores
+          try {
+            const { invalidateRouterCache } = await import('./router/selector');
+            invalidateRouterCache('tooling');
+            console.log('🗑️ Router cache invalidated for tooling suite after tool benchmarks');
+          } catch (error) {
+            console.warn('⚠️ Router cache invalidation failed:', error);
+          }
           
           console.log(`✅ ${new Date().toISOString()} - Daily tool benchmark run completed successfully`);
         } catch (error) {
@@ -408,6 +426,27 @@ export function startBenchmarkScheduler() {
     timezone: 'Europe/Berlin'
   });
 
+  // API MONITORING: Daily prompt retention cleanup (2:00 AM UTC)
+  cron.schedule('0 2 * * *', async () => {
+    console.log(`🗑️ [${new Date().toISOString()}] Running prompt retention cleanup...`);
+    try {
+      const { runPromptRetentionCleanup } = await import('./jobs/prompt-retention');
+      await runPromptRetentionCleanup();
+    } catch (err) {
+      console.error('Prompt retention cleanup failed:', err);
+    }
+  });
+
+  // API MONITORING: Hourly spend counter reconciliation
+  cron.schedule('30 * * * *', async () => {
+    try {
+      const { reconcileSpendCounters } = await import('./jobs/prompt-retention');
+      await reconcileSpendCounters();
+    } catch (err) {
+      console.error('Spend reconciliation failed:', err);
+    }
+  });
+
   console.log('📅 Scheduler started with separate timing:');
   console.log('   • Canary benchmarks: Every hour at :00 (12 tasks, 2 trials) - FAST DRIFT DETECTION');
   console.log('   • Drift computation: Every hour after canary (change-point detection, regime classification)');
@@ -415,6 +454,8 @@ export function startBenchmarkScheduler() {
   console.log('   • Deep (reasoning) benchmarks: Daily at 3:00 AM Berlin time');
   console.log('   • Tool (tooling) benchmarks: Daily at 4:00 AM Berlin time');
   console.log('   • Health monitoring: Every 10 minutes');
+  console.log('   • Prompt retention cleanup: Daily at 2:00 AM UTC');
+  console.log('   • Spend reconciliation: Every hour at :30');
   console.log(`🌍 Scheduler timezone: Europe/Berlin`);
   console.log(`⚡ Canary scheduler active: ${canaryScheduledTask ? canaryScheduledTask.getStatus() : 'Unknown'}`);
   console.log(`⚡ 4-hourly scheduler active: ${hourlyScheduledTask ? hourlyScheduledTask.getStatus() : 'Unknown'}`);

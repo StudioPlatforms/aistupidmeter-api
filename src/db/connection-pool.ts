@@ -142,6 +142,76 @@ class DatabasePool {
         // Column already exists
       }
 
+      // ========================================================================
+      // API Monitoring migrations — new columns on existing tables
+      // ========================================================================
+
+      // router_users — prompt logging controls
+      const userMonitoringCols = [
+        `ALTER TABLE router_users ADD COLUMN prompt_logging_enabled INTEGER DEFAULT 0`,
+        `ALTER TABLE router_users ADD COLUMN prompt_retention_days INTEGER DEFAULT 90`,
+      ];
+      for (const ddl of userMonitoringCols) {
+        try { sqlite.exec(ddl); } catch (err) { /* column already exists */ }
+      }
+
+      // router_api_keys — organizational metadata + budget + prompt logging override
+      const keyMonitoringCols = [
+        `ALTER TABLE router_api_keys ADD COLUMN department TEXT`,
+        `ALTER TABLE router_api_keys ADD COLUMN assigned_to TEXT`,
+        `ALTER TABLE router_api_keys ADD COLUMN tags TEXT`,
+        `ALTER TABLE router_api_keys ADD COLUMN budget_limit_monthly REAL`,
+        `ALTER TABLE router_api_keys ADD COLUMN budget_hard_limit INTEGER DEFAULT 0`,
+        `ALTER TABLE router_api_keys ADD COLUMN budget_alert_threshold REAL DEFAULT 0.8`,
+        `ALTER TABLE router_api_keys ADD COLUMN current_month_spend REAL DEFAULT 0`,
+        `ALTER TABLE router_api_keys ADD COLUMN current_month_key TEXT`,
+        `ALTER TABLE router_api_keys ADD COLUMN prompt_logging_override INTEGER`,
+      ];
+      for (const ddl of keyMonitoringCols) {
+        try { sqlite.exec(ddl); } catch (err) { /* column already exists */ }
+      }
+
+      // router_requests — prompt content + classification
+      const requestMonitoringCols = [
+        `ALTER TABLE router_requests ADD COLUMN prompt_text TEXT`,
+        `ALTER TABLE router_requests ADD COLUMN prompt_category TEXT`,
+        `ALTER TABLE router_requests ADD COLUMN prompt_language TEXT`,
+        `ALTER TABLE router_requests ADD COLUMN prompt_complexity TEXT`,
+      ];
+      for (const ddl of requestMonitoringCols) {
+        try { sqlite.exec(ddl); } catch (err) { /* column already exists */ }
+      }
+
+      // New tables for API Monitoring
+      sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS router_budget_alerts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          api_key_id INTEGER NOT NULL REFERENCES router_api_keys(id),
+          user_id INTEGER NOT NULL REFERENCES router_users(id),
+          month TEXT NOT NULL,
+          alert_type TEXT NOT NULL,
+          threshold_pct REAL NOT NULL DEFAULT 0,
+          amount_spent REAL NOT NULL,
+          budget_limit REAL NOT NULL,
+          acknowledged INTEGER DEFAULT 0,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS router_prompt_access_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES router_users(id),
+          request_id INTEGER NOT NULL REFERENCES router_requests(id),
+          accessed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          action TEXT NOT NULL DEFAULT 'view'
+        );
+
+        -- API Monitoring indexes
+        CREATE INDEX IF NOT EXISTS idx_router_requests_key_created ON router_requests(api_key_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_router_requests_category ON router_requests(prompt_category);
+        CREATE INDEX IF NOT EXISTS idx_budget_alerts_user_month ON router_budget_alerts(user_id, month);
+        CREATE INDEX IF NOT EXISTS idx_prompt_access_user ON router_prompt_access_log(user_id, accessed_at DESC);
+      `);
+
       console.log('✅ Database tables and indexes created/verified');
     } catch (err) {
       console.error('❌ Database table creation failed:', err);

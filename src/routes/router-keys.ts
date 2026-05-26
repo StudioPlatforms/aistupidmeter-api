@@ -77,7 +77,17 @@ export default async function routerKeysRoutes(fastify: FastifyInstance) {
           keyPrefix: routerApiKeys.key_prefix,
           createdAt: routerApiKeys.created_at,
           lastUsedAt: routerApiKeys.last_used_at,
-          revoked: routerApiKeys.revoked
+          revoked: routerApiKeys.revoked,
+          // API Monitoring fields
+          department: routerApiKeys.department,
+          assignedTo: routerApiKeys.assigned_to,
+          tags: routerApiKeys.tags,
+          budgetLimitMonthly: routerApiKeys.budget_limit_monthly,
+          budgetHardLimit: routerApiKeys.budget_hard_limit,
+          budgetAlertThreshold: routerApiKeys.budget_alert_threshold,
+          currentMonthSpend: routerApiKeys.current_month_spend,
+          currentMonthKey: routerApiKeys.current_month_key,
+          promptLoggingOverride: routerApiKeys.prompt_logging_override,
         })
         .from(routerApiKeys)
         .where(eq(routerApiKeys.user_id, request.userId!))
@@ -91,7 +101,16 @@ export default async function routerKeysRoutes(fastify: FastifyInstance) {
           createdAt: k.createdAt,
           lastUsedAt: k.lastUsedAt,
           revoked: k.revoked,
-          status: k.revoked ? 'revoked' : 'active'
+          status: k.revoked ? 'revoked' : 'active',
+          // API Monitoring metadata
+          department: k.department || null,
+          assignedTo: k.assignedTo || null,
+          tags: k.tags ? JSON.parse(k.tags) : [],
+          budgetLimitMonthly: k.budgetLimitMonthly || null,
+          budgetHardLimit: k.budgetHardLimit || false,
+          budgetAlertThreshold: k.budgetAlertThreshold || 0.8,
+          currentMonthSpend: k.currentMonthSpend || 0,
+          promptLoggingOverride: k.promptLoggingOverride ?? null,
         }))
       };
     } catch (error: any) {
@@ -113,7 +132,13 @@ export default async function routerKeysRoutes(fastify: FastifyInstance) {
     preHandler: requireAuth
   }, async (request: AuthRequest, reply) => {
     try {
-      const { name } = request.body as { name: string };
+      const body = request.body as {
+        name: string;
+        department?: string;
+        assignedTo?: string;
+        tags?: string[];
+      };
+      const { name } = body;
       
       if (!name || name.trim().length === 0) {
         return reply.code(400).send({
@@ -127,14 +152,17 @@ export default async function routerKeysRoutes(fastify: FastifyInstance) {
       const keyHash = hashApiKey(universalKey);
       const keyPrefix = getKeyPrefix(universalKey);
       
-      // Insert into database
+      // Insert into database with optional monitoring metadata
       const result = await db.insert(routerApiKeys).values({
         user_id: request.userId!,
         key_hash: keyHash,
         key_prefix: keyPrefix,
         name: name.trim(),
         created_at: new Date().toISOString(),
-        revoked: false
+        revoked: false,
+        department: body.department?.trim() || null,
+        assigned_to: body.assignedTo?.trim() || null,
+        tags: body.tags ? JSON.stringify(body.tags) : null,
       }).returning();
       
       return {
@@ -203,6 +231,67 @@ export default async function routerKeysRoutes(fastify: FastifyInstance) {
         error: 'Failed to revoke key',
         message: error.message
       });
+    }
+  });
+  
+  /**
+   * PUT /router/keys/:id
+   * Update API key monitoring metadata (department, tags, budget, prompt logging)
+   */
+  fastify.put<{
+    Params: { id: string };
+    Body: {
+      department?: string | null;
+      assignedTo?: string | null;
+      tags?: string[];
+      budgetLimitMonthly?: number | null;
+      budgetHardLimit?: boolean;
+      budgetAlertThreshold?: number;
+      promptLoggingOverride?: number | null;
+    };
+  }>('/router/keys/:id', {
+    preHandler: requireAuth
+  }, async (request: AuthRequest, reply) => {
+    try {
+      const keyId = parseInt((request.params as { id: string }).id);
+      if (isNaN(keyId)) {
+        return reply.code(400).send({ error: 'Invalid request', message: 'Invalid key ID' });
+      }
+
+      const body = request.body as any;
+      const updates: Record<string, any> = {};
+
+      if (body.department !== undefined) updates.department = body.department?.trim() || null;
+      if (body.assignedTo !== undefined) updates.assigned_to = body.assignedTo?.trim() || null;
+      if (body.tags !== undefined) updates.tags = body.tags ? JSON.stringify(body.tags) : null;
+      if (body.budgetLimitMonthly !== undefined) updates.budget_limit_monthly = body.budgetLimitMonthly;
+      if (body.budgetHardLimit !== undefined) updates.budget_hard_limit = body.budgetHardLimit;
+      if (body.budgetAlertThreshold !== undefined) updates.budget_alert_threshold = body.budgetAlertThreshold;
+      if (body.promptLoggingOverride !== undefined) updates.prompt_logging_override = body.promptLoggingOverride;
+
+      if (Object.keys(updates).length === 0) {
+        return reply.code(400).send({ error: 'Invalid request', message: 'No fields to update' });
+      }
+
+      const result = await db
+        .update(routerApiKeys)
+        .set(updates)
+        .where(
+          and(
+            eq(routerApiKeys.id, keyId),
+            eq(routerApiKeys.user_id, request.userId!)
+          )
+        )
+        .returning();
+
+      if (result.length === 0) {
+        return reply.code(404).send({ error: 'Not found', message: 'Key not found' });
+      }
+
+      return { success: true, message: 'Key updated', keyId };
+    } catch (error: any) {
+      console.error('Failed to update key:', error);
+      return reply.code(500).send({ error: 'Failed to update key', message: error.message });
     }
   });
   
@@ -473,8 +562,8 @@ export default async function routerKeysRoutes(fastify: FastifyInstance) {
       const providerKey = keys[0];
       const decryptedKey = decryptProviderKey(providerKey.encrypted_key);
       
-      // Test the key with the provider
-      const { OpenAIAdapter, AnthropicAdapter, XAIAdapter, GoogleAdapter } = await import('../llm/adapters');
+      // Test the key with the provider — all 7 providers are supported
+      const { OpenAIAdapter, AnthropicAdapter, XAIAdapter, GoogleAdapter, GLMAdapter, DeepSeekAdapter, KimiAdapter } = await import('../llm/adapters');
       
       let adapter;
       switch (providerKey.provider) {
@@ -490,10 +579,19 @@ export default async function routerKeysRoutes(fastify: FastifyInstance) {
         case 'google':
           adapter = new GoogleAdapter(decryptedKey);
           break;
+        case 'glm':
+          adapter = new GLMAdapter(decryptedKey);
+          break;
+        case 'deepseek':
+          adapter = new DeepSeekAdapter(decryptedKey);
+          break;
+        case 'kimi':
+          adapter = new KimiAdapter(decryptedKey);
+          break;
         default:
           return reply.code(400).send({
             error: 'Invalid provider',
-            message: `Unsupported provider: ${providerKey.provider}`
+            message: `Unsupported provider: ${providerKey.provider}. Supported: openai, anthropic, xai, google, glm, deepseek, kimi`
           });
       }
       

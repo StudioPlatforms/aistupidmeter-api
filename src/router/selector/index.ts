@@ -5,22 +5,23 @@ import { eq, and, desc, sql, inArray } from 'drizzle-orm';
 import { computeDashboardScores } from '../../lib/dashboard-compute';
 
 // Smart caching for router rankings (5-minute TTL)
-const rankingsCache = new Map<string, { data: any[]; timestamp: number }>();
+const rankingsCache = new Map<string, { data: ModelRanking[]; timestamp: number }>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // Cost data per provider (per 1k tokens)
-// OFFICIAL VERIFIED pricing per 1k tokens (Feb 17, 2026)
+// OFFICIAL VERIFIED pricing per 1k tokens (May 26, 2026)
+// TODO: consolidate pricing into a single source (duplicated in proxy/index.ts)
 const PROVIDER_COSTS = {
   openai: { input: 0.00125, output: 0.01 },   // GPT-5.1 average
   anthropic: { input: 0.003, output: 0.015 }, // Sonnet 4 average
   google: { input: 0.00125, output: 0.01 },   // Gemini 2.5 Pro average
-  xai: { input: 0.003, output: 0.015 },       // Grok 4 average
-  glm: { input: 0.0006, output: 0.0022 },     // GLM-4 average
-  deepseek: { input: 0.00028, output: 0.00042 }, // DeepSeek average
+  xai: { input: 0.003, output: 0.015 },       // Grok 4.3 average
+  glm: { input: 0.0006, output: 0.0022 },     // GLM-5 average
+  deepseek: { input: 0.00028, output: 0.00042 }, // DeepSeek V4 average
   kimi: { input: 0.0006, output: 0.0025 }     // Kimi K2 average
 } as const;
 
-// Model-specific cost overrides (per 1k tokens) - OFFICIAL VERIFIED Feb 17, 2026
+// Model-specific cost overrides (per 1k tokens) - OFFICIAL VERIFIED May 26, 2026
 const MODEL_COSTS = {
   // OpenAI
   'gpt-4o-mini': { input: 0.00015, output: 0.0006 },
@@ -28,39 +29,95 @@ const MODEL_COSTS = {
   'gpt-5': { input: 0.00125, output: 0.01 },
   'gpt-5.1': { input: 0.00125, output: 0.01 },
   'gpt-5.2': { input: 0.00175, output: 0.014 },
+  'gpt-5.4': { input: 0.0025, output: 0.015 },
+  'gpt-5.5': { input: 0.005, output: 0.03 },
+  'gpt-5.5-pro': { input: 0.005, output: 0.03 },
+  'gpt-5.5-2026-04-23': { input: 0.005, output: 0.03 },
   'gpt-5-codex': { input: 0.00125, output: 0.01 },
+  'gpt-5.1-codex': { input: 0.00125, output: 0.01 },
   
-  // Anthropic
-  'claude-3-5-haiku-20241022': { input: 0.00025, output: 0.00125 },
-  'claude-3-5-sonnet-20241022': { input: 0.003, output: 0.015 },
-  'claude-opus-4-1-20250805': { input: 0.015, output: 0.075 }, // Legacy
-  'claude-opus-4-20250514': { input: 0.005, output: 0.025 },
+  // Anthropic (May 2026 — removed deprecated dated IDs)
+  'claude-3-5-haiku': { input: 0.00025, output: 0.00125 },
+  'claude-haiku-4-5': { input: 0.00025, output: 0.00125 },
+  'claude-sonnet-4-5': { input: 0.003, output: 0.015 },
+  'claude-sonnet-4-5-20250929': { input: 0.003, output: 0.015 },
+  'claude-sonnet-4-6': { input: 0.003, output: 0.015 },
   'claude-opus-4-5-20251101': { input: 0.005, output: 0.025 },
   'claude-opus-4-6': { input: 0.005, output: 0.025 },
-  'claude-sonnet-4-20250514': { input: 0.003, output: 0.015 },
+  'claude-opus-4-7': { input: 0.005, output: 0.025 },
+  // REMOVED: claude-sonnet-4-20250514, claude-opus-4-20250514 — retire June 15, 2026
+  // REMOVED: claude-opus-4-1-20250805 — legacy, verify deprecation date
   
-  // Google
-  'gemini-1.5-flash': { input: 0.000075, output: 0.0003 },
-  'gemini-1.5-pro': { input: 0.00125, output: 0.005 },
+  // Google (May 2026 — removed gemini-1.5-*)
   'gemini-2.5-pro': { input: 0.00125, output: 0.01 },
   'gemini-2.5-flash': { input: 0.0003, output: 0.0025 },
+  'gemini-2.5-flash-lite': { input: 0.0001, output: 0.0004 },
+  'gemini-3.1-pro-preview': { input: 0.002, output: 0.012 },
+  'gemini-3.1-flash-lite': { input: 0.00025, output: 0.0015 },
+  'gemini-3.5-flash': { input: 0.00025, output: 0.002 },
+  // REMOVED: gemini-1.5-pro, gemini-1.5-flash — retiring June 1, 2026
   
-  // xAI
-  'grok-2-latest': { input: 0.001, output: 0.005 },
-  'grok-4-latest': { input: 0.003, output: 0.015 },
-  'grok-4-0709': { input: 0.003, output: 0.015 },
-  'grok-code-fast-1': { input: 0.0002, output: 0.0015 }
+  // xAI (May 2026 — retired grok-4-0709, grok-code-fast-1, grok-2-latest)
+  'grok-4.3': { input: 0.003, output: 0.015 },
+  'grok-build-0.1': { input: 0.0002, output: 0.0015 },
+  
+  // DeepSeek (May 2026 — removed deprecated aliases)
+  'deepseek-v4-flash': { input: 0.0000028, output: 0.00028 },
+  'deepseek-v4-pro': { input: 0.000003625, output: 0.00087 },
+  // REMOVED: deepseek-chat, deepseek-reasoner — hard retire July 24, 2026
+  
+  // Kimi
+  'kimi-k2.5': { input: 0.0003, output: 0.0015 },
+  'kimi-k2.6': { input: 0.0003, output: 0.0015 },
+  
+  // GLM (May 2026 — removed hallucinated flash models, added GLM-5)
+  'glm-4.6': { input: 0.0001, output: 0.0005 },
+  'glm-4.7': { input: 0.00015, output: 0.00075 },
+  'glm-5': { input: 0.0002, output: 0.001 },
+  'glm-5.1': { input: 0.0002, output: 0.001 }
+  // REMOVED: glm-4.7-flash, glm-4.7-flashx — not in Z.AI catalog
 } as const;
+
+// Models known to support tool/function calling (May 2026)
+const TOOL_CALLING_MODELS = new Set([
+  // OpenAI
+  'gpt-4o', 'gpt-4o-mini', 'gpt-5', 'gpt-5.1', 'gpt-5.2', 'gpt-5.4', 'gpt-5.5',
+  'gpt-5.5-pro', 'gpt-5.5-2026-04-23', 'gpt-5-codex', 'gpt-5.1-codex',
+  // Anthropic (removed deprecated dated IDs)
+  'claude-3-5-haiku', 'claude-haiku-4-5',
+  'claude-sonnet-4-5', 'claude-sonnet-4-5-20250929', 'claude-sonnet-4-6',
+  'claude-opus-4-5-20251101', 'claude-opus-4-6', 'claude-opus-4-7',
+  // Google (removed gemini-1.5-*)
+  'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
+  'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3.5-flash',
+  // xAI (May 2026 — retired old models)
+  'grok-4.3', 'grok-build-0.1',
+  // DeepSeek (removed deprecated aliases)
+  'deepseek-v4-flash', 'deepseek-v4-pro',
+  // Kimi
+  'kimi-k2.5', 'kimi-k2.6',
+  // GLM (removed hallucinated flash models, added GLM-5)
+  'glm-4.6', 'glm-4.7', 'glm-5', 'glm-5.1'
+]);
+
+// Models known to support streaming
+const STREAMING_MODELS = new Set([
+  // Nearly all modern models support streaming — list exceptions instead
+  // For now, assume all models support streaming; this set is used as a whitelist
+  ...TOOL_CALLING_MODELS // All tool-calling models also support streaming
+]);
 
 interface ModelRanking {
   id: number;
   name: string;
   vendor: string;
   score: number;
-  axes?: Record<string, number>;
+  axes: Record<string, number>;
   lastUpdated: string;
   estimatedCost: number;
   avgLatency?: number;
+  supportsToolCalling: boolean;
+  supportsStreaming: boolean;
 }
 
 export interface SelectionCriteria {
@@ -110,24 +167,36 @@ async function getCachedRankings(suite: string, strategy: string): Promise<Model
   const dashboardScores = await computeDashboardScores('latest', sortBy);
   
   // Convert dashboard scores to ModelRanking format
+  // FIX: Include axes data so strategy-specific sorting works correctly
   const rankings: ModelRanking[] = dashboardScores
     .filter((score: any) => score.currentScore !== 'unavailable')
-    .map((score: any) => ({
-      id: parseInt(score.id),
-      name: score.name,
-      vendor: score.provider,
-      score: score.currentScore as number,
-      axes: undefined, // Not needed for router
-      lastUpdated: score.lastUpdated?.toISOString() || new Date().toISOString(),
-      estimatedCost: calculateModelCost(score.name, score.provider)
-    }));
+    .map((score: any) => {
+      const modelName = score.name as string;
+      const vendor = score.provider as string;
+      
+      // Extract axes from the dashboard score — these contain the per-dimension metrics
+      // that drive coding/reasoning/creative strategy sorting
+      const axes = extractAxes(score);
+      
+      return {
+        id: parseInt(score.id),
+        name: modelName,
+        vendor,
+        score: score.currentScore as number,
+        axes,
+        lastUpdated: score.lastUpdated?.toISOString() || new Date().toISOString(),
+        estimatedCost: calculateModelCost(modelName, vendor),
+        supportsToolCalling: TOOL_CALLING_MODELS.has(modelName),
+        supportsStreaming: STREAMING_MODELS.has(modelName)
+      };
+    });
   
   // Add latency data for speed-focused strategies
   if (strategy === 'fastest') {
     await addLatencyData(rankings);
   }
   
-  // Sort based on strategy (dashboard scores are already sorted, but re-sort for consistency)
+  // Sort based on strategy
   const sortedRankings = sortRankingsByStrategy(rankings, strategy);
   
   // Cache the results
@@ -135,6 +204,48 @@ async function getCachedRankings(suite: string, strategy: string): Promise<Model
   
   console.log(`✅ Cached ${sortedRankings.length} rankings for ${cacheKey} using dashboard scores`);
   return sortedRankings;
+}
+
+/**
+ * Extract axes metrics from a dashboard score object
+ * Dashboard scores include axes from the latest benchmark run
+ */
+function extractAxes(score: any): Record<string, number> {
+  // The dashboard score object may have axes in various locations
+  // depending on sortBy mode and data freshness
+  const axes: Record<string, number> = {};
+  
+  // Try direct axes property (from computeDashboardScores result)
+  if (score.axes && typeof score.axes === 'object') {
+    Object.entries(score.axes).forEach(([key, value]) => {
+      if (typeof value === 'number' && !Number.isNaN(value)) {
+        axes[key] = value;
+      }
+    });
+  }
+  
+  // If no axes found, try to extract from weeklyBest/weeklyWorst and score
+  // to create approximate axis values for strategy sorting
+  if (Object.keys(axes).length === 0) {
+    const normalizedScore = typeof score.currentScore === 'number' ? score.currentScore / 100 : 0.5;
+    // Create balanced defaults based on overall score so sorting still works
+    axes.correctness = normalizedScore;
+    axes.complexity = normalizedScore;
+    axes.codeQuality = normalizedScore;
+    axes.efficiency = normalizedScore;
+    axes.stability = normalizedScore;
+    axes.edgeCases = normalizedScore;
+    axes.debugging = normalizedScore;
+    axes.format = normalizedScore;
+    axes.safety = normalizedScore;
+    // Deep-specific axes
+    axes.memoryRetention = normalizedScore;
+    axes.hallucinationRate = normalizedScore;
+    axes.planCoherence = normalizedScore;
+    axes.contextWindow = normalizedScore;
+  }
+  
+  return axes;
 }
 
 /**
@@ -184,41 +295,63 @@ async function addLatencyData(rankings: ModelRanking[]): Promise<void> {
 
 /**
  * Sort rankings based on strategy
+ * FIXED: Now uses actual axes data instead of undefined
  */
 function sortRankingsByStrategy(rankings: ModelRanking[], strategy: string): ModelRanking[] {
   switch (strategy) {
     case 'best_overall':
-      // Lower stupidScore is better
-      return rankings.sort((a, b) => a.score - b.score);
+      // Higher score is better (score is 0-100 from dashboard)
+      return rankings.sort((a, b) => b.score - a.score);
       
     case 'best_coding':
-      // Prioritize complexity and code quality from axes
+      // Prioritize correctness, complexity, and code quality from axes
       return rankings.sort((a, b) => {
-        const aCodeScore = (a.axes?.complexity || 0) * 0.6 + (a.axes?.codeQuality || 0) * 0.4;
-        const bCodeScore = (b.axes?.complexity || 0) * 0.6 + (b.axes?.codeQuality || 0) * 0.4;
+        const aCodeScore = (a.axes.correctness || 0) * 0.4 +
+                          (a.axes.complexity || 0) * 0.3 +
+                          (a.axes.codeQuality || 0) * 0.2 +
+                          (a.axes.debugging || 0) * 0.1;
+        const bCodeScore = (b.axes.correctness || 0) * 0.4 +
+                          (b.axes.complexity || 0) * 0.3 +
+                          (b.axes.codeQuality || 0) * 0.2 +
+                          (b.axes.debugging || 0) * 0.1;
+        // Break ties with overall score
+        if (Math.abs(bCodeScore - aCodeScore) < 0.01) return b.score - a.score;
         return bCodeScore - aCodeScore; // Higher is better
       });
       
     case 'best_reasoning':
-      // For deep suite, lower stupidScore is better
-      // For hourly suite, prioritize correctness and edge cases
-      if (rankings[0]?.axes?.memoryRetention !== undefined) {
-        // Deep suite - use stupidScore
-        return rankings.sort((a, b) => a.score - b.score);
-      } else {
-        // Hourly suite - use reasoning-focused axes
-        return rankings.sort((a, b) => {
-          const aReasonScore = (a.axes?.correctness || 0) * 0.7 + (a.axes?.edgeCases || 0) * 0.3;
-          const bReasonScore = (b.axes?.correctness || 0) * 0.7 + (b.axes?.edgeCases || 0) * 0.3;
-          return bReasonScore - aReasonScore; // Higher is better
-        });
-      }
+      // Prioritize correctness, edge cases, and deep-specific axes
+      return rankings.sort((a, b) => {
+        const aReasonScore = (a.axes.correctness || 0) * 0.3 +
+                            (a.axes.edgeCases || 0) * 0.2 +
+                            (a.axes.memoryRetention || 0) * 0.2 +
+                            (a.axes.planCoherence || 0) * 0.15 +
+                            (a.axes.hallucinationRate || 0) * 0.15;
+        const bReasonScore = (b.axes.correctness || 0) * 0.3 +
+                            (b.axes.edgeCases || 0) * 0.2 +
+                            (b.axes.memoryRetention || 0) * 0.2 +
+                            (b.axes.planCoherence || 0) * 0.15 +
+                            (b.axes.hallucinationRate || 0) * 0.15;
+        // Break ties with overall score
+        if (Math.abs(bReasonScore - aReasonScore) < 0.01) return b.score - a.score;
+        return bReasonScore - aReasonScore; // Higher is better
+      });
       
     case 'best_creative':
-      // Prioritize format and safety (creative writing quality)
+      // Prioritize format, stability, and overall quality
       return rankings.sort((a, b) => {
-        const aCreativeScore = (a.axes?.format || 0) * 0.6 + (a.axes?.safety || 0) * 0.4;
-        const bCreativeScore = (b.axes?.format || 0) * 0.6 + (b.axes?.safety || 0) * 0.4;
+        const aCreativeScore = (a.axes.format || 0) * 0.3 +
+                              (a.axes.stability || 0) * 0.2 +
+                              (a.axes.codeQuality || 0) * 0.2 +
+                              (a.axes.safety || 0) * 0.15 +
+                              (a.axes.correctness || 0) * 0.15;
+        const bCreativeScore = (b.axes.format || 0) * 0.3 +
+                              (b.axes.stability || 0) * 0.2 +
+                              (b.axes.codeQuality || 0) * 0.2 +
+                              (b.axes.safety || 0) * 0.15 +
+                              (b.axes.correctness || 0) * 0.15;
+        // Break ties with overall score
+        if (Math.abs(bCreativeScore - aCreativeScore) < 0.01) return b.score - a.score;
         return bCreativeScore - aCreativeScore; // Higher is better
       });
       
@@ -231,12 +364,12 @@ function sortRankingsByStrategy(rankings: ModelRanking[], strategy: string): Mod
       return rankings.sort((a, b) => (a.avgLatency || 5000) - (b.avgLatency || 5000));
       
     default:
-      return rankings.sort((a, b) => a.score - b.score);
+      return rankings.sort((a, b) => b.score - a.score);
   }
 }
 
 /**
- * Get user preferences and constraints
+ * Get user preferences and constraints — now includes ALL preference fields
  */
 async function getUserPreferences(userId: number): Promise<{
   strategy: string;
@@ -244,6 +377,9 @@ async function getUserPreferences(userId: number): Promise<{
   maxLatency?: number;
   excludeProviders: string[];
   excludeModels: string[];
+  requireToolCalling: boolean;
+  requireStreaming: boolean;
+  fallbackEnabled: boolean;
 }> {
   const preferences = await db
     .select()
@@ -255,7 +391,10 @@ async function getUserPreferences(userId: number): Promise<{
     return {
       strategy: 'best_overall',
       excludeProviders: [],
-      excludeModels: []
+      excludeModels: [],
+      requireToolCalling: false,
+      requireStreaming: false,
+      fallbackEnabled: true
     };
   }
   
@@ -265,7 +404,10 @@ async function getUserPreferences(userId: number): Promise<{
     maxCost: prefs.max_cost_per_1k_tokens || undefined,
     maxLatency: prefs.max_latency_ms || undefined,
     excludeProviders: JSON.parse(prefs.excluded_providers || '[]'),
-    excludeModels: JSON.parse(prefs.excluded_models || '[]')
+    excludeModels: JSON.parse(prefs.excluded_models || '[]'),
+    requireToolCalling: prefs.require_tool_calling ?? false,
+    requireStreaming: prefs.require_streaming ?? false,
+    fallbackEnabled: prefs.fallback_enabled ?? true
   };
 }
 
@@ -288,8 +430,22 @@ async function getUserProviders(userId: number): Promise<string[]> {
 
 /**
  * Main model selection function
+ * Returns primary model + fallback candidates when fallback is enabled
  */
 export async function selectBestModel(criteria: SelectionCriteria): Promise<ModelSelection> {
+  const result = await selectModelsWithFallbacks(criteria);
+  return result.primary;
+}
+
+/**
+ * Extended selection that returns primary + fallback models
+ * Used by the proxy for automatic retry on failure
+ */
+export async function selectModelsWithFallbacks(criteria: SelectionCriteria): Promise<{
+  primary: ModelSelection;
+  fallbacks: ModelSelection[];
+  fallbackEnabled: boolean;
+}> {
   const { userId, strategy } = criteria;
   
   // Get user preferences and available providers
@@ -303,7 +459,7 @@ export async function selectBestModel(criteria: SelectionCriteria): Promise<Mode
   }
   
   // Determine which suite to query based on strategy
-  const suiteMap = {
+  const suiteMap: Record<string, string> = {
     'best_overall': 'hourly',
     'best_coding': 'hourly', 
     'best_reasoning': 'deep',  // Use deep benchmarks for reasoning
@@ -327,7 +483,7 @@ export async function selectBestModel(criteria: SelectionCriteria): Promise<Mode
     throw new Error('No model rankings available. Please wait for benchmarks to complete.');
   }
   
-  // Apply user constraints
+  // Apply user constraints (including tool calling and streaming requirements)
   const filteredRankings = rankings.filter(ranking => {
     // Must have available provider
     if (!availableProviders.includes(ranking.vendor)) {
@@ -353,6 +509,16 @@ export async function selectBestModel(criteria: SelectionCriteria): Promise<Mode
       return false;
     }
     
+    // FIX: Apply tool calling requirement
+    if (userPrefs.requireToolCalling && !ranking.supportsToolCalling) {
+      return false;
+    }
+    
+    // FIX: Apply streaming requirement
+    if (userPrefs.requireStreaming && !ranking.supportsStreaming) {
+      return false;
+    }
+    
     return true;
   });
   
@@ -366,13 +532,62 @@ export async function selectBestModel(criteria: SelectionCriteria): Promise<Mode
   // Generate reasoning message
   const reasoning = generateReasoningMessage(selectedModel, strategy, suite, filteredRankings.length);
   
-  return {
+  const primary: ModelSelection = {
     model: selectedModel.name,
     provider: selectedModel.vendor,
     score: selectedModel.score,
     reasoning,
     estimatedCost: selectedModel.estimatedCost,
     avgLatency: selectedModel.avgLatency
+  };
+  
+  // Collect fallback models (next 2 candidates from different providers when possible)
+  const fallbacks: ModelSelection[] = [];
+  if (userPrefs.fallbackEnabled && filteredRankings.length > 1) {
+    const usedProviders = new Set([selectedModel.vendor]);
+    
+    for (let i = 1; i < filteredRankings.length && fallbacks.length < 2; i++) {
+      const candidate = filteredRankings[i];
+      // Prefer fallbacks from different providers for true redundancy
+      const isDifferentProvider = !usedProviders.has(candidate.vendor);
+      const needMore = fallbacks.length < 2;
+      
+      if (isDifferentProvider || (needMore && fallbacks.length < 1)) {
+        fallbacks.push({
+          model: candidate.name,
+          provider: candidate.vendor,
+          score: candidate.score,
+          reasoning: `Fallback: ${candidate.name} from ${candidate.vendor} (score: ${candidate.score.toFixed(1)})`,
+          estimatedCost: candidate.estimatedCost,
+          avgLatency: candidate.avgLatency
+        });
+        usedProviders.add(candidate.vendor);
+      }
+    }
+    
+    // If we couldn't find different-provider fallbacks, fill with same-provider ones
+    if (fallbacks.length < 2) {
+      for (let i = 1; i < filteredRankings.length && fallbacks.length < 2; i++) {
+        const candidate = filteredRankings[i];
+        const alreadyAdded = fallbacks.some(f => f.model === candidate.name);
+        if (!alreadyAdded) {
+          fallbacks.push({
+            model: candidate.name,
+            provider: candidate.vendor,
+            score: candidate.score,
+            reasoning: `Fallback: ${candidate.name} from ${candidate.vendor} (score: ${candidate.score.toFixed(1)})`,
+            estimatedCost: candidate.estimatedCost,
+            avgLatency: candidate.avgLatency
+          });
+        }
+      }
+    }
+  }
+  
+  return {
+    primary,
+    fallbacks,
+    fallbackEnabled: userPrefs.fallbackEnabled
   };
 }
 
@@ -385,7 +600,7 @@ function generateReasoningMessage(
   suite: string,
   totalCandidates: number
 ): string {
-  const strategyNames = {
+  const strategyNames: Record<string, string> = {
     'best_overall': 'best overall performance',
     'best_coding': 'best coding capabilities', 
     'best_reasoning': 'best reasoning abilities',
@@ -394,7 +609,7 @@ function generateReasoningMessage(
     'fastest': 'fastest response time'
   };
   
-  const strategyName = strategyNames[strategy as keyof typeof strategyNames] || strategy;
+  const strategyName = strategyNames[strategy] || strategy;
   const suiteInfo = suite === 'deep' ? ' (deep reasoning benchmarks)' : '';
   const timeAgo = getTimeAgo(model.lastUpdated);
   

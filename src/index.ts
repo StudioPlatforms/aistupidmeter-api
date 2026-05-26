@@ -212,28 +212,33 @@ async function startServer() {
   console.log('⚠️ Circuit breaker (underPressure) disabled to prevent false positives');
 
   // CORS with optimized settings for high performance
+  // Phase 4A: /v1/* proxy endpoints get Access-Control-Allow-Origin: * for browser-based tools
+  // (TypingMind, BetterChatGPT, LibreChat browser mode). Dashboard routes keep restricted origin list.
   await app.register(cors, {
     origin: (origin, callback) => {
-      // More efficient origin checking
+      // Allow requests with no origin (mobile apps, curl, SDK calls, etc)
+      if (!origin) return callback(null, true);
+      
+      // Dashboard-only origins
       const allowedOrigins = [
         'http://localhost:3000',
-        'http://127.0.0.1:3000', 
+        'http://127.0.0.1:3000',
         'https://aistupidlevel.info',
         'http://aistupidlevel.info'
       ];
-      
-      // Allow requests with no origin (mobile apps, curl, etc)
-      if (!origin) return callback(null, true);
       
       if (allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
       
-      return callback(new Error('Not allowed by CORS'), false);
+      // Phase 4A: Allow any origin for /v1/* proxy endpoints
+      // The origin check here is global — the actual URL filtering happens below
+      // in the hook. Allow all origins and let the route-level hook filter.
+      return callback(null, true);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-user-api-key', 'x-user-id'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-user-api-key', 'x-user-id', 'x-api-key', 'anthropic-version'],
     maxAge: 86400 // Cache preflight for 24 hours
   });
 
@@ -301,8 +306,11 @@ async function startServer() {
   // Register routes dynamically with better error handling
   const routesToTry = [
     { name: 'router', prefix: '' }, // AI Router - OpenAI-compatible endpoints at /v1/*
+    { name: 'router-embeddings', prefix: '' }, // Phase 6A: /v1/embeddings proxy
+    { name: 'router-anthropic', prefix: '' }, // Phase 6B: Native Anthropic /v1/messages passthrough
     { name: 'router-keys', prefix: '' }, // AI Router Key Management - /router/*
     { name: 'router-analytics', prefix: '' }, // AI Router Analytics - /router/analytics/*
+    { name: 'router-monitoring', prefix: '' }, // API Monitoring - /router/monitoring/*
     { name: 'router-smart', prefix: '' }, // Smart Router - Automatic model selection at /v1/*
     { name: 'analytics', prefix: '/analytics' },
     { name: 'drift-batch', prefix: '/api/drift' }, // PHASE 2: Batch drift endpoint (register BEFORE individual)

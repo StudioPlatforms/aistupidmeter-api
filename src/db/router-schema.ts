@@ -25,7 +25,10 @@ export const routerUsers = sqliteTable('router_users', {
   reset_token_expires: text('reset_token_expires'),
   reset_requested_at: text('reset_requested_at'),
   created_at: text('created_at').default('CURRENT_TIMESTAMP'),
-  updated_at: text('updated_at').default('CURRENT_TIMESTAMP')
+  updated_at: text('updated_at').default('CURRENT_TIMESTAMP'),
+  // API Monitoring — prompt logging controls
+  prompt_logging_enabled: integer('prompt_logging_enabled', { mode: 'boolean' }).default(false),
+  prompt_retention_days: integer('prompt_retention_days').default(90), // Auto-delete after N days, NULL = forever
 });
 
 // Universal API Keys (what users use in their tools)
@@ -37,7 +40,20 @@ export const routerApiKeys = sqliteTable('router_api_keys', {
   name: text('name'), // User-friendly name like "My MacBook"
   last_used_at: text('last_used_at'),
   created_at: text('created_at').default('CURRENT_TIMESTAMP'),
-  revoked: integer('revoked', { mode: 'boolean' }).default(false)
+  revoked: integer('revoked', { mode: 'boolean' }).default(false),
+  // API Monitoring — organizational metadata
+  department: text('department'),                    // e.g. 'Engineering', 'Marketing'
+  assigned_to: text('assigned_to'),                  // e.g. 'John Smith'
+  tags: text('tags'),                                // JSON array, e.g. '["experimental","marketing"]'
+  // API Monitoring — budget controls
+  budget_limit_monthly: real('budget_limit_monthly'), // NULL = no limit, else max $/month
+  budget_hard_limit: integer('budget_hard_limit', { mode: 'boolean' }).default(false), // false=alert, true=reject
+  budget_alert_threshold: real('budget_alert_threshold').default(0.8), // Alert at this % of budget
+  // API Monitoring — running spend counter (denormalized for perf)
+  current_month_spend: real('current_month_spend').default(0),
+  current_month_key: text('current_month_key'),      // YYYY-MM in UTC — reset when month changes
+  // API Monitoring — per-key prompt logging override
+  prompt_logging_override: integer('prompt_logging_override'), // NULL=use account default, 0=force off, 1=force on
 });
 
 // Provider API Keys (encrypted user keys for OpenAI, Anthropic, etc.)
@@ -83,7 +99,13 @@ export const routerRequests = sqliteTable('router_requests', {
   cost_estimate: real('cost_estimate'),
   success: integer('success', { mode: 'boolean' }).default(true),
   error_message: text('error_message'),
-  created_at: text('created_at').default('CURRENT_TIMESTAMP')
+  created_at: text('created_at').default('CURRENT_TIMESTAMP'),
+  // API Monitoring — prompt content (encrypted, opt-in)
+  prompt_text: text('prompt_text'),           // AES-256-GCM encrypted, NULL unless logging enabled
+  // API Monitoring — automatic classification (async, always populated)
+  prompt_category: text('prompt_category'),   // 'coding' | 'reasoning' | 'creative' | 'analysis' | 'general' | NULL
+  prompt_language: text('prompt_language'),   // 'python' | 'javascript' | 'natural_language' | etc. | NULL
+  prompt_complexity: text('prompt_complexity'), // 'simple' | 'moderate' | 'complex' | NULL
 });
 
 // Model Performance Cache (fast lookup for routing)
@@ -113,6 +135,29 @@ export const routerUsage = sqliteTable('router_usage', {
   total_cost_estimate: real('total_cost_estimate').default(0),
   cost_saved_vs_gpt4: real('cost_saved_vs_gpt4').default(0),
   updated_at: text('updated_at').default('CURRENT_TIMESTAMP')
+});
+
+// Budget Alerts — tracks threshold crossings (fire-once per month per type)
+export const routerBudgetAlerts = sqliteTable('router_budget_alerts', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  api_key_id: integer('api_key_id').references(() => routerApiKeys.id).notNull(),
+  user_id: integer('user_id').references(() => routerUsers.id).notNull(),
+  month: text('month').notNull(),                     // YYYY-MM in UTC
+  alert_type: text('alert_type').notNull(),           // 'threshold_warning' | 'budget_exceeded'
+  threshold_pct: real('threshold_pct').notNull().default(0),
+  amount_spent: real('amount_spent').notNull(),
+  budget_limit: real('budget_limit').notNull(),
+  acknowledged: integer('acknowledged', { mode: 'boolean' }).default(false),
+  created_at: text('created_at').default('CURRENT_TIMESTAMP')
+});
+
+// Prompt Access Audit Log — tracks who viewed/exported/deleted prompt content
+export const routerPromptAccessLog = sqliteTable('router_prompt_access_log', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  user_id: integer('user_id').references(() => routerUsers.id).notNull(),
+  request_id: integer('request_id').references(() => routerRequests.id).notNull(),
+  accessed_at: text('accessed_at').default('CURRENT_TIMESTAMP'),
+  action: text('action').notNull().default('view'),   // 'view' | 'export' | 'delete'
 });
 
 // Import existing models table for reference
