@@ -34,7 +34,10 @@ const REFERENCE_MODELS = [
   { provider: 'xai' as Provider, model: 'grok-4', name: 'Grok 4' },
   { provider: 'xai' as Provider, model: 'grok-code-fast-1', name: 'Grok Code Fast 1' },
 
-  // Google - Latest Gemini 2.5 family  
+  // GLM (Z.AI) - GLM-5.1 flagship
+  { provider: 'glm' as Provider, model: 'glm-5.1', name: 'GLM-5.1' },
+
+  // Google - Latest Gemini 2.5 family
   { provider: 'google' as Provider, model: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
   { provider: 'google' as Provider, model: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
   { provider: 'google' as Provider, model: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash-Lite' },

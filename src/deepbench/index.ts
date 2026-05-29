@@ -292,11 +292,11 @@ const MODEL_COSTS = {
   'kimi-k2.5': { input: 0.30, output: 1.50 },
   'kimi-k2.6': { input: 0.30, output: 1.50 },
   
-  // GLM (Z.AI) - estimated pricing
-  'glm-4.6': { input: 0.10, output: 0.50 },
-  'glm-4.7': { input: 0.15, output: 0.75 },
-  'glm-4.7-flash': { input: 0.05, output: 0.25 },
-  'glm-4.7-flashx': { input: 0.03, output: 0.15 }
+  // GLM (Z.AI) - official pricing (verified May 2026, api.z.ai)
+  'glm-5.1': { input: 1.40, output: 4.40 },   // GA April 2026, $1.40/$4.40 per MTok
+  'glm-5': { input: 1.00, output: 3.20 },      // Feb 2026
+  'glm-4.7': { input: 0.60, output: 2.20 },    // Deprecated
+  'glm-4.6': { input: 0.60, output: 2.20 }     // Deprecated
 };
 
 function calculateCostMetrics(result: SessionResult, score: number, modelName: string) {

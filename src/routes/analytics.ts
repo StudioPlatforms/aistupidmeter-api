@@ -106,8 +106,8 @@ function getModelPricing(modelName: string, provider: string): { input: number; 
   }
   
   if (prov === 'glm') {
-    // Zhipu AI GLM - Official pricing (verified 2026-02-17)
-    return { input: 0.60, output: 2.20 };
+    // Zhipu AI GLM-5.1 - Official api.z.ai pricing (verified May 2026)
+    return { input: 1.40, output: 4.40 };
   }
   
   if (prov === 'kimi') {

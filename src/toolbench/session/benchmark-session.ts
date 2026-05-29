@@ -156,7 +156,9 @@ export class ToolBenchmarkSession {
       const isKimiThinking = /^kimi-k2\.[56]/.test(this.model.name);
       // Claude Opus 4.7+ are adaptive thinking models (reject temperature, use effort param)
       const isClaudeReasoning = /^claude-opus-4-([7-9]|\d{2,})/.test(this.model.name);
-      const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking || isClaudeReasoning;
+      // GLM-5/5.1 are thinking models — thinking tokens count toward max_tokens
+      const isGLMThinking = /^glm-5/.test(this.model.name);
+      const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking || isClaudeReasoning || isGLMThinking;
 
       // Reasoning models need higher token budgets for thinking + tool calling
       let maxTokens = 2000;
@@ -168,6 +170,10 @@ export class ToolBenchmarkSession {
         // Claude Opus 4.7/4.8: thinking tokens count toward max_tokens, need large budget
         const difficultyBudget: Record<string, number> = { easy: 16384, medium: 32000, hard: 64000 };
         maxTokens = difficultyBudget[this.task.difficulty] || 32000;
+      } else if (isGLMThinking) {
+        // GLM-5.1: thinking tokens count toward max_tokens, need generous budget
+        const difficultyBudget: Record<string, number> = { easy: 16384, medium: 24576, hard: 32768 };
+        maxTokens = difficultyBudget[this.task.difficulty] || 24576;
       } else if (isDeepSeekThinking) {
         // DeepSeek thinking models need room for CoT + tool call output
         const difficultyBudget: Record<string, number> = { easy: 8192, medium: 12288, hard: 16384 };
@@ -211,6 +217,9 @@ export class ToolBenchmarkSession {
       } else if (isDeepSeekThinking) {
         // DeepSeek thinking models: medium reasoning for tool benchmarks
         request.reasoning_effort = 'medium';
+      } else if (isGLMThinking) {
+        // GLM-5.1: no reasoning_effort param — binary enabled/disabled only.
+        // Temperature handled by adapter (0.6 for thinking mode). Thinking is compulsory.
       } else if (isKimiThinking) {
         // Kimi K2.5/K2.6: no reasoning_effort param — always full thinking.
         // Temperature handled by adapter (forced to 1.0 for thinking mode).

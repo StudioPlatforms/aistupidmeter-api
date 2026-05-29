@@ -203,11 +203,10 @@ function estimateCost(provider: string, model: string, tokensIn: number, tokensO
       // REMOVED: gemini-1.5-pro, gemini-1.5-flash — retiring June 1, 2026
     },
     'glm': {
-      'glm-4.6': { input: 0.0001, output: 0.0005 },
-      'glm-4.7': { input: 0.00015, output: 0.00075 },
-      'glm-5': { input: 0.0002, output: 0.001 },
-      'glm-5.1': { input: 0.0002, output: 0.001 },
-      // REMOVED: glm-4.7-flash, glm-4.7-flashx — not in Z.AI catalog
+      'glm-5.1': { input: 0.0014, output: 0.0044 },  // Official api.z.ai pricing $1.40/$4.40 per MTok
+      'glm-5': { input: 0.001, output: 0.0032 },
+      'glm-4.7': { input: 0.0006, output: 0.0022 },   // Deprecated
+      'glm-4.6': { input: 0.0006, output: 0.0022 },   // Deprecated
     },
     'deepseek': {
       'deepseek-v4-flash': { input: 0.0000028, output: 0.00028 },

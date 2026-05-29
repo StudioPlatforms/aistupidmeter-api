@@ -1276,38 +1276,65 @@ export class KimiAdapter implements LLMAdapter {
   }
 }
 
-// ---------- GLM (Z.AI) ----------
+// ---------- GLM (Z.AI / Zhipu AI) ----------
+// GLM-5.1: 744B MoE (40B active), 200K context, 128K max output, GA April 7, 2026
+// Thinking mode: { type: 'enabled' } / { type: 'disabled' } — compulsory when enabled
+// Thinking tokens count toward max_tokens (Anthropic-like, NOT OpenAI-like)
+// Auth: raw Bearer token (NOT legacy JWT)
+// Base URL: https://api.z.ai/api/paas/v4 (verified)
+// tool_choice: only 'auto' is officially supported
 export class GLMAdapter implements LLMAdapter {
   constructor(private apiKey: string, private base = 'https://api.z.ai/api/paas/v4') {}
   
   async listModels() {
-    // GLM doesn't have a models endpoint, return known models
-    // REMOVED: glm-4.7-flash, glm-4.7-flashx — NOT in Z.AI's published catalog
-    // ADDED: glm-5, glm-5.1 — released April 7, 2026 (GLM-5.1 leads SWE-Bench Pro at 58.4)
+    // Z.AI has no /models discovery endpoint — hardcode known models
+    // DEPRECATED: glm-4.6, glm-4.7, glm-4.7-flash, glm-4.7-flashx — replaced by GLM-5.1
+    // GLM-5.1 is GA default model, leads SWE-Bench Pro at 58.4
     return [
-      'glm-4.6',
-      'glm-4.7',           // Flagship model (Jan 2026) with enhanced coding capabilities
-      'glm-5',             // April 2026 release
-      'glm-5.1'            // April 2026 — top SWE-Bench Pro performer (58.4)
+      'glm-5.1'            // GA April 2026 — 744B MoE, SWE-Bench Pro 58.4, $1.40/$4.40 per MTok
     ];
   }
   
   async chat(req: ChatRequest): Promise<ChatResponse> {
+    // GLM-5.1 is a thinking model — thinking tokens count toward max_tokens (like Anthropic)
+    // Need generous budget to avoid truncation from reasoning overhead
+    const isThinkingModel = /^glm-5/.test(req.model);
+
     const body: any = {
       model: req.model,
       messages: req.messages,
-      temperature: req.temperature ?? 1.0, // GLM-4.6 default is 1.0
-      max_tokens: req.maxTokens ?? 4096,
       stream: req.stream ?? false
     };
 
-    // Enable thinking mode for GLM reasoning capabilities (as per docs)
-    // GLM-4.6/4.7 and GLM-5/5.1 all support thinking mode
-    if (req.model === 'glm-4.6' || req.model.startsWith('glm-4.7') || req.model.startsWith('glm-5')) {
-      body.thinking = { type: 'enabled' };
+    if (isThinkingModel) {
+      // THINKING MODEL CONFIG (GLM-5 / GLM-5.1):
+      // 1. Higher token limits — thinking tokens count toward max_tokens
+      //    Use caller-provided budget if large enough; otherwise scale up
+      body.max_tokens = req.maxTokens && req.maxTokens >= 8000
+        ? req.maxTokens
+        : Math.max(16384, (req.maxTokens || 4096) * 4);
+      // Cap at 128K (GLM-5.1 max output ceiling = 131072)
+      body.max_tokens = Math.min(body.max_tokens, 131072);
+
+      // 2. Thinking mode — compulsory when enabled on GLM-5.1 (all inputs trigger reasoning)
+      //    Allow caller to disable thinking (e.g., for canary pings) via thinking_disabled flag
+      if ((req as any).thinking_disabled) {
+        body.thinking = { type: 'disabled' };
+      } else {
+        body.thinking = { type: 'enabled' };
+      }
+
+      // 3. Temperature — still applies in thinking mode on GLM-5.1
+      //    Z.AI recommended default is 1.0; valid range [0.0, 1.0]
+      //    For benchmarks, use lower values for more deterministic output
+      body.temperature = typeof req.temperature === 'number' ? req.temperature : 0.6;
+    } else {
+      // Standard (non-thinking) model config
+      body.max_tokens = req.maxTokens ?? 4096;
+      body.temperature = req.temperature ?? 1.0;
     }
 
-    // Add tools if provided
+    // Add tools if provided — OpenAI-compatible format, up to 128 functions
     if (req.tools?.length) {
       body.tools = req.tools.map(t => ({
         type: 'function',
@@ -1317,10 +1344,8 @@ export class GLMAdapter implements LLMAdapter {
           parameters: t.parameters || { type: 'object', properties: {} }
         }
       }));
-    }
-
-    if (req.toolChoice) {
-      body.tool_choice = req.toolChoice;
+      // Z.AI only officially supports tool_choice: 'auto' — do NOT send 'none' or forced function
+      body.tool_choice = 'auto';
     }
 
     if (req.jsonSchema) {
@@ -1347,26 +1372,57 @@ export class GLMAdapter implements LLMAdapter {
     
     const choice = j?.choices?.[0];
     const message = choice?.message;
-    // Handle reasoning models that put content in reasoning_content field
+
+    // Extract text content (answer)
     let text = message?.content || '';
-    if (!text && message?.reasoning_content) {
-      text = message.reasoning_content;
+    // Extract reasoning content (chain-of-thought) — at message.reasoning_content
+    const reasoningContent = message?.reasoning_content || '';
+
+    // Only use reasoning_content as fallback if content is completely empty
+    if (!text && reasoningContent) {
+      text = reasoningContent;
     }
     
-    // Extract tool calls if present
+    // Extract tool calls if present — arguments are JSON strings (must parse)
     const toolCalls = (message?.tool_calls ?? []).map((t: any) => ({
       name: t.function?.name,
-      arguments: typeof t.function?.arguments === 'string' 
-        ? JSON.parse(t.function.arguments) 
+      arguments: typeof t.function?.arguments === 'string'
+        ? JSON.parse(t.function.arguments)
         : t.function?.arguments
     }));
 
+    // Token usage — reasoning tokens are folded into completion_tokens (no separate field)
+    const usage = j?.usage ?? {};
+
+    // Log reasoning content telemetry for thinking models
+    if (reasoningContent) {
+      const reasoningChars = reasoningContent.length;
+      console.log(`🧠 [GLM] ${req.model}: ~${reasoningChars} chars reasoning, ${usage?.completion_tokens ?? 0} total output tokens`);
+    }
+
+    // Detect truncated responses
+    if (choice?.finish_reason === 'length') {
+      console.warn(`⚠️ [GLM] ${req.model} response truncated (finish_reason=length). max_tokens was ${body.max_tokens}`);
+    }
+    // Detect content filter
+    if (choice?.finish_reason === 'sensitive') {
+      console.warn(`⚠️ [GLM] ${req.model} content filtered (finish_reason=sensitive)`);
+    }
+
     return {
       text,
-      tokensIn: j?.usage?.prompt_tokens ?? 0,
-      tokensOut: j?.usage?.completion_tokens ?? 0,
+      tokensIn: usage?.prompt_tokens ?? 0,
+      tokensOut: usage?.completion_tokens ?? 0, // NOTE: completion_tokens includes thinking tokens
       toolCalls,
-      raw: j
+      raw: {
+        ...j,
+        // Expose reasoning content for debugging and multi-turn preserved thinking
+        reasoningContent: reasoningContent || null,
+        // Expose cache hit info
+        cachedInputTokens: usage?.prompt_tokens_details?.cached_tokens ?? 0,
+        // Expose finish reason for truncation/filter detection
+        finishReason: choice?.finish_reason
+      }
     };
   }
 }

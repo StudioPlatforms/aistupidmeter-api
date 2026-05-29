@@ -86,7 +86,7 @@ async function checkProviderHealth(provider: string, adapter: any): Promise<Heal
         testModel = 'deepseek-v4-flash'; // V4 Flash (replaces legacy deepseek-chat)
         break;
       case 'glm':
-        testModel = 'glm-4.6'; // GLM-4.6
+        testModel = 'glm-5.1'; // GLM-5.1 (GA April 2026, replaces deprecated glm-4.6)
         break;
       case 'kimi':
         testModel = 'kimi-k2.6'; // Latest Kimi K2.6 model (April 2026)

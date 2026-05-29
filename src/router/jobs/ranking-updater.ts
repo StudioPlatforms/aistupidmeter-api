@@ -45,6 +45,12 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   'gemini-2.5-flash': { input: 0.0003, output: 0.0025 },
   'gemini-1.5-pro': { input: 0.00125, output: 0.005 },
   'gemini-1.5-flash': { input: 0.000075, output: 0.0003 },
+
+  // GLM (Z.AI) — official api.z.ai pricing (verified May 2026)
+  'glm-5.1': { input: 0.0014, output: 0.0044 },
+  'glm-5': { input: 0.001, output: 0.0032 },
+  'glm-4.7': { input: 0.0006, output: 0.0022 },
+  'glm-4.6': { input: 0.0006, output: 0.0022 },
 };
 
 /**
@@ -69,7 +75,8 @@ function supportsToolCalling(modelName: string): boolean {
     'gpt-4o', 'gpt-5-codex', 'o1', 'o1-mini',
     'claude-sonnet-4', 'claude-opus-4', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8', 'claude-3-5-sonnet',
     'grok-4-latest', 'grok-2-latest',
-    'gemini-2.5-pro', 'gemini-1.5-pro'
+    'gemini-2.5-pro', 'gemini-1.5-pro',
+    'glm-5.1', 'glm-5', 'glm-4.7'  // GLM supports tool calling with thinking mode
   ];
   
   return toolCallingModels.some(pattern => modelName.includes(pattern));

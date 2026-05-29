@@ -191,7 +191,9 @@ export class MultiTurnSession {
     const isKimiThinking = /^kimi-k2\.[56]/.test(this.model.name);
     // Claude Opus 4.7+ are adaptive thinking models (reject temperature, use effort param)
     const isClaudeReasoning = /^claude-opus-4-([7-9]|\d{2,})/.test(this.model.name);
-    const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking || isClaudeReasoning;
+    // GLM-5/5.1 are thinking models — thinking tokens count toward max_tokens (Anthropic-like)
+    const isGLMThinking = /^glm-5/.test(this.model.name);
+    const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking || isClaudeReasoning || isGLMThinking;
 
     // Deep benchmarks need higher token budgets for reasoning models
     let maxTokens = step.maxTokens || 1500;
@@ -199,6 +201,8 @@ export class MultiTurnSession {
       maxTokens = Math.max(25000, maxTokens * 5); // Deep tasks need room for reasoning
     } else if (isClaudeReasoning) {
       maxTokens = Math.max(64000, maxTokens * 5); // Claude thinking tokens count toward max_tokens; need large budget
+    } else if (isGLMThinking) {
+      maxTokens = Math.max(32768, maxTokens * 5); // GLM-5.1 thinking tokens count toward max_tokens; 128K ceiling
     } else if (isDeepSeekThinking) {
       maxTokens = Math.max(16384, maxTokens * 4); // DeepSeek thinking needs room for CoT
     } else if (isKimiThinking) {
@@ -246,6 +250,9 @@ export class MultiTurnSession {
     if (this.model.vendor === 'anthropic' && isClaudeReasoning) {
       chatRequest.reasoning_effort = 'xhigh'; // Deep benchmarks benefit from thorough reasoning; Opus 4.7/4.8 support xhigh
     }
+
+    // GLM-5/5.1 thinking models: no reasoning_effort parameter — binary enabled/disabled only.
+    // Temperature handled by adapter (0.6 default). Thinking is compulsory when enabled.
 
     // Kimi K2.5/K2.6 thinking models: temperature handled by adapter (forced to 1.0).
     // No reasoning_effort parameter available — Kimi always uses full thinking in thinking mode.

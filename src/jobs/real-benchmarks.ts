@@ -309,7 +309,7 @@ const PROVIDER_COSTS = {
   anthropic: { input: 0.03, output: 0.15 },  // Claude pricing
   google: { input: 0.0125, output: 0.0375 }, // Gemini Pro pricing
   xai: { input: 0.002, output: 0.002 },      // Grok pricing
-  glm: { input: 0.001, output: 0.002 },      // GLM pricing (estimated)
+  glm: { input: 0.0014, output: 0.0044 },    // GLM-5.1 pricing ($1.40/$4.40 per MTok, verified api.z.ai)
   deepseek: { input: 0.0014, output: 0.0028 }, // DeepSeek pricing
   kimi: { input: 0.0015, output: 0.003 }     // Kimi pricing (estimated)
 } as const;

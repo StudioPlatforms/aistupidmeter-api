@@ -16,7 +16,7 @@ const PROVIDER_COSTS = {
   anthropic: { input: 0.003, output: 0.015 }, // Sonnet 4 average
   google: { input: 0.00125, output: 0.01 },   // Gemini 2.5 Pro average
   xai: { input: 0.003, output: 0.015 },       // Grok 4.3 average
-  glm: { input: 0.0006, output: 0.0022 },     // GLM-5 average
+  glm: { input: 0.0014, output: 0.0044 },     // GLM-5.1 official api.z.ai pricing
   deepseek: { input: 0.00028, output: 0.00042 }, // DeepSeek V4 average
   kimi: { input: 0.0006, output: 0.0025 }     // Kimi K2 average
 } as const;
@@ -71,12 +71,11 @@ const MODEL_COSTS = {
   'kimi-k2.5': { input: 0.0003, output: 0.0015 },
   'kimi-k2.6': { input: 0.0003, output: 0.0015 },
   
-  // GLM (May 2026 — removed hallucinated flash models, added GLM-5)
-  'glm-4.6': { input: 0.0001, output: 0.0005 },
-  'glm-4.7': { input: 0.00015, output: 0.00075 },
-  'glm-5': { input: 0.0002, output: 0.001 },
-  'glm-5.1': { input: 0.0002, output: 0.001 }
-  // REMOVED: glm-4.7-flash, glm-4.7-flashx — not in Z.AI catalog
+  // GLM (May 2026 — official api.z.ai pricing, GLM-5.1 is flagship)
+  'glm-5.1': { input: 0.0014, output: 0.0044 },  // $1.40/$4.40 per MTok
+  'glm-5': { input: 0.001, output: 0.0032 },
+  'glm-4.7': { input: 0.0006, output: 0.0022 },   // Deprecated
+  'glm-4.6': { input: 0.0006, output: 0.0022 }    // Deprecated
 } as const;
 
 // Models known to support tool/function calling (May 2026)
@@ -97,8 +96,8 @@ const TOOL_CALLING_MODELS = new Set([
   'deepseek-v4-flash', 'deepseek-v4-pro',
   // Kimi
   'kimi-k2.5', 'kimi-k2.6',
-  // GLM (removed hallucinated flash models, added GLM-5)
-  'glm-4.6', 'glm-4.7', 'glm-5', 'glm-5.1'
+  // GLM — GLM-5.1 supports tool calling with thinking mode (interleaved thinking)
+  'glm-5.1', 'glm-5', 'glm-4.7', 'glm-4.6'
 ]);
 
 // Models known to support streaming

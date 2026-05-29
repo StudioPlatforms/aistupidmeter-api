@@ -24,6 +24,9 @@ export async function seed() {
     { name: 'grok-4', vendor: 'xai', version: '2025-01-10', notes: 'Grok 4 flagship reasoning model' },
     { name: 'grok-code-fast-1', vendor: 'xai', version: '2025-01-10', notes: 'Grok code-optimized fast model' },
     
+    // GLM (Z.AI) - GLM-5.1 flagship
+    { name: 'glm-5.1', vendor: 'glm', version: '2026-04-07', notes: 'GLM-5.1 flagship — 744B MoE, SWE-Bench Pro 58.4, thinking model ($1.40/$4.40 per MTok)' },
+
     // Google - Latest Gemini 2.5 series
     { name: 'gemini-2.5-pro', vendor: 'google', version: '2025-01-12', notes: 'Gemini 2.5 Pro flagship' },
     { name: 'gemini-2.5-flash', vendor: 'google', version: '2025-01-12', notes: 'Gemini 2.5 Flash optimized' },
