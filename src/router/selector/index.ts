@@ -45,6 +45,7 @@ const MODEL_COSTS = {
   'claude-opus-4-5-20251101': { input: 0.005, output: 0.025 },
   'claude-opus-4-6': { input: 0.005, output: 0.025 },
   'claude-opus-4-7': { input: 0.005, output: 0.025 },
+  'claude-opus-4-8': { input: 0.005, output: 0.025 },
   // REMOVED: claude-sonnet-4-20250514, claude-opus-4-20250514 — retire June 15, 2026
   // REMOVED: claude-opus-4-1-20250805 — legacy, verify deprecation date
   
@@ -86,7 +87,7 @@ const TOOL_CALLING_MODELS = new Set([
   // Anthropic (removed deprecated dated IDs)
   'claude-3-5-haiku', 'claude-haiku-4-5',
   'claude-sonnet-4-5', 'claude-sonnet-4-5-20250929', 'claude-sonnet-4-6',
-  'claude-opus-4-5-20251101', 'claude-opus-4-6', 'claude-opus-4-7',
+  'claude-opus-4-5-20251101', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8',
   // Google (removed gemini-1.5-*)
   'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
   'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3.5-flash',

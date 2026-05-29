@@ -679,7 +679,8 @@ export class AnthropicAdapter implements LLMAdapter {
         'claude-sonnet-4-6',          // February 2026
         'claude-opus-4-5-20251101',   // November 2025 — verify deprecation date
         'claude-opus-4-6',            // February 2026
-        'claude-opus-4-7'             // April 2026 reasoning model
+        'claude-opus-4-7',            // April 2026 reasoning model
+        'claude-opus-4-8'             // May 2026 reasoning model (adaptive thinking, $5/$25 per MTok)
       ];
     }
   }
@@ -703,17 +704,28 @@ export class AnthropicAdapter implements LLMAdapter {
     };
 
     if (isReasoningModel) {
-      // REASONING MODEL CONFIG (Opus 4.7+):
-      // 1. Higher token limits — reasoning consumes tokens for internal thinking
-      body.max_tokens = Math.max(4096, (req.maxTokens || 1200) * 3);
+      // REASONING MODEL CONFIG (Opus 4.7/4.8+):
+      // 1. Higher token limits — thinking tokens count toward max_tokens on Anthropic
+      //    Use caller-provided budget if large enough; otherwise scale up for thinking overhead
+      body.max_tokens = req.maxTokens && req.maxTokens >= 8000
+        ? req.maxTokens
+        : Math.max(16384, (req.maxTokens || 1200) * 4);
       
-      // 2. Adaptive thinking — enables extended reasoning with summarized output
-      body.thinking = { type: 'adaptive', display: 'summarized' };
+      // 2. Adaptive thinking — the only thinking mode on Opus 4.7/4.8 (manual budget_tokens returns 400)
+      //    display: 'summarized' is required to receive thinking text (default is 'omitted' on 4.8)
+      //    Allow caller to disable thinking (e.g., for canary pings) via thinking_disabled flag
+      if ((req as any).thinking_disabled) {
+        body.thinking = { type: 'disabled' };
+      } else {
+        body.thinking = { type: 'adaptive', display: 'summarized' };
+      }
       
-      // 3. Effort level — controls reasoning depth (high for benchmarks)
-      body.output_config = { effort: 'high' };
+      // 3. Effort level — controls reasoning depth; allow caller to override via reasoning_effort
+      //    Valid values: low, medium, high (default), xhigh (Opus 4.7/4.8 only), max
+      const effort = req.reasoning_effort || 'high';
+      body.output_config = { effort };
       
-      // 4. No temperature/top_p/top_k — these are rejected with 400
+      // 4. No temperature/top_p/top_k — these are rejected with 400 on Opus 4.7/4.8
       // (intentionally omitted)
     } else {
       // Standard model config
@@ -748,9 +760,15 @@ export class AnthropicAdapter implements LLMAdapter {
     const j: any = await r.json();
 
     // Extract thinking blocks (reasoning models return these with display:'summarized')
+    // Must also preserve redacted_thinking blocks — they carry cryptographic signatures
+    // that MUST be passed back unchanged in multi-turn tool conversations
     const thinkingTexts = (j?.content ?? [])
       .filter((c: any) => c.type === 'thinking' && typeof c.thinking === 'string')
       .map((c: any) => c.thinking);
+    
+    // Preserve all thinking + redacted_thinking blocks for multi-turn tool-use flows
+    const thinkingBlocks = (j?.content ?? [])
+      .filter((c: any) => c.type === 'thinking' || c.type === 'redacted_thinking');
 
     // Extract text content blocks
     const text =
@@ -768,9 +786,16 @@ export class AnthropicAdapter implements LLMAdapter {
     return {
       text,
       tokensIn: j?.usage?.input_tokens ?? 0,
-      tokensOut: j?.usage?.output_tokens ?? 0,
+      tokensOut: j?.usage?.output_tokens ?? 0, // NOTE: output_tokens includes thinking tokens on Anthropic
       toolCalls,
-      raw: { ...j, thinkingTexts } // Include thinking for downstream analysis
+      raw: {
+        ...j,
+        thinkingTexts,
+        thinkingBlocks, // Preserved for multi-turn tool-use (must pass back unchanged)
+        stopReason: j?.stop_reason, // 'end_turn' | 'max_tokens' | 'tool_use' | 'stop_sequence' | 'refusal'
+        cacheCreationTokens: j?.usage?.cache_creation_input_tokens ?? 0,
+        cacheReadTokens: j?.usage?.cache_read_input_tokens ?? 0
+      }
     };
   }
 }

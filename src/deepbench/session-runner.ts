@@ -189,12 +189,16 @@ export class MultiTurnSession {
     const isOSeries = /^o\d|^o-mini|^o-/.test(this.model.name);
     const isDeepSeekThinking = this.model.name === 'deepseek-reasoner' || /^deepseek-v4/.test(this.model.name);
     const isKimiThinking = /^kimi-k2\.[56]/.test(this.model.name);
-    const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking;
+    // Claude Opus 4.7+ are adaptive thinking models (reject temperature, use effort param)
+    const isClaudeReasoning = /^claude-opus-4-([7-9]|\d{2,})/.test(this.model.name);
+    const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking || isClaudeReasoning;
 
     // Deep benchmarks need higher token budgets for reasoning models
     let maxTokens = step.maxTokens || 1500;
     if (isGPT55) {
       maxTokens = Math.max(25000, maxTokens * 5); // Deep tasks need room for reasoning
+    } else if (isClaudeReasoning) {
+      maxTokens = Math.max(64000, maxTokens * 5); // Claude thinking tokens count toward max_tokens; need large budget
     } else if (isDeepSeekThinking) {
       maxTokens = Math.max(16384, maxTokens * 4); // DeepSeek thinking needs room for CoT
     } else if (isKimiThinking) {
@@ -235,6 +239,12 @@ export class MultiTurnSession {
     // DeepSeek V4 thinking models: high reasoning effort for deep benchmarks
     if (this.model.vendor === 'deepseek' && isDeepSeekThinking) {
       chatRequest.reasoning_effort = 'high'; // Deep benchmarks benefit from thorough reasoning
+    }
+
+    // Claude Opus 4.7/4.8 reasoning models: xhigh effort for deep benchmarks
+    // The adapter handles thinking config internally; we just set effort via reasoning_effort
+    if (this.model.vendor === 'anthropic' && isClaudeReasoning) {
+      chatRequest.reasoning_effort = 'xhigh'; // Deep benchmarks benefit from thorough reasoning; Opus 4.7/4.8 support xhigh
     }
 
     // Kimi K2.5/K2.6 thinking models: temperature handled by adapter (forced to 1.0).

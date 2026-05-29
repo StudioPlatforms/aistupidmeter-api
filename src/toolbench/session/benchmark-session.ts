@@ -154,7 +154,9 @@ export class ToolBenchmarkSession {
       const isOSeries = /^o\d|^o-mini|^o-/.test(this.model.name);
       const isDeepSeekThinking = this.model.name === 'deepseek-reasoner' || /^deepseek-v4/.test(this.model.name);
       const isKimiThinking = /^kimi-k2\.[56]/.test(this.model.name);
-      const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking;
+      // Claude Opus 4.7+ are adaptive thinking models (reject temperature, use effort param)
+      const isClaudeReasoning = /^claude-opus-4-([7-9]|\d{2,})/.test(this.model.name);
+      const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking || isClaudeReasoning;
 
       // Reasoning models need higher token budgets for thinking + tool calling
       let maxTokens = 2000;
@@ -162,6 +164,10 @@ export class ToolBenchmarkSession {
         // Scale based on task difficulty
         const difficultyBudget: Record<string, number> = { easy: 15000, medium: 25000, hard: 35000 };
         maxTokens = difficultyBudget[this.task.difficulty] || 25000;
+      } else if (isClaudeReasoning) {
+        // Claude Opus 4.7/4.8: thinking tokens count toward max_tokens, need large budget
+        const difficultyBudget: Record<string, number> = { easy: 16384, medium: 32000, hard: 64000 };
+        maxTokens = difficultyBudget[this.task.difficulty] || 32000;
       } else if (isDeepSeekThinking) {
         // DeepSeek thinking models need room for CoT + tool call output
         const difficultyBudget: Record<string, number> = { easy: 8192, medium: 12288, hard: 16384 };
@@ -198,6 +204,10 @@ export class ToolBenchmarkSession {
         request.verbosity = 'low';               // Concise tool outputs preferred
         request.store = false;                    // Don't store benchmark data
         request.max_tool_calls = 15;              // Cap runaway tool loops
+      } else if (isClaudeReasoning) {
+        // Claude Opus 4.7/4.8: medium effort for tool benchmarks (xhigh reserved for deep benchmarks)
+        // The adapter handles thinking config + strips temperature; we just set effort
+        request.reasoning_effort = 'high';
       } else if (isDeepSeekThinking) {
         // DeepSeek thinking models: medium reasoning for tool benchmarks
         request.reasoning_effort = 'medium';

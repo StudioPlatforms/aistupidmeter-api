@@ -364,6 +364,8 @@ async function benchmarkModelCanaryLightning(
   const isDeepSeekThinking = model.name === 'deepseek-reasoner' || /^deepseek-v4/.test(model.name);
   // Kimi K2.5/K2.6 thinking model detection (temp=1, reasoning_content returned)
   const isKimiThinking = /^kimi-k2\.[56]/.test(model.name);
+  // Claude Opus 4.7/4.8 reasoning model detection
+  const isClaudeReasoning = /^claude-opus-4-([7-9]|\d{2,})/.test(model.name);
 
   try {
     // PING: Connectivity check with model-appropriate timeout
@@ -391,6 +393,14 @@ async function benchmarkModelCanaryLightning(
     // Need extra token budget for reasoning_content
     if (isKimiThinking) {
       pingRequest.maxTokens = 5000; // Room for CoT reasoning tokens
+    }
+    // Claude Opus 4.7/4.8 reasoning models: disable thinking for pings to save tokens/time
+    // Set thinking_disabled flag so the adapter sends thinking: {type: 'disabled'}
+    // Also use low effort for minimal latency
+    if (isClaudeReasoning) {
+      pingRequest.thinking_disabled = true;
+      pingRequest.reasoning_effort = 'low';
+      pingRequest.maxTokens = 1000; // No thinking overhead, small budget is fine
     }
     const pingPromise = adapter.chat(pingRequest);
     
@@ -453,6 +463,11 @@ async function benchmarkModelCanaryLightning(
         // Kimi K2.5/K2.6 thinking models: temp handled by adapter (forced to 1.0)
         if (isKimiThinking) {
           taskRequest.maxTokens = 8000; // Room for CoT reasoning tokens
+        }
+        // Claude Opus 4.7/4.8 reasoning models: medium effort for canary tasks, thinking enabled
+        if (isClaudeReasoning) {
+          taskRequest.reasoning_effort = 'medium'; // Moderate effort for canary speed
+          taskRequest.maxTokens = 16384; // Thinking tokens count toward max_tokens
         }
         const taskPromise = adapter.chat(taskRequest);
         

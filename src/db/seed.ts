@@ -16,7 +16,9 @@ export async function seed() {
     { name: 'claude-opus-4-20250514', vendor: 'anthropic', version: '2025-05-14', notes: 'Claude Opus 4' },
     { name: 'claude-sonnet-4-20250514', vendor: 'anthropic', version: '2025-05-14', notes: 'Claude Sonnet 4' },
     { name: 'claude-sonnet-4-5-20250929', vendor: 'anthropic', version: '2025-09-29', notes: 'Claude Sonnet 4.5' },
-    { name: 'claude-opus-4-6', vendor: 'anthropic', version: '2026-02-06', notes: 'Claude Opus 4.6 latest flagship' },
+    { name: 'claude-opus-4-6', vendor: 'anthropic', version: '2026-02-06', notes: 'Claude Opus 4.6 flagship' },
+    { name: 'claude-opus-4-7', vendor: 'anthropic', version: '2026-04-16', notes: 'Claude Opus 4.7 reasoning model (adaptive thinking)' },
+    { name: 'claude-opus-4-8', vendor: 'anthropic', version: '2026-05-28', notes: 'Claude Opus 4.8 reasoning model (adaptive thinking, $5/$25 per MTok)' },
     
     // xAI - Latest Grok models
     { name: 'grok-4', vendor: 'xai', version: '2025-01-10', notes: 'Grok 4 flagship reasoning model' },

@@ -183,6 +183,7 @@ function estimateCost(provider: string, model: string, tokensIn: number, tokensO
       'claude-opus-4-5-20251101': { input: 0.005, output: 0.025 },
       'claude-opus-4-6': { input: 0.005, output: 0.025 },
       'claude-opus-4-7': { input: 0.005, output: 0.025 },
+      'claude-opus-4-8': { input: 0.005, output: 0.025 },
       'claude-3-5-haiku': { input: 0.00025, output: 0.00125 },
       // DEPRECATED — retiring June 15, 2026:
       // 'claude-sonnet-4-20250514', 'claude-opus-4-20250514'

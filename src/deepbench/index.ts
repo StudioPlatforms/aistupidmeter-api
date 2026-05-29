@@ -251,6 +251,7 @@ const MODEL_COSTS = {
   'claude-sonnet-4-5-20250929': { input: 3.0, output: 15.0 },
   'claude-opus-4-6': { input: 5.0, output: 25.0 }, // Current pricing
   'claude-opus-4-7': { input: 5.0, output: 25.0 }, // April 2026 reasoning model
+  'claude-opus-4-8': { input: 5.0, output: 25.0 }, // May 2026 reasoning model (adaptive thinking, output_tokens includes thinking)
   'claude-3-7-sonnet-20250219': { input: 3.0, output: 15.0 }, // Deprecated, retires 2026-02-19
   
   // Google Gemini - OFFICIAL VERIFIED May 2026
