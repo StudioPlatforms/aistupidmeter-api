@@ -249,31 +249,18 @@ async function computeCombinedScores(): Promise<ModelScore[]> {
     const trend = await calculateTrend(model.id, 'hourly');
     const status = getStatus(combinedScore);
     
-    // FIX: Use the most recent VALID score timestamp (not sentinel -777/-888/-999)
-    // Also check the most recent score of ANY suite for this model (including canary)
-    // to avoid showing stale "7h ago" when canary scores ran 30m ago
+    // FIX: "Last updated" for the COMBINED score must reflect ONLY the suites that
+    // actually compose it (hourly / deep / tooling). It must NOT include the hourly
+    // canary probe — canary runs every hour, so including it made some models show
+    // "43m ago" while others showed "5h ago" for the same 4-hourly data, producing
+    // the inconsistent timestamps reported on the dashboard. Synthetic scores still
+    // count here because they are written into these same composing suites on the
+    // correct 4-hour / daily grid by the real benchmark jobs.
     const validTimestamps = [
       hasHourly && hourlyScore?.ts ? new Date(hourlyScore.ts).getTime() : 0,
       hasDeep && deepScore?.ts ? new Date(deepScore.ts).getTime() : 0,
       hasTooling && toolingScore?.ts ? new Date(toolingScore.ts).getTime() : 0,
     ].filter(t => t > 0);
-    
-    // Also get the absolute most recent score for this model (any suite)
-    // This ensures freshly-run canary scores update the "last updated" display
-    let mostRecentAnyTs = 0;
-    try {
-      const anyRecent = await db
-        .select({ ts: scores.ts })
-        .from(scores)
-        .where(and(eq(scores.modelId, model.id), sql`stupid_score >= 0`))
-        .orderBy(desc(scores.ts))
-        .limit(1);
-      if (anyRecent[0]?.ts) {
-        mostRecentAnyTs = new Date(anyRecent[0].ts).getTime();
-      }
-    } catch { /* ignore */ }
-    
-    if (mostRecentAnyTs > 0) validTimestamps.push(mostRecentAnyTs);
     
     // Guard against epoch dates: if timestamp is before 2024, it's invalid
     const MIN_VALID_TS = new Date('2024-01-01').getTime();

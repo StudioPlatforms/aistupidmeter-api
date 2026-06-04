@@ -11,7 +11,10 @@ import {
   benchmarkModel
 } from './real-benchmarks';
 import { Provider } from '../llm/adapters';
-import { generateSyntheticScore } from '../lib/synthetic-scores';
+// NOTE: Synthetic scores are intentionally NOT generated here. The canary is a
+// pure live drift probe and must not write to the 'hourly' chart suite. Synthetic
+// chart coverage for credit-exhausted models is produced on the 4-hour grid by
+// runRealBenchmarks() in real-benchmarks.ts.
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs/promises';
@@ -334,17 +337,13 @@ async function benchmarkModelCanaryLightning(
   const adapter = getAdapter(model.vendor);
   
   if (!adapter) {
-    // No API key — generate synthetic canary score to prevent data gaps
-    console.log(`⏭️ ${model.name}: No API key — generating synthetic canary score`);
-    try {
-      await generateSyntheticScore({
-        modelId: model.id,
-        suite: 'hourly', // Use hourly suite for synthetic (canary scores are excluded from drift anyway)
-        batchTimestamp
-      });
-    } catch (synthErr) {
-      console.warn(`⚠️ ${model.name}: Synthetic score generation failed: ${String(synthErr).slice(0, 80)}`);
-    }
+    // No API key — skip. The canary is purely a live drift probe and must NOT
+    // write to the 'hourly' chart suite. Synthetic chart coverage for no-key /
+    // credit-exhausted models is produced on the correct 4-hour grid by
+    // runRealBenchmarks() (see real-benchmarks.ts). Writing synthetic 'hourly'
+    // scores here (every hour) is what created off-grid chart points and
+    // inconsistent "last updated" timestamps.
+    console.log(`⏭️ ${model.name}: No API key — skipping canary probe (4-hourly job handles synthetic chart data)`);
     return;
   }
 
@@ -413,10 +412,12 @@ async function benchmarkModelCanaryLightning(
     try {
       ping = await Promise.race([pingPromise, timeoutPromise]);
     } catch (pingErr: any) {
-      // Only synthesize on credit exhaustion - transient errors/timeouts = just skip
+      // The canary is a pure live drift probe — it must NEVER write to the
+      // 'hourly' chart suite. On credit exhaustion the 4-hourly runRealBenchmarks()
+      // job already produces an on-grid synthetic 'hourly' score, so here we just
+      // skip to avoid off-grid chart points and inconsistent timestamps.
       if (isCreditExhaustedCanary(pingErr)) {
-        console.log(`💳 ${model.name}: Credits exhausted during canary ping - generating synthetic score`);
-        await generateSyntheticScore({ modelId: model.id, suite: 'hourly', batchTimestamp });
+        console.log(`💳 ${model.name}: Credits exhausted during canary ping - skipping (4-hourly job handles synthetic chart data)`);
         return;
       }
       console.log(`⚠️ ${model.name}: Ping failed (${String(pingErr).slice(0, 80)}) - skipping canary (will retry next hour)`);
@@ -563,23 +564,13 @@ async function benchmarkModelCanaryLightning(
     const duration = Date.now() - startTime;
     const errMsg = String(error?.message || error).slice(0, 120);
 
-    // CRITICAL: Only generate synthetic scores when credits are actually exhausted.
-    // Transient failures (timeouts, network errors, temporary 5xx) should just be skipped —
-    // the real benchmark will run on the next scheduled cycle.
+    // The canary is a pure live drift probe — it must NEVER write to the 'hourly'
+    // chart suite. Whether the failure is credit exhaustion or a transient error,
+    // we simply skip here. Synthetic chart coverage for credit-exhausted models is
+    // produced on the correct 4-hour grid by runRealBenchmarks(), which keeps the
+    // 7AXIS/COMBINED timelines evenly spaced and "last updated" timestamps consistent.
     if (isCreditExhaustedCanary(error)) {
-      console.log(`💳 ${model.name}: Credits exhausted after ${duration}ms - generating synthetic score`);
-      try {
-        const syntheticScore = await generateSyntheticScore({
-          modelId: model.id,
-          suite: 'hourly',
-          batchTimestamp
-        });
-        if (syntheticScore !== null) {
-          console.log(`🎲 ${model.name}: Synthetic score ${syntheticScore} (credit exhaustion)`);
-        }
-      } catch (synthErr) {
-        console.warn(`⚠️ ${model.name}: Synthetic fallback also failed: ${String(synthErr).slice(0, 80)}`);
-      }
+      console.log(`💳 ${model.name}: Credits exhausted after ${duration}ms - skipping canary (4-hourly job handles synthetic chart data)`);
     } else {
       // Transient error (timeout, network hiccup, etc.) — skip, don't synthesize.
       // The scheduler will retry on the next hourly/4-hourly cycle.
