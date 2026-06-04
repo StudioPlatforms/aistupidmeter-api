@@ -549,12 +549,14 @@ export default async function (fastify: FastifyInstance, opts: any) {
         };
       }
       
-      const providers = ['openai', 'anthropic', 'google', 'xai'];
-      
-      // OPTIMIZED: Batch fetch all models at once instead of per-provider
+      // Dynamically discover all providers from the models table (exclude xAI/Grok — no longer benchmarked)
       const allModels = await db.select().from(models);
-      const modelsByProvider = new Map<string, typeof allModels>();
+      const allVendors = [...new Set(allModels.map(m => m.vendor))];
+      const providers = allVendors.filter(v => v !== 'xai' && v !== 'x.ai');
       
+      console.log(`🏢 Discovered ${providers.length} providers: ${providers.join(', ')}`);
+      
+      const modelsByProvider = new Map<string, typeof allModels>();
       for (const provider of providers) {
         modelsByProvider.set(
           provider,
@@ -634,11 +636,13 @@ export default async function (fastify: FastifyInstance, opts: any) {
         // Base trust score calculation - more balanced baseline
         let baseTrustScore = 75; // Realistic baseline
         
-        // Provider-specific baseline adjustments - REDUCED to prevent overwhelming incident penalties
-        if (provider === 'openai') baseTrustScore = 80;      // Market leader (reduced from 85)
-        else if (provider === 'anthropic') baseTrustScore = 78; // High quality (reduced from 83)
-        else if (provider === 'google') baseTrustScore = 76;    // Good but sometimes inconsistent (reduced from 80)
-        else if (provider === 'xai') baseTrustScore = 72;       // Newer, less proven (unchanged)
+        // Provider-specific baseline adjustments
+        if (provider === 'openai') baseTrustScore = 80;      // Market leader
+        else if (provider === 'anthropic') baseTrustScore = 78; // High quality
+        else if (provider === 'google') baseTrustScore = 76;    // Good but sometimes inconsistent
+        else if (provider === 'deepseek') baseTrustScore = 74;  // Strong coding, newer entrant
+        else if (provider === 'glm') baseTrustScore = 70;       // Zhipu AI / Moonshot GLM series
+        else if (provider === 'kimi') baseTrustScore = 72;      // Moonshot AI Kimi K2 series
         
         // Adjust based on current performance
         const performanceBonus = Math.min(10, topPerformingModels.length * 2); // Reduced bonus to make incidents more impactful
@@ -711,15 +715,10 @@ export default async function (fastify: FastifyInstance, opts: any) {
         // Combine actual incidents with performance-based incidents
         const totalIncidents = recentIncidents + performanceIncidents;
         
-        // Special handling for xAI if no API key
-        let isAvailable = true;
-        if (provider === 'xai' && (!process.env.XAI_API_KEY || process.env.XAI_API_KEY === 'your_xai_key_here')) {
-          baseTrustScore = 60; // Lower score due to limited access
-          recentIncidents = 0; // But don't penalize for API key issues
-          isAvailable = false;
-        }
+        // All providers are considered available (xAI/Grok excluded from provider list entirely)
+        const isAvailable = true;
         
-        const finalTrustScore = Math.max(45, Math.min(95, 
+        const finalTrustScore = Math.max(45, Math.min(95,
           baseTrustScore + performanceBonus + activeBonus - (totalIncidents * 5)
         ));
         
