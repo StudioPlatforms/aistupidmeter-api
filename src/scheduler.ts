@@ -503,7 +503,7 @@ export function startBenchmarkScheduler() {
   console.log(`⏰ Next tool run: ${nextToolRun.toLocaleString('en-US', { timeZone: 'Europe/Berlin' })}`);
   console.log(`🔧 Time until next tool: ${Math.ceil((nextToolRun.getTime() - now.getTime()) / (1000 * 60 * 60))} hours`);
   
-  // Set up debug timer + safety check for stuck flags
+  // Set up debug timer + safety check for stuck flags + MISSED RUN WATCHDOG
   setInterval(() => {
     const currentTime = new Date();
     // Safety: automatically release stuck flags every 5 minutes
@@ -521,6 +521,38 @@ export function startBenchmarkScheduler() {
     console.log(`   - Daily scheduler active: ${dailyScheduledTask ? dailyScheduledTask.getStatus() : 'Unknown'}`);
     console.log(`   - Tool scheduler active: ${toolScheduledTask ? toolScheduledTask.getStatus() : 'Unknown'}`);
     console.log(`   - Health scheduler active: ${healthScheduledTask ? healthScheduledTask.getStatus() : 'Unknown'}`);
+
+    // ──────────────────────────────────────────────────────────────────────
+    // WATCHDOG: Detect missed 4-hourly runs and trigger a catch-up.
+    // node-cron can silently skip ticks when the event loop is blocked by
+    // synchronous better-sqlite3 I/O.  If the last run was > 4.5 hours ago
+    // AND nothing is currently running, fire a catch-up immediately.
+    // ──────────────────────────────────────────────────────────────────────
+    const FOUR_HOUR_PLUS_BUFFER_MS = 4.5 * 60 * 60 * 1000; // 4h 30m
+    const timeSinceLastRun = lastRunTime
+      ? currentTime.getTime() - lastRunTime.getTime()
+      : Infinity;
+
+    if (timeSinceLastRun > FOUR_HOUR_PLUS_BUFFER_MS && !isRunning) {
+      console.warn(`🚨 WATCHDOG: Last 4-hourly run was ${Math.round(timeSinceLastRun / 60000)}min ago — node-cron likely missed a tick. Triggering catch-up run NOW.`);
+      isRunning = true;
+      runningStartTime = Date.now();
+      lastRunTime = currentTime;
+
+      setImmediate(async () => {
+        try {
+          await runRealBenchmarks();
+          console.log(`✅ WATCHDOG catch-up benchmark completed`);
+          const cacheResult = await refreshHotCache();
+          console.log(`✅ HOT cache refresh after watchdog: ${cacheResult.refreshed} entries in ${cacheResult.duration}ms`);
+        } catch (error) {
+          console.error(`❌ WATCHDOG catch-up benchmark failed:`, error);
+        } finally {
+          isRunning = false;
+          runningStartTime = 0;
+        }
+      });
+    }
   }, 5 * 60 * 1000);
   
   // Run initial health check after 30 seconds
@@ -540,26 +572,13 @@ export function startBenchmarkScheduler() {
     }
   }, 30 * 1000);
   
-  // Test run for hourly benchmarks only
-  setTimeout(async () => {
-    if (!isRunning) {
-      console.log('🧪 Running test hourly benchmark to verify scheduler...');
-      try {
-        isRunning = true;
-        await runRealBenchmarks();
-        console.log('✅ Test hourly benchmark completed successfully');
-        
-        // Refresh cache after test run
-        console.log('🔄 Refreshing cache after test benchmark...');
-        const cacheResult = await refreshAllCache();
-        console.log(`✅ Cache refresh completed: ${cacheResult.refreshed} entries refreshed in ${cacheResult.duration}ms`);
-      } catch (error) {
-        console.error('❌ Test hourly benchmark failed:', error);
-      } finally {
-        isRunning = false;
-      }
-    }
-  }, 2 * 60 * 1000);
+  // REMOVED: The startup test run that used to fire 2 minutes after startup
+  // was running `await runRealBenchmarks()` directly in a setTimeout callback,
+  // which blocked the event loop with synchronous better-sqlite3 I/O for 1-3
+  // hours and held `isRunning = true`, causing the first scheduled cron tick
+  // to be skipped.  The watchdog above now handles the case where we need a
+  // run shortly after startup — it will detect that lastRunTime is null
+  // (Infinity ms ago) and trigger one within 5 minutes.
 }
 
 export function getBenchmarkStatus() {
