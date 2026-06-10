@@ -663,9 +663,9 @@ export class AnthropicAdapter implements LLMAdapter {
       const j: any = await r.json();
       return (j?.data ?? [])
         .map((m: any) => m.id)
-        // include 3.5, 3.7 sonnet + sonnet-4/opus/haiku families
+        // include 3.5, 3.7 sonnet + sonnet-4/opus/haiku/fable families
         .filter((id: string) =>
-          /^claude-(3-5-sonnet|3-5-haiku|3-7-sonnet|sonnet-4|opus-4|haiku-4)/.test(id)
+          /^claude-(3-5-sonnet|3-5-haiku|3-7-sonnet|sonnet-4|opus-4|haiku-4|fable)/.test(id)
         );
     } catch {
       // Fallback to known models (May 2026)
@@ -680,7 +680,8 @@ export class AnthropicAdapter implements LLMAdapter {
         'claude-opus-4-5-20251101',   // November 2025 — verify deprecation date
         'claude-opus-4-6',            // February 2026
         'claude-opus-4-7',            // April 2026 reasoning model
-        'claude-opus-4-8'             // May 2026 reasoning model (adaptive thinking, $5/$25 per MTok)
+        'claude-opus-4-8',            // May 2026 reasoning model (adaptive thinking, $5/$25 per MTok)
+        'claude-fable-5'              // June 2026 Mythos-class reasoning model (always-on thinking, $10/$50 per MTok, refusal/fallback)
       ];
     }
   }
@@ -694,9 +695,12 @@ export class AnthropicAdapter implements LLMAdapter {
         content: [{ type: 'text', text: m.content }]
       }));
 
-    // Anthropic reasoning models (claude-opus-4-7+) reject temperature/top_p/top_k
-    // and support adaptive thinking + effort parameters
-    const isReasoningModel = /^claude-opus-4-([7-9]|\d{2,})/.test(req.model);
+    // Anthropic reasoning models:
+    // - claude-opus-4-7+ reject temperature/top_p/top_k, support adaptive thinking + effort
+    // - claude-fable-5: always-on adaptive thinking, cannot disable, Mythos-class model
+    const isOpusReasoning = /^claude-opus-4-([7-9]|\d{2,})/.test(req.model);
+    const isFable = /^claude-fable/.test(req.model);
+    const isReasoningModel = isOpusReasoning || isFable;
 
     const body: any = {
       model: req.model,
@@ -704,28 +708,44 @@ export class AnthropicAdapter implements LLMAdapter {
     };
 
     if (isReasoningModel) {
-      // REASONING MODEL CONFIG (Opus 4.7/4.8+):
+      // REASONING MODEL CONFIG (Opus 4.7/4.8 + Fable 5):
       // 1. Higher token limits — thinking tokens count toward max_tokens on Anthropic
-      //    Use caller-provided budget if large enough; otherwise scale up for thinking overhead
-      body.max_tokens = req.maxTokens && req.maxTokens >= 8000
-        ? req.maxTokens
-        : Math.max(16384, (req.maxTokens || 1200) * 4);
+      //    Fable 5 needs large budgets (128k max output); Opus 4.7/4.8 get scaled budget
+      if (isFable) {
+        // Fable 5: 128k max output, 1M context. Use caller budget if >= 64k, else default 64k.
+        body.max_tokens = req.maxTokens && req.maxTokens >= 64000
+          ? req.maxTokens
+          : Math.max(64000, (req.maxTokens || 1200) * 5);
+      } else {
+        body.max_tokens = req.maxTokens && req.maxTokens >= 8000
+          ? req.maxTokens
+          : Math.max(16384, (req.maxTokens || 1200) * 4);
+      }
       
-      // 2. Adaptive thinking — the only thinking mode on Opus 4.7/4.8 (manual budget_tokens returns 400)
-      //    display: 'summarized' is required to receive thinking text (default is 'omitted' on 4.8)
-      //    Allow caller to disable thinking (e.g., for canary pings) via thinking_disabled flag
-      if ((req as any).thinking_disabled) {
+      // 2. Adaptive thinking — the only thinking mode on Opus 4.7/4.8/Fable 5
+      //    display: 'summarized' is required to receive thinking text (default is 'omitted')
+      //    Fable 5: thinking CANNOT be disabled (returns 400). For cheap pings, use effort:'low'.
+      if (isFable && (req as any).thinking_disabled) {
+        // Fable cannot disable thinking — log a warning and force adaptive with low effort instead
+        console.warn('[AnthropicAdapter] Fable 5 does not support thinking:disabled — using adaptive with low effort for canary-style request');
+        body.thinking = { type: 'adaptive', display: 'summarized' };
+        // Override effort to low for cheap canary pings
+        body.output_config = { effort: 'low' };
+      } else if ((req as any).thinking_disabled && !isFable) {
+        // Opus 4.7/4.8: thinking can be disabled for canary pings
         body.thinking = { type: 'disabled' };
       } else {
         body.thinking = { type: 'adaptive', display: 'summarized' };
       }
       
       // 3. Effort level — controls reasoning depth; allow caller to override via reasoning_effort
-      //    Valid values: low, medium, high (default), xhigh (Opus 4.7/4.8 only), max
-      const effort = req.reasoning_effort || 'high';
-      body.output_config = { effort };
+      //    Valid values: low, medium, high (default), xhigh, max (all supported on Fable 5 + Opus 4.7/4.8)
+      if (!body.output_config) {
+        const effort = req.reasoning_effort || 'high';
+        body.output_config = { effort };
+      }
       
-      // 4. No temperature/top_p/top_k — these are rejected with 400 on Opus 4.7/4.8
+      // 4. No temperature/top_p/top_k — these are rejected with 400 on reasoning models
       // (intentionally omitted)
     } else {
       // Standard model config

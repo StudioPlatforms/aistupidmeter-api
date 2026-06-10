@@ -303,16 +303,24 @@ const AXIS_WEIGHTS = {
   safety: 0.02         // Reduced - safety is minor for coding tasks
 } as const;
 
-// Cost tracking configuration
+// Cost tracking configuration (per 1k tokens; per-1M-token rates in deepbench/index.ts)
+// NOTE: Anthropic pricing varies widely by model tier ($0.25–$10 input, $1.25–$50 output per MTok).
+// These defaults reflect Opus-tier pricing; for precise costs see deepbench/index.ts MODEL_COSTS.
 const PROVIDER_COSTS = {
   openai: { input: 0.03, output: 0.06 },     // per 1k tokens (GPT-4 pricing)
-  anthropic: { input: 0.03, output: 0.15 },  // Claude pricing
+  anthropic: { input: 0.005, output: 0.025 }, // Claude Opus-tier pricing ($5/$25 per MTok)
   google: { input: 0.0125, output: 0.0375 }, // Gemini Pro pricing
   xai: { input: 0.002, output: 0.002 },      // Grok pricing
   glm: { input: 0.0014, output: 0.0044 },    // GLM-5.1 pricing ($1.40/$4.40 per MTok, verified api.z.ai)
   deepseek: { input: 0.0014, output: 0.0028 }, // DeepSeek pricing
   kimi: { input: 0.0015, output: 0.003 }     // Kimi pricing (estimated)
 } as const;
+
+// Per-model cost overrides (per 1k tokens) — used for models with pricing significantly
+// different from their provider's default
+const MODEL_COST_OVERRIDES: Record<string, { input: number; output: number }> = {
+  'claude-fable-5': { input: 0.01, output: 0.05 }, // $10/$50 per MTok — 2x Opus pricing
+};
 
 // Drift detection parameters
 const DRIFT_WINDOW = 12;          // Look at last 12 runs
@@ -2403,8 +2411,8 @@ export async function benchmarkModel(
     note = (note ? note + ' | ' : '') + `${successPct}% tasks completed (${failedTasks.length} failed)`;
   }
 
-  // FIX 5: Add cost calculation
-  const pc = PROVIDER_COSTS[model.vendor] || { input: 0, output: 0 };
+  // FIX 5: Add cost calculation (use per-model override if available, fall back to provider default)
+  const pc = MODEL_COST_OVERRIDES[model.name] || PROVIDER_COSTS[model.vendor] || { input: 0, output: 0 };
   const totalIn = finished.reduce((s, f) => s + (f.collapsed.tokensIn || 0), 0);
   const totalOut = finished.reduce((s, f) => s + (f.collapsed.tokensOut || 0), 0);
   const batchCost = (totalIn / 1000) * pc.input + (totalOut / 1000) * pc.output;

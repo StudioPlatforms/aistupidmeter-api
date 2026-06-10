@@ -156,9 +156,11 @@ export class ToolBenchmarkSession {
       const isKimiThinking = /^kimi-k2\.[56]/.test(this.model.name);
       // Claude Opus 4.7+ are adaptive thinking models (reject temperature, use effort param)
       const isClaudeReasoning = /^claude-opus-4-([7-9]|\d{2,})/.test(this.model.name);
+      // Claude Fable 5: always-on adaptive thinking, Mythos-class, cannot disable
+      const isFable = /^claude-fable/.test(this.model.name);
       // GLM-5/5.1 are thinking models — thinking tokens count toward max_tokens
       const isGLMThinking = /^glm-5/.test(this.model.name);
-      const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking || isClaudeReasoning || isGLMThinking;
+      const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking || isClaudeReasoning || isFable || isGLMThinking;
 
       // Reasoning models need higher token budgets for thinking + tool calling
       let maxTokens = 2000;
@@ -166,6 +168,10 @@ export class ToolBenchmarkSession {
         // Scale based on task difficulty
         const difficultyBudget: Record<string, number> = { easy: 15000, medium: 25000, hard: 35000 };
         maxTokens = difficultyBudget[this.task.difficulty] || 25000;
+      } else if (isFable) {
+        // Fable 5: always-on thinking, 128k max output — need very large budget for tool + thinking
+        const difficultyBudget: Record<string, number> = { easy: 32000, medium: 64000, hard: 96000 };
+        maxTokens = difficultyBudget[this.task.difficulty] || 64000;
       } else if (isClaudeReasoning) {
         // Claude Opus 4.7/4.8: thinking tokens count toward max_tokens, need large budget
         const difficultyBudget: Record<string, number> = { easy: 16384, medium: 32000, hard: 64000 };

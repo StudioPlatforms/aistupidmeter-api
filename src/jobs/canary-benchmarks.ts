@@ -51,6 +51,7 @@ function isCreditExhaustedCanary(error: any): boolean {
 function isReasoningModel(modelName: string): boolean {
   return /^(gpt-5|o\d|o-mini|o-)/.test(modelName) ||
          /^claude-opus-4-([7-9]|\d{2,})/.test(modelName) ||
+         /^claude-fable/.test(modelName) ||  // Fable 5: always-on adaptive thinking, Mythos-class, cannot disable
          modelName === 'deepseek-reasoner' ||
          /^deepseek-v4/.test(modelName) ||  // DeepSeek V4 models use thinking mode
          /^kimi-k2\.[56]/.test(modelName) ||  // Kimi K2.5/K2.6 are thinking models (temp=1, reasoning_content)

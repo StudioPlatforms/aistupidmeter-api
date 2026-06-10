@@ -191,14 +191,18 @@ export class MultiTurnSession {
     const isKimiThinking = /^kimi-k2\.[56]/.test(this.model.name);
     // Claude Opus 4.7+ are adaptive thinking models (reject temperature, use effort param)
     const isClaudeReasoning = /^claude-opus-4-([7-9]|\d{2,})/.test(this.model.name);
+    // Claude Fable 5: always-on adaptive thinking, Mythos-class, cannot disable
+    const isFable = /^claude-fable/.test(this.model.name);
     // GLM-5/5.1 are thinking models — thinking tokens count toward max_tokens (Anthropic-like)
     const isGLMThinking = /^glm-5/.test(this.model.name);
-    const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking || isClaudeReasoning || isGLMThinking;
+    const isReasoningModel = isGPT5 || isOSeries || isDeepSeekThinking || isKimiThinking || isClaudeReasoning || isFable || isGLMThinking;
 
     // Deep benchmarks need higher token budgets for reasoning models
     let maxTokens = step.maxTokens || 1500;
     if (isGPT55) {
       maxTokens = Math.max(25000, maxTokens * 5); // Deep tasks need room for reasoning
+    } else if (isFable) {
+      maxTokens = Math.max(96000, maxTokens * 8); // Fable 5: always-on thinking, 128k max output — need very large budget for deep reasoning
     } else if (isClaudeReasoning) {
       maxTokens = Math.max(64000, maxTokens * 5); // Claude thinking tokens count toward max_tokens; need large budget
     } else if (isGLMThinking) {
@@ -249,6 +253,12 @@ export class MultiTurnSession {
     // The adapter handles thinking config internally; we just set effort via reasoning_effort
     if (this.model.vendor === 'anthropic' && isClaudeReasoning) {
       chatRequest.reasoning_effort = 'xhigh'; // Deep benchmarks benefit from thorough reasoning; Opus 4.7/4.8 support xhigh
+    }
+
+    // Fable 5: xhigh effort for deep benchmarks (scales FrontierCode from ~11.5% low to 30.9% max)
+    // Higher effort yields dramatically better results on hard coding/deep reasoning per Anthropic's system card
+    if (this.model.vendor === 'anthropic' && isFable) {
+      chatRequest.reasoning_effort = 'xhigh'; // Deep benchmarks benefit from thorough reasoning on Fable
     }
 
     // GLM-5/5.1 thinking models: no reasoning_effort parameter — binary enabled/disabled only.
