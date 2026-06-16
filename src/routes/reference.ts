@@ -22,17 +22,14 @@ const REFERENCE_MODELS = [
   { provider: 'openai' as Provider, model: 'gpt-4o-mini', name: 'GPT-4o Mini' },
 
   // Anthropic - Latest Claude 4 family with dated IDs
-  { provider: 'anthropic' as Provider, model: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4' },
+  // (claude-sonnet-4-20250514 and claude-opus-4-20250514 retired — no longer tested)
   { provider: 'anthropic' as Provider, model: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5' },
-  { provider: 'anthropic' as Provider, model: 'claude-opus-4-20250514', name: 'Claude Opus 4' },
   { provider: 'anthropic' as Provider, model: 'claude-opus-4-1-20250805', name: 'Claude Opus 4.1' },
   { provider: 'anthropic' as Provider, model: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
   { provider: 'anthropic' as Provider, model: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
   { provider: 'anthropic' as Provider, model: 'claude-opus-4-8', name: 'Claude Opus 4.8' },
 
-  // xAI - Latest Grok family
-  { provider: 'xai' as Provider, model: 'grok-4', name: 'Grok 4' },
-  { provider: 'xai' as Provider, model: 'grok-code-fast-1', name: 'Grok Code Fast 1' },
+  // xAI (Grok) retired — no longer tested.
 
   // GLM (Z.AI) - GLM-5.1 flagship
   { provider: 'glm' as Provider, model: 'glm-5.1', name: 'GLM-5.1' },

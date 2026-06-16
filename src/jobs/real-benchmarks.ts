@@ -661,6 +661,7 @@ export function getKeyCount(provider: Provider): number {
 // ---------- Enhanced code evaluation ----------
 async function evaluateCode(rawText: string, cleanCode: string, task: typeof BENCHMARK_TASKS[0]): Promise<{
   correctness: number; complexity: number; codeQuality: number; edgeCases: number; debugging: number; format: number; safety: number;
+  perCase: Array<{ index: number; label: string; input: string; expected: string; actual: string | null; passed: boolean; error: string | null; ms: number | null }>;
 }> {
   const { exec } = require('child_process');
   const { promisify } = require('util');
@@ -798,6 +799,7 @@ except Exception as e:
 
 passed_count = 0
 total_tests = 0
+_cases = []  # Track 0.2: per-test-case records for failure-analysis / regression mining
 
 def call_fn(fn_name, args):
     fn = ns.get(fn_name)
@@ -829,20 +831,30 @@ except Exception:
 `;
   } else {
     // Fixed test cases first
-    for (const tc of task.testCases) {
+    task.testCases.forEach((tc, _tcIdx) => {
       // args: folosim literal_eval pe un tuple "(<tc.input>,)"
+      // Track 0.2: counting semantics are IDENTICAL to before (total_tests always +1,
+      // passed_count +1 iff result == expected and no exception); we only additionally
+      // append a structured record with the actual output / error for failure mining.
       tests += `
 total_tests += 1
+_rec = {"i": ${_tcIdx}, "label": "fixed", "input": ${JSON.stringify(tc.input)}, "expected": ${JSON.stringify(tc.expected)}, "actual": None, "passed": False, "error": None, "ms": None}
+import time as _time
+_t0 = _time.perf_counter()
 try:
     args = ast.literal_eval("(" + ${JSON.stringify(tc.input)} + ",)")
     result = call_fn(${JSON.stringify(task.expectedCode)}, args)
+    _rec["actual"] = repr(result)[:500]
     expected = ast.literal_eval(${JSON.stringify(tc.expected)})
     if result == expected:
         passed_count += 1
-except Exception:
-    pass
+        _rec["passed"] = True
+except Exception as _e:
+    _rec["error"] = (type(_e).__name__ + ": " + str(_e))[:300]
+_rec["ms"] = round((_time.perf_counter() - _t0) * 1000, 2)
+_cases.append(_rec)
 `;
-    }
+    });
 
     // Hidden fuzz tests per task (property-based lite)
     tests += `\n# Hidden fuzz tests to prevent memorization\nimport random, string\nrandom.seed(1337)\n`;
@@ -989,19 +1001,47 @@ for case in edge_cases[:3]:  # Limit to avoid too many tests
 `;
     }
   }
-  tests += `\nprint(f"{passed_count}/{total_tests}")\n`;
+  // Track 0.2: emit a tagged ratio line (robust to stray model stdout) plus a single-line
+  // JSON of per-case records. json.dumps escapes newlines so CASES stays on one line.
+  tests += `\nimport json as _json\nprint("RESULT:" + str(passed_count) + "/" + str(total_tests))\nprint("CASES:" + _json.dumps(_cases))\n`;
 
   await fs.writeFile(runnerPath, runnerScript + tests);
 
   // 5) Rulează și măsoară
   let correctness = 0;
   let edgeCases = 0;
+  let perCase: Array<{ index: number; label: string; input: string; expected: string; actual: string | null; passed: boolean; error: string | null; ms: number | null }> = [];
   try {
     const solPath = path.join(os.tmpdir(), `sol_${Date.now()}.py`);
     await fs.writeFile(solPath, clean || "# empty");
     const { stdout } = await execAsync(`python3 -I ${runnerPath} ${solPath}`, { timeout: 6000 });
-    const [p, t] = (stdout?.trim().split('/') ?? ["0","1"]).map(Number);
+    const out: string = stdout ?? "";
+    // Tagged ratio line — robust even if the solution prints stray output to stdout.
+    const ratioMatch = out.match(/RESULT:(\d+)\/(\d+)/);
+    const p = ratioMatch ? Number(ratioMatch[1]) : 0;
+    const t = ratioMatch ? Number(ratioMatch[2]) : 1;
     correctness = Math.max(0, Math.min(1, (p || 0) / (t || 1)));
+    // Track 0.2: parse per-case JSON (single line). Best-effort — never affects correctness.
+    try {
+      const casesMatch = out.match(/CASES:(\[[^\n]*\])/);
+      if (casesMatch) {
+        const parsed = JSON.parse(casesMatch[1]);
+        if (Array.isArray(parsed)) {
+          perCase = parsed.map((c: any) => ({
+            index: Number(c.i ?? 0),
+            label: String(c.label ?? 'fixed'),
+            input: String(c.input ?? ''),
+            expected: String(c.expected ?? ''),
+            actual: c.actual == null ? null : String(c.actual),
+            passed: !!c.passed,
+            error: c.error == null ? null : String(c.error),
+            ms: c.ms == null ? null : Number(c.ms)
+          }));
+        }
+      }
+    } catch (caseErr) {
+      console.warn(`[EVAL-CASES] ${task.id}: per-case parse failed: ${String(caseErr).slice(0, 100)}`);
+    }
     await fs.unlink(solPath).catch(()=>{});
   } catch (e) {
     console.log(`[EVAL] ${task.id}: compilation/run failed. Error: ${e}`);
@@ -1038,7 +1078,7 @@ for case in edge_cases[:3]:  # Limit to avoid too many tests
   const unsafe = /\b(exec|eval|__import__|subprocess|socket|urllib|requests|ftplib|smtplib)\b|(?<!\bos\.)(\bos\.(?!path\b|name\b|urandom\b))/;
   const safety = unsafe.test(clean) ? 0.2 : 1.0;
   
-  return { correctness, complexity, codeQuality, edgeCases, debugging, format, safety };
+  return { correctness, complexity, codeQuality, edgeCases, debugging, format, safety, perCase };
 }
 
 // ---------- Anti-caching utilities ----------
@@ -1141,6 +1181,7 @@ async function runSingleBenchmarkStreaming(
   apiVersion?: string | null;
   responseHeaders?: Record<string, string>;
   modelFingerprint?: string | null;
+  perCaseResults?: Array<{ index: number; label: string; input: string; expected: string; actual: string | null; passed: boolean; error: string | null; ms: number | null }>;
 } | null> {
   // Helper function to emit streaming progress if sessionId is provided
   const streamLog = (type: string, message: string, data?: any) => {
@@ -1363,20 +1404,34 @@ async function runSingleBenchmarkStreaming(
     let modelFingerprint: string | null = null;
 
     try {
-      // Extract from response object (varies by provider)
+      // Extract from response object (varies by provider).
+      // Adapters return the parsed provider JSON on `res.raw` (with `model`, `id`,
+      // `system_fingerprint`), NOT on `res.model`/`res.headers`. The served `model` id is
+      // the key silent-swap signal, so read it from `res.raw` first.
       if (res && typeof res === 'object') {
-        // OpenAI style
-        apiVersion = (res as any)?.model || 
+        const raw = (res as any)?.raw ?? {};
+        apiVersion = raw.model ||
+                     raw.model_version ||
+                     (res as any)?.model ||
                      (res as any)?.response?.model ||
-                     (res as any)?.headers?.['openai-model'] ||
+                     raw.id ||
                      null;
-        
-        // Capture response headers if available
+
+        // Adapters expose parsed JSON, not HTTP headers — synthesize a version blob from
+        // the provider response body (+ any real headers if present) for version-tracker mining.
+        const versionFields: Record<string, string> = {};
+        for (const key of ['model', 'id', 'system_fingerprint', 'created', 'object', 'model_version']) {
+          const v = raw?.[key];
+          if (v !== undefined && v !== null) versionFields[key] = String(v);
+        }
         const headers = (res as any)?.headers || (res as any)?.response?.headers;
         if (headers && typeof headers === 'object') {
-          responseHeaders = { ...headers };
+          for (const [k, v] of Object.entries(headers)) versionFields[k] = String(v);
         }
-        
+        if (Object.keys(versionFields).length > 0) {
+          responseHeaders = versionFields;
+        }
+
         // Generate fingerprint from response characteristics
         const fingerprintData = {
           tokensIn: finalTokensIn,
@@ -1407,17 +1462,18 @@ async function runSingleBenchmarkStreaming(
       safety: evalRes.safety
     } as Record<AxisKey, number>;
 
-    return { 
-      success: true, 
-      latencyMs, 
-      code: sanitized, 
-      tokensIn: finalTokensIn, 
-      tokensOut: finalTokensOut, 
+    return {
+      success: true,
+      latencyMs,
+      code: sanitized,
+      tokensIn: finalTokensIn,
+      tokensOut: finalTokensOut,
       metrics: m,
       rawOutputData,
       apiVersion,
       responseHeaders,
-      modelFingerprint
+      modelFingerprint,
+      perCaseResults: evalRes.perCase // Track 0.2: per-test-case detail for test_case_results
     };
   } catch (e: any) {
     // Enhanced error logging with more context and smart retry logic
@@ -1834,6 +1890,7 @@ async function persistCollapsedRun(params: {
   modelId: number; taskSlug: string;
   latencyMs: number; tokensIn: number; tokensOut: number;
   axes: Axes; code?: string;
+  trials?: any[]; // Per-trial results carrying rawOutputData + API telemetry (Track 0.1)
 }) {
   try {
     let taskId: number | null = null;
@@ -1841,6 +1898,15 @@ async function persistCollapsedRun(params: {
       const t = await db.select().from(tasksTable).where(eq(tasksTable.slug, params.taskSlug)).limit(1);
       taskId = t[0]?.id ?? null;
     } catch {/* table optional */}
+
+    // HIGH VALUE DATA CAPTURE (Track 0.1): pick a representative trial for run-level
+    // version telemetry. These columns existed but were never populated, leaving the
+    // version-tracker mining library with no data to mine.
+    const trials = Array.isArray(params.trials) ? params.trials : [];
+    const reprTrial = trials.find(t => t && (t.apiVersion || (t.responseHeaders && Object.keys(t.responseHeaders).length) || t.modelFingerprint)) ?? trials[0];
+    const reprHeaders = reprTrial?.responseHeaders && Object.keys(reprTrial.responseHeaders).length > 0
+      ? reprTrial.responseHeaders
+      : null;
 
     const runInsert = await db.insert(runs).values({
       modelId: params.modelId,
@@ -1853,11 +1919,15 @@ async function persistCollapsedRun(params: {
       latencyMs: Math.round(params.latencyMs),
       attempts: TRIALS, // Reflect collapsed trials
       passed: params.axes.correctness >= 0.5,
-      artifacts: params.code ? { codeHash: hashCode(params.code) } : null
+      artifacts: params.code ? { codeHash: hashCode(params.code) } : null,
+      // Version-detection telemetry (powers version-tracker + A4 silent-update correlation)
+      apiVersion: reprTrial?.apiVersion ?? null,
+      responseHeaders: reprHeaders,
+      modelFingerprint: reprTrial?.modelFingerprint ?? null
     }).returning({ id: runs.id });
 
     const runId = runInsert[0].id;
-    
+
     // Store metrics with new axis names
     await db.insert(metrics).values({
       runId,
@@ -1869,6 +1939,56 @@ async function persistCollapsedRun(params: {
       refusal: params.axes.edgeCases,  // Map to old column name
       recovery: params.axes.debugging   // Map to old column name
     });
+
+    // HIGH VALUE DATA CAPTURE (Track 0.1): persist full raw output per trial.
+    // "Store everything" — one raw_outputs row per trial. This is the source data for
+    // the hallucination-analyzer and behavioral output-characteristic drift signals.
+    // Best-effort per row so a single bad insert never aborts the batch.
+    for (const trial of trials) {
+      const ro = trial?.rawOutputData;
+      if (!ro || typeof ro.rawText !== 'string') continue;
+      try {
+        await db.insert(raw_outputs).values({
+          runId,
+          rawText: ro.rawText,
+          extractedCode: ro.extractedCode ?? null,
+          extractionSuccess: !!ro.extractionSuccess,
+          extractionMethod: ro.extractionMethod ?? null,
+          failureType: ro.failureType ?? null,
+          failureDetails: ro.failureDetails ?? null,
+          // Set ts explicitly: the schema default is a literal 'CURRENT_TIMESTAMP' string,
+          // not the SQL function — relying on it breaks time-ordered mining of this table.
+          ts: new Date().toISOString()
+        });
+      } catch (roErr) {
+        console.warn(`[RAW-OUTPUT-PERSIST] ${params.taskSlug}: ${String(roErr).slice(0, 120)}`);
+      }
+    }
+
+    // HIGH VALUE DATA CAPTURE (Track 0.2): persist per-test-case results from the
+    // representative trial (the first successful one — its code is the collapsed sample).
+    // Powers regression-diagnostics and per-capability drift (which specific inputs fail).
+    const caseTrial = trials.find(t => t?.success && Array.isArray(t?.perCaseResults) && t.perCaseResults.length > 0);
+    if (caseTrial) {
+      for (const c of caseTrial.perCaseResults) {
+        try {
+          await db.insert(test_case_results).values({
+            runId,
+            testCaseIndex: Number(c.index ?? 0),
+            testInput: String(c.input ?? ''),
+            expectedOutput: String(c.expected ?? ''),
+            actualOutput: c.actual == null ? null : String(c.actual),
+            passed: !!c.passed,
+            errorMessage: c.error == null ? null : String(c.error),
+            executionTimeMs: c.ms == null ? null : Math.round(Number(c.ms)),
+            // Explicit ts — schema default is a literal string, not the SQL function.
+            ts: new Date().toISOString()
+          });
+        } catch (tcErr) {
+          console.warn(`[TESTCASE-PERSIST] ${params.taskSlug}: ${String(tcErr).slice(0, 120)}`);
+        }
+      }
+    }
 
     return runId;
   } catch (e) {
@@ -2151,7 +2271,8 @@ export async function benchmarkModel(
         tokensIn: result.collapsed.tokensIn,
         tokensOut: result.collapsed.tokensOut,
         axes: result.collapsed.metrics,
-        code: result.collapsed.code
+        code: result.collapsed.code,
+        trials: result.trials
       });
     } catch (taskError: any) {
       // Catch any unexpected errors at the task level
@@ -2242,9 +2363,10 @@ export async function benchmarkModel(
             tokensIn: result.collapsed.tokensIn,
             tokensOut: result.collapsed.tokensOut,
             axes: result.collapsed.metrics,
-            code: result.collapsed.code
+            code: result.collapsed.code,
+            trials: result.trials
           });
-          
+
           // Remove from failed list since it succeeded
           failedTasks.splice(failedTasks.indexOf(task), 1);
           retryIndex--; // Adjust index since we removed an item

@@ -5,7 +5,7 @@
 
 import { db } from '../db';
 import { scores, models, change_points } from '../db/schema';
-import { eq, desc, and, gte, sql } from 'drizzle-orm';
+import { eq, desc, asc, and, gte, sql } from 'drizzle-orm';
 import { calculateConfidenceInterval, calculateStdDev, mannWhitneyU, welchTTest } from './statistical-tests';
 
 // ============================================================================
@@ -21,6 +21,12 @@ export interface DriftSignature {
   baselineScore: number;
   currentScore: number;
   confidenceInterval: [number, number];
+
+  // Frozen "golden" reference (A1): the model's earliest stable performance window.
+  // The 28-day rolling baseline gradually absorbs slow drift; comparing against this
+  // fixed anchor surfaces creeping degradation the rolling baseline forgets.
+  goldenBaselineScore?: number;
+  driftVsGolden?: number; // goldenBaseline - current (positive = degraded since launch)
   
   // Stability metrics
   regime: 'STABLE' | 'VOLATILE' | 'DEGRADED' | 'RECOVERING';
@@ -65,6 +71,44 @@ export interface ChangePoint {
 // ============================================================================
 // MAIN DRIFT SIGNATURE COMPUTATION
 // ============================================================================
+
+/**
+ * A1: Compute the frozen "golden" baseline — the model's earliest stable performance.
+ *
+ * Returns the average of an early, post-warmup window of real (non-synthetic) scores.
+ * Because the earliest scores never change, this acts as a fixed anchor: a model that
+ * degrades gradually over weeks keeps a near-flat 28-day rolling baseline (which absorbs
+ * the drift) but shows a growing gap against this golden baseline. Returns null when there
+ * is too little early history to anchor reliably.
+ */
+async function getGoldenBaseline(modelId: number): Promise<number | null> {
+  const earliest = await db
+    .select({ stupidScore: scores.stupidScore })
+    .from(scores)
+    .where(and(
+      eq(scores.modelId, modelId),
+      sql`suite IN ('hourly', 'deep', 'tooling')`,
+      sql`(note IS NULL OR note NOT LIKE '%SYNTHETIC%')`
+    ))
+    .orderBy(asc(scores.ts))
+    .limit(40);
+
+  let vals = earliest
+    .map(s => s.stupidScore)
+    .filter((v): v is number => v !== null && v >= 0 && v !== -777 && v !== -888 && v !== -999)
+    .map(v => Math.max(0, Math.min(100, Math.round(v))));
+
+  // Drop a leading run of cold-start / calibration scores (near-zero before the model
+  // has stabilized) so the anchor reflects genuine early-healthy performance, not warmup.
+  let start = 0;
+  while (start < vals.length && vals[start] < 20) start++;
+  if (vals.length - start >= 5) vals = vals.slice(start);
+
+  if (vals.length < 5) return null; // not enough early history to anchor
+  // Average the first stable window after warmup.
+  const window = vals.slice(0, 10);
+  return Math.round(window.reduce((a, b) => a + b, 0) / window.length);
+}
 
 /**
  * Compute comprehensive drift signature for a model
@@ -121,6 +165,10 @@ export async function computeDriftSignature(modelId: number): Promise<DriftSigna
   
   // Step 3: Get current score
   const currentScore = scoreValues[0];
+
+  // A1: Frozen golden baseline (earliest stable window) + creeping-drift gap.
+  const goldenBaselineScore = await getGoldenBaseline(modelId);
+  const driftVsGolden = goldenBaselineScore !== null ? goldenBaselineScore - currentScore : undefined;
   
   // Step 4: Calculate confidence interval
   const recentScores = scoreValues.slice(0, Math.min(5, scoreValues.length));
@@ -142,7 +190,21 @@ export async function computeDriftSignature(modelId: number): Promise<DriftSigna
   const pageHinkleyCUSUM = validScores[0]?.cusum || 0;
   
   // Step 8: Determine drift status with adaptive thresholds
-  const driftStatus = determineDriftStatus(regime, pageHinkleyCUSUM, variance24h, historicalStdDev);
+  let driftStatus = determineDriftStatus(regime, pageHinkleyCUSUM, variance24h, historicalStdDev);
+
+  // A1: Escalate on creeping degradation vs the frozen golden baseline. Slow drift keeps
+  // the rolling-baseline delta small (the baseline moves with the model), so the standard
+  // checks can read NORMAL while the model is meaningfully worse than at launch. The golden
+  // gap catches that. Threshold scales with the model's own variability.
+  if (driftVsGolden !== undefined) {
+    const goldenWarn = Math.max(8, historicalStdDev * 2.5);
+    const goldenAlert = Math.max(12, historicalStdDev * 4);
+    if (driftVsGolden > goldenAlert && driftStatus !== 'ALERT') {
+      driftStatus = 'ALERT';
+    } else if (driftVsGolden > goldenWarn && driftStatus === 'NORMAL') {
+      driftStatus = 'WARNING';
+    }
+  }
   
   // Step 9: Find last significant change
   const lastChange = await findLastSignificantChange(modelId);
@@ -151,8 +213,14 @@ export async function computeDriftSignature(modelId: number): Promise<DriftSigna
   const axes = await analyzeAxesTrends(modelId, validScores);
   
   // Step 11: Identify primary issue and recommendation
-  const { primaryIssue, recommendation } = diagnoseIssue(regime, axes, variance24h, currentScore, baselineScore);
-  
+  let { primaryIssue, recommendation } = diagnoseIssue(regime, axes, variance24h, currentScore, baselineScore);
+
+  // A1: Surface creeping degradation when the rolling-baseline diagnosis missed it.
+  if (driftVsGolden !== undefined && driftVsGolden > Math.max(8, historicalStdDev * 2.5) && !primaryIssue) {
+    primaryIssue = `Creeping degradation: ${driftVsGolden} pts below launch baseline (${goldenBaselineScore}) despite a stable rolling average`;
+    recommendation = recommendation || 'Compare against the frozen golden baseline — slow drift has been absorbed by the 28-day rolling window.';
+  }
+
   // Step 12: Construct signature
   const signature: DriftSignature = {
     modelId,
@@ -161,12 +229,14 @@ export async function computeDriftSignature(modelId: number): Promise<DriftSigna
     baselineScore,
     currentScore,
     confidenceInterval: [Math.round(ci.lower), Math.round(ci.upper)],
+    goldenBaselineScore: goldenBaselineScore ?? undefined,
+    driftVsGolden,
     regime,
     variance24h: Math.round(variance24h * 10) / 10,
     driftStatus,
     pageHinkleyCUSUM,
     lastSignificantChange: lastChange?.timestamp,
-    hoursSinceChange: lastChange ? 
+    hoursSinceChange: lastChange ?
       Math.round((Date.now() - lastChange.timestamp.getTime()) / (1000 * 60 * 60)) : undefined,
     axes,
     primaryIssue,

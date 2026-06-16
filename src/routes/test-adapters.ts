@@ -420,10 +420,10 @@ export default async function testAdaptersRoutes(fastify: FastifyInstance) {
    * Quick health check listing expected models per provider.
    */
   fastify.get('/health', async () => {
+    // claude-sonnet-4-20250514 / claude-opus-4-20250514 and xAI (Grok) retired — no longer tested.
     const expectedModels: Record<string, string[]> = {
       openai: ['gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'gpt-5-chat-latest', 'gpt-4o', 'gpt-4o-mini'],
-      anthropic: ['claude-sonnet-4-20250514', 'claude-sonnet-4-5-20250929', 'claude-opus-4-20250514', 'claude-opus-4-1-20250805'],
-      xai: ['grok-4', 'grok-code-fast-1'],
+      anthropic: ['claude-sonnet-4-5-20250929', 'claude-opus-4-1-20250805', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8'],
       google: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
     };
 

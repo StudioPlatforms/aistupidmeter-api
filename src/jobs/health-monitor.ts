@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import path from 'path';
-import { OpenAIAdapter, XAIAdapter, AnthropicAdapter, GoogleAdapter, DeepSeekAdapter, GLMAdapter, KimiAdapter } from '../llm/adapters';
+import { OpenAIAdapter, AnthropicAdapter, GoogleAdapter, DeepSeekAdapter, GLMAdapter, KimiAdapter } from '../llm/adapters';
 
 // Database connection
 const dbPath = path.join(__dirname, '../../data/benchmarks.db');
@@ -34,10 +34,8 @@ function getAdapters() {
     adapters.openai = new OpenAIAdapter(process.env.OPENAI_API_KEY);
   }
   
-  if (process.env.XAI_API_KEY) {
-    adapters.xai = new XAIAdapter(process.env.XAI_API_KEY);
-  }
-  
+  // xAI (Grok) is retired — no longer benchmarked or health-checked.
+
   if (process.env.ANTHROPIC_API_KEY) {
     adapters.anthropic = new AnthropicAdapter(process.env.ANTHROPIC_API_KEY);
   }
@@ -74,13 +72,10 @@ async function checkProviderHealth(provider: string, adapter: any): Promise<Heal
         testModel = 'gpt-4o-mini'; // Fast and reliable
         break;
       case 'anthropic':
-        testModel = 'claude-sonnet-4-20250514'; // Latest Claude Sonnet 4
+        testModel = 'claude-sonnet-4-6'; // Current whitelisted Sonnet (claude-sonnet-4-20250514 retired)
         break;
       case 'google':
         testModel = 'gemini-3.1-flash-lite'; // Latest Gemini 3.1 Flash-Lite (GA, Mar 2026)
-        break;
-      case 'xai':
-        testModel = 'grok-4'; // Latest Grok 4
         break;
       case 'deepseek':
         testModel = 'deepseek-v4-flash'; // V4 Flash (replaces legacy deepseek-chat)
