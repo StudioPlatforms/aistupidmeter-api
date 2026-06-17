@@ -1642,15 +1642,31 @@ async function runTaskWithTrialsStreaming(
     }
     
     streamLog('info', `    🎯 Trial ${i + 1}/${N}: Using API key ${keyIndex + 1}/${keyCount} for ${model.vendor}/${model.name}...`);
-    
+
+    // B2: Deterministic prompt variation by trial index (trial 1 = baseline, 2-5 = variations)
+    // Gated OFF by default; turn on with ENABLE_PROMPT_VARIATIONS=1
+    let promptRestored = false;
+    const originalPrompt = task.prompt;
+    if (process.env.ENABLE_PROMPT_VARIATIONS && i > 0) {
+      try {
+        const { applyPromptVariation } = require('../lib/prompt-variations');
+        const varied = applyPromptVariation(task.prompt, (task as any).expectedCode || '', i);
+        (task as any).prompt = varied.prompt;
+        promptRestored = true;
+        streamLog('info', `    🎲 Trial ${i + 1}: prompt variation "${varied.variationId}" (${varied.variationType})`);
+      } catch { /* variation is best-effort, fall back to original */ }
+    }
+
     try {
       const result = await runSingleBenchmarkStreaming(trialAdapter, model, task, streamingSessionId, i + 1);
+      if (promptRestored) (task as any).prompt = originalPrompt; // always restore
       if (result) {
         trials.push(result);
         consecutiveFailures = 0; // Reset failure counter on success
         streamLog('success', `    ✅ Trial ${i + 1}: ${(result.metrics.correctness * 100).toFixed(1)}% correct, ${result.latencyMs}ms`);
         streamLog('info', `    💬 Trial ${i + 1}: ${result.tokensIn} tokens in, ${result.tokensOut} tokens out`);
       } else {
+        if (promptRestored) (task as any).prompt = originalPrompt;
         consecutiveFailures++;
         streamLog('error', `    ❌ Trial ${i + 1}: Failed (${consecutiveFailures} consecutive failures)`);
         
@@ -1662,6 +1678,7 @@ async function runTaskWithTrialsStreaming(
         }
       }
     } catch (e: any) {
+      if (promptRestored) (task as any).prompt = originalPrompt;
       // Catch any unexpected errors at the trial level
       consecutiveFailures++;
       const errorMsg = String(e?.message || e).slice(0, 100);
