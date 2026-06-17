@@ -15,7 +15,7 @@ import {
   LLMAdapter
 } from '../llm/adapters';
 import { db } from '../db/index';
-import { models, scores, runs, metrics, tasks as tasksTable, raw_outputs, test_case_results } from '../db/schema';
+import { models, scores, runs, metrics, tasks as tasksTable, raw_outputs, test_case_results, adversarial_prompts as adversarialPromptsTable, adversarial_results as adversarialResultsTable } from '../db/schema';
 import { desc, eq } from 'drizzle-orm';
 import * as crypto from 'crypto';
 import { calculateConfidenceInterval, calculateStdDev } from '../lib/statistical-tests';
@@ -1533,6 +1533,78 @@ async function runSingleBenchmarkStreaming(
 }
 
 
+// ---------- B1: Adversarial probe (gated by ENABLE_ADVERSARIAL_TESTS) ----------
+// Called once per task after regular trials. Never affects scoring.
+async function runAdversarialProbe(
+  adapter: LLMAdapter,
+  modelId: number,
+  modelName: string,
+  taskPrompt: string,
+  modelApiName: string
+): Promise<void> {
+  if (!process.env.ENABLE_ADVERSARIAL_TESTS) return;
+
+  try {
+    const { getRandomAdversarialPrompt, analyzeAdversarialResponse } = await import('../lib/adversarial-prompts');
+    const { sql: sqlTag } = await import('drizzle-orm');
+
+    const adversarialPrompt = getRandomAdversarialPrompt();
+    const wrappedPrompt = adversarialPrompt.template(taskPrompt);
+
+    // Lazy-seed: get or create the canonical prompt row, deduped by attackType+expectedBehavior
+    let promptRow = await db
+      .select({ id: adversarialPromptsTable.id })
+      .from(adversarialPromptsTable)
+      .where(sqlTag`${adversarialPromptsTable.attackType} = ${adversarialPrompt.attackType} AND ${adversarialPromptsTable.expectedBehavior} = ${adversarialPrompt.expectedBehavior}`)
+      .limit(1);
+
+    if (promptRow.length === 0) {
+      const inserted = await db
+        .insert(adversarialPromptsTable)
+        .values({
+          promptText: adversarialPrompt.template('[task prompt]'),
+          attackType: adversarialPrompt.attackType,
+          severity: adversarialPrompt.severity,
+          expectedBehavior: adversarialPrompt.expectedBehavior,
+          category: adversarialPrompt.category,
+        })
+        .returning({ id: adversarialPromptsTable.id });
+      promptRow = inserted;
+    }
+
+    const dbPromptId = promptRow[0]?.id;
+    if (!dbPromptId) return;
+
+    // Call model with adversarial prompt (1 short call, no retries)
+    const res = await (adapter as any).chat({
+      model: modelApiName,
+      messages: [{ role: 'user', content: wrappedPrompt }],
+      maxTokens: 400,
+      temperature: 0,
+    });
+
+    const responseText = res?.text ?? res?.content ?? String(res ?? '');
+    const analysis = analyzeAdversarialResponse(responseText, adversarialPrompt);
+
+    await db.insert(adversarialResultsTable).values({
+      promptId: dbPromptId,
+      modelId,
+      responseText: responseText.slice(0, 4000),
+      bypassSuccessful: analysis.bypassSuccessful,
+      safetyScore: analysis.safetyScore,
+      refusalDetected: analysis.refusalDetected,
+      harmfulContentGenerated: analysis.harmfulContentGenerated,
+      notes: analysis.notes,
+      ts: new Date().toISOString(),
+    });
+
+    console.log(`🔬 Adversarial probe [${modelName}] attack=${adversarialPrompt.attackType} bypass=${analysis.bypassSuccessful} safety=${analysis.safetyScore.toFixed(2)}`);
+  } catch (err) {
+    // Never let probe errors surface to the benchmark run
+    console.error(`⚠️ Adversarial probe failed (non-fatal):`, err instanceof Error ? err.message : String(err));
+  }
+}
+
 // ---------- Streaming version of trials per task ----------
 async function runTaskWithTrialsStreaming(
   adapter: LLMAdapter,
@@ -2274,6 +2346,9 @@ export async function benchmarkModel(
         code: result.collapsed.code,
         trials: result.trials
       });
+
+      // B1: Optional adversarial safety probe (gated by ENABLE_ADVERSARIAL_TESTS env var)
+      await runAdversarialProbe(adapter, model.id, model.name, task.prompt, model.name);
     } catch (taskError: any) {
       // Catch any unexpected errors at the task level
       const errorMsg = String(taskError?.message || taskError).slice(0, 200);
