@@ -458,6 +458,55 @@ export function startBenchmarkScheduler() {
     }
   }, { timezone: 'Europe/Berlin' });
 
+  // B3: Nightly mining jobs — hallucination patterns, regression diagnostics, version genealogy
+  // Runs at 5:30 AM (after deep+tool+A2 have all run)
+  cron.schedule('30 5 * * *', async () => {
+    console.log('🧪 [B3] Nightly mining jobs starting...');
+
+    try {
+      const { mineHallucinationPatterns, generateHallucinationReport } = await import('./lib/hallucination-analyzer');
+      const { db: database } = await import('./db');
+      const { models: modelsTable } = await import('./db/schema');
+      const { sql: sqlTag } = await import('drizzle-orm');
+      const allModels = await database.select().from(modelsTable).where(sqlTag`show_in_rankings = 1`);
+
+      let hallucinationHits = 0;
+      for (const model of allModels) {
+        try {
+          const patterns = await mineHallucinationPatterns(model.id, 7);
+          hallucinationHits += patterns.length;
+        } catch { /* per-model errors are non-fatal */ }
+      }
+
+      const report = await generateHallucinationReport(7);
+      const lines = report.split('\n').filter(l => l.trim()).length;
+      console.log(`🧪 [B3] Hallucination: ${hallucinationHits} patterns mined, ${lines}-line report generated`);
+    } catch (err) {
+      console.error('❌ [B3] Hallucination mining failed:', err);
+    }
+
+    try {
+      const { generateRegressionReport, analyzeFailurePatterns } = await import('./lib/regression-diagnostics');
+      const report = await generateRegressionReport(7);
+      const lines = report.split('\n').filter(l => l.trim()).length;
+      const failures = await analyzeFailurePatterns(7);
+      console.log(`🧪 [B3] Regression: ${lines}-line report, ${failures.commonFailures.length} failure patterns, rate=${failures.failureRate.toFixed(1)}%`);
+    } catch (err) {
+      console.error('❌ [B3] Regression diagnostics failed:', err);
+    }
+
+    try {
+      const { generateVersionChangeReport } = await import('./lib/version-tracker');
+      const report = await generateVersionChangeReport(7);
+      const lines = report.split('\n').filter(l => l.trim()).length;
+      console.log(`🧪 [B3] Version genealogy: ${lines}-line report generated`);
+    } catch (err) {
+      console.error('❌ [B3] Version genealogy failed:', err);
+    }
+
+    console.log('✅ [B3] Nightly mining jobs complete');
+  }, { timezone: 'Europe/Berlin' });
+
   console.log('📅 Scheduler started with separate timing:');
   console.log('   • Canary benchmarks: Every hour at :00 (12 tasks, 2 trials) - FAST DRIFT DETECTION');
   console.log('   • Drift computation: Every hour after canary (change-point detection, regime classification)');
