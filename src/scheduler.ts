@@ -222,7 +222,27 @@ export function startBenchmarkScheduler() {
       console.log(`🕐 ${now.toISOString()} - Starting scheduled daily tool benchmark run...`);
       console.log(`🔧 Previous tool run was: ${lastToolRunTime ? lastToolRunTime.toISOString() : 'Never'}`);
       console.log(`📊 TOOLING mode timestamps will update after this completes`);
-      
+
+      // DEFER, don't collide: if the deep benchmark overran into this slot, wait
+      // for it to finish before starting. Deep and tool share provider API keys;
+      // running them concurrently (as happened 2026-06-17) starves the tool run
+      // and it writes zero scores. We claim isToolRunning above so nothing else
+      // starts meanwhile; the 4h stuck-flag watchdog still covers a true hang.
+      if (isDeepRunning || isDeepBenchmarkActive()) {
+        const maxWaitMs = 90 * 60 * 1000; // wait up to 90 min for deep to finish
+        const startWait = Date.now();
+        console.log('⏳ Deep benchmark still active — deferring tool benchmark until it finishes (max 90 min)...');
+        while ((isDeepRunning || isDeepBenchmarkActive()) && Date.now() - startWait < maxWaitMs) {
+          await new Promise(resolve => setTimeout(resolve, 60 * 1000));
+        }
+        if (isDeepRunning || isDeepBenchmarkActive()) {
+          console.warn('⚠️ Deep benchmark still active after 90 min — proceeding with tool benchmark anyway');
+        } else {
+          console.log(`✅ Deep benchmark finished after ${Math.round((Date.now() - startWait) / 1000)}s wait — starting tool benchmark`);
+          await new Promise(resolve => setTimeout(resolve, 30 * 1000)); // let connections settle
+        }
+      }
+
       // Run tool benchmarks in non-blocking mode
       setImmediate(async () => {
         try {

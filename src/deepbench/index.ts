@@ -44,6 +44,29 @@ export function isDeepBenchmarkActive(): boolean {
   return isDeepBenchmarkRunning;
 }
 
+// Per-model timeout: a single hung model must not blow the whole daily schedule.
+// On 2026-06-17 kimi-k2.6 hung for ~36 min, pushing the deep run from ~9 min to
+// 64 min and colliding with the 4 AM tool benchmark. Normal sessions finish in
+// well under 6 min, so a 10 min cap is safe headroom. On timeout the session
+// throws and the existing catch falls back to a synthetic score for that model.
+const DEEP_MODEL_TIMEOUT_MS = parseInt(process.env.DEEP_MODEL_TIMEOUT_MS || '', 10) || 10 * 60 * 1000;
+
+/**
+ * Race a promise against a timeout. The losing (orphaned) promise's settlement
+ * is swallowed so it never surfaces as an unhandled rejection.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Timed out after ${Math.round(ms / 1000)}s: ${label}`)),
+      ms
+    );
+  });
+  promise.catch(() => { /* swallow late rejection from the orphaned request */ });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
 export function getDeepBenchmarkProgress() {
   return { ...deepBenchmarkProgress };
 }
@@ -146,9 +169,13 @@ async function benchmarkModelDeep(
     console.log(`🏗️ Starting deep benchmark: ${model.name} → ${task.slug}`);
     deepBenchmarkProgress.currentModel = model.name;
     
-    // Run the multi-turn session
+    // Run the multi-turn session (capped so one hung model can't stall the sweep)
     const session = new MultiTurnSession(adapter, model);
-    const result = await session.runSession(task);
+    const result = await withTimeout(
+      session.runSession(task),
+      DEEP_MODEL_TIMEOUT_MS,
+      `${model.name} deep session`
+    );
 
     // Calculate comprehensive score with new axes
     const deepScore = await calculateDeepScore(result, task, model);
