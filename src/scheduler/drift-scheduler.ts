@@ -5,12 +5,74 @@
 
 import { cache } from '../cache/redis-cache';
 import { db } from '../db';
-import { models } from '../db/schema';
-import { sql } from 'drizzle-orm';
+import { models, change_points } from '../db/schema';
+import { sql, eq, and, gte } from 'drizzle-orm';
 import { computeDriftSignature } from '../lib/drift-detection';
+import { detectVersionChanges } from '../lib/version-tracker';
 
 let schedulerInterval: NodeJS.Timeout | null = null;
 let isRunning = false;
+
+/**
+ * Record a detected version-change event as a change_point row.
+ * Called only for models already showing WARNING/ALERT drift — avoids
+ * running the expensive version-mining query for every stable model.
+ */
+async function recordVersionChangePoints(modelId: number, modelName: string): Promise<void> {
+  try {
+    const changes = await detectVersionChanges(modelId, 7);
+
+    for (const change of changes) {
+      if (change.significance < 2.5) continue;
+
+      // Deduplicate: skip if we already recorded a change_point at this exact timestamp.
+      const existing = await db
+        .select({ id: change_points.id })
+        .from(change_points)
+        .where(
+          and(
+            eq(change_points.model_id, modelId),
+            gte(change_points.detected_at, new Date(new Date(change.detectedAt).getTime() - 3600_000).toISOString()),
+            sql`${change_points.detected_at} <= ${new Date(new Date(change.detectedAt).getTime() + 3600_000).toISOString()}`
+          )
+        )
+        .limit(1);
+
+      if (existing.length > 0) continue;
+
+      const hasVersionSwap =
+        change.oldVersion !== null &&
+        change.newVersion !== 'unknown' &&
+        change.oldVersion !== change.newVersion;
+
+      await db.insert(change_points).values({
+        model_id: modelId,
+        detected_at: change.detectedAt || new Date().toISOString(),
+        from_score: change.scoreBefore,
+        to_score: change.scoreAfter,
+        delta: change.scoreDelta,
+        significance: change.significance,
+        change_type: change.changeType === 'improvement' ? 'improvement'
+          : change.changeType === 'degradation' ? 'degradation'
+          : 'shift',
+        suspected_cause: hasVersionSwap ? 'model_update' : 'unknown',
+        notes: JSON.stringify({
+          oldVersion: change.oldVersion,
+          newVersion: change.newVersion,
+          autoDetected: true,
+          detectionSource: 'version_tracker'
+        })
+      });
+
+      const versionNote = hasVersionSwap
+        ? ` — version swap: ${change.oldVersion} → ${change.newVersion}`
+        : '';
+      console.log(`📍 change_point recorded for ${modelName}: ${change.changeType} ${change.significance.toFixed(1)}σ${versionNote}`);
+    }
+  } catch (err) {
+    console.error(`❌ Version-change detection failed for ${modelName}:`, err);
+  }
+}
 
 /**
  * Pre-compute drift signatures for all models
@@ -46,9 +108,15 @@ async function precomputeAllDriftSignatures(): Promise<void> {
         const cacheKey = `drift:signature:${model.id}`;
         const ttl = 3600 + (model.id % 300);
         await cache.set(cacheKey, JSON.stringify(signature), ttl);
-        
+
+        // A4: When drift is elevated, check if a silent model version swap explains it.
+        // Only runs on WARNING/ALERT models to avoid unnecessary DB work on stable ones.
+        if (signature.driftStatus !== 'NORMAL') {
+          await recordVersionChangePoints(model.id, model.name);
+        }
+
         successCount++;
-        
+
         // Small delay between computations to prevent CPU spike
         await new Promise(resolve => setTimeout(resolve, 150));
         

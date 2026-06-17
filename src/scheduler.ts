@@ -447,6 +447,17 @@ export function startBenchmarkScheduler() {
     }
   });
 
+  // A2: Per-capability drift — runs nightly at 5 AM (after deep+tool benchmarks have data)
+  cron.schedule('0 5 * * *', async () => {
+    console.log('🔬 [A2] Nightly capability drift detection starting...');
+    try {
+      const { detectAllCapabilityDrift } = await import('./lib/drift-detection');
+      await detectAllCapabilityDrift();
+    } catch (err) {
+      console.error('❌ [A2] Capability drift detection failed:', err);
+    }
+  }, { timezone: 'Europe/Berlin' });
+
   console.log('📅 Scheduler started with separate timing:');
   console.log('   • Canary benchmarks: Every hour at :00 (12 tasks, 2 trials) - FAST DRIFT DETECTION');
   console.log('   • Drift computation: Every hour after canary (change-point detection, regime classification)');

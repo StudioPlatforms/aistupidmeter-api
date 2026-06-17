@@ -9,7 +9,7 @@
  */
 
 import { db } from '../db';
-import { runs, models } from '../db/schema';
+import { runs, models, raw_outputs } from '../db/schema';
 import { eq, desc, and, gte, sql } from 'drizzle-orm';
 import { calculateStdDev, updateEWMA, EWMAState } from './statistical-tests';
 import { cache } from '../cache/redis-cache';
@@ -26,6 +26,10 @@ export interface BehavioralFingerprint {
     tokensOut: MetricSnapshot;
     latencyMs: MetricSnapshot;
     tokensIn: MetricSnapshot;
+    // A3: output-characteristic signals (leading indicators from raw_outputs)
+    refusalRate?: MetricSnapshot;  // % responses containing refusal phrases
+    codeLength?: MetricSnapshot;   // avg chars of extracted code
+    hedgingRate?: MetricSnapshot;  // % responses containing hedging phrases
   };
   driftDetected: boolean;
   driftingMetrics: string[];
@@ -149,12 +153,106 @@ export async function computeBehavioralFingerprint(modelId: number): Promise<Beh
   const tokensOut = await analyzeMetric('tokensOut', r => r.tokensOut);
   const latencyMs = await analyzeMetric('latencyMs', r => r.latencyMs);
   const tokensIn = await analyzeMetric('tokensIn', r => r.tokensIn);
-  
+
+  // A3: Output-characteristic signals from raw_outputs (leading indicators)
+  let refusalRate: MetricSnapshot | undefined;
+  let codeLength: MetricSnapshot | undefined;
+  let hedgingRate: MetricSnapshot | undefined;
+
+  try {
+    const rawRows = await db
+      .select({
+        rawText: raw_outputs.rawText,
+        extractedCode: raw_outputs.extractedCode,
+        ts: raw_outputs.ts,
+      })
+      .from(raw_outputs)
+      .innerJoin(runs, eq(raw_outputs.runId, runs.id))
+      .where(and(
+        eq(runs.modelId, modelId),
+        gte(raw_outputs.ts, sevenDaysAgo.toISOString())
+      ))
+      .orderBy(desc(raw_outputs.ts))
+      .limit(500);
+
+    if (rawRows.length >= 10) {
+      const recentRaw = rawRows.filter(r => r.ts && new Date(r.ts) > oneDayAgo);
+      const baselineRaw = rawRows;
+
+      if (recentRaw.length >= 3) {
+        const REFUSAL = ['i cannot', "i can't", "i'm unable", "i'm sorry, but", 'i apologize', 'as an ai', "i won't", 'i am not able to'];
+        const HEDGING = ["might ", 'could be', 'it seems', 'i think', 'possibly', 'perhaps', 'probably', 'may have', 'i believe', "i'm not sure", 'not certain'];
+
+        const hasRefusal = (t: string) => REFUSAL.some(p => t.toLowerCase().includes(p));
+        const hasHedging = (t: string) => HEDGING.some(p => t.toLowerCase().includes(p));
+
+        const rateOf = (texts: string[], fn: (t: string) => boolean) =>
+          texts.length > 0 ? (texts.filter(fn).length / texts.length) * 100 : 0;
+
+        const avgCodeLen = (rows: typeof rawRows) => {
+          const valid = rows.map(r => r.extractedCode?.length ?? 0).filter(n => n > 0);
+          return valid.length > 0 ? valid.reduce((a, b) => a + b, 0) / valid.length : 0;
+        };
+
+        const buildSnapshot = async (
+          key: string,
+          recentVal: number,
+          baselineVals: number[]
+        ): Promise<MetricSnapshot> => {
+          const baselineMean = baselineVals.reduce((a, b) => a + b, 0) / baselineVals.length;
+          const baselineStd = calculateStdDev(baselineVals);
+          const zScore = baselineStd > 0 ? (recentVal - baselineMean) / baselineStd : 0;
+          const ewmaKey = `ewma:${modelId}:${key}`;
+          let prevEwma = baselineMean;
+          let ewmaCount = 1;
+          try {
+            const cached = await cache.get(ewmaKey);
+            if (cached) { const s = JSON.parse(cached); prevEwma = s.value; ewmaCount = s.count || 1; }
+          } catch { /* start fresh */ }
+          const ewmaState = updateEWMA(prevEwma, recentVal, baselineMean, baselineStd, EWMA_LAMBDA, EWMA_L, ewmaCount);
+          try { await cache.set(ewmaKey, JSON.stringify({ value: ewmaState.value, count: ewmaCount + 1 }), EWMA_CACHE_TTL); } catch { /* best effort */ }
+          const recentMean = recentVal;
+          const trend: MetricSnapshot['trend'] = recentMean > baselineMean * 1.15 ? 'rising' : recentMean < baselineMean * 0.85 ? 'falling' : 'stable';
+          return {
+            current: Math.round(recentVal * 10) / 10,
+            baseline7d: Math.round(baselineMean * 10) / 10,
+            stdDev7d: Math.round(baselineStd * 10) / 10,
+            zScore: Math.round(zScore * 100) / 100,
+            ewma: Math.round(ewmaState.value * 10) / 10,
+            outOfControl: ewmaState.outOfControl,
+            trend
+          };
+        };
+
+        const recentTexts = recentRaw.map(r => r.rawText);
+
+        refusalRate = await buildSnapshot(
+          'refusalRate',
+          rateOf(recentTexts, hasRefusal),
+          baselineRaw.map((_, i) => rateOf(baselineRaw.slice(Math.max(0, i - 5), i + 1).map(r => r.rawText), hasRefusal))
+        );
+        hedgingRate = await buildSnapshot(
+          'hedgingRate',
+          rateOf(recentTexts, hasHedging),
+          baselineRaw.map((_, i) => rateOf(baselineRaw.slice(Math.max(0, i - 5), i + 1).map(r => r.rawText), hasHedging))
+        );
+        codeLength = await buildSnapshot(
+          'codeLength',
+          avgCodeLen(recentRaw),
+          baselineRaw.map((_, i) => avgCodeLen(baselineRaw.slice(Math.max(0, i - 5), i + 1)))
+        );
+      }
+    }
+  } catch (err) {
+    // raw_outputs signals are best-effort — never abort the fingerprint
+  }
+
   // Determine which metrics are drifting
   const driftingMetrics: string[] = [];
-  const metrics = { tokensOut, latencyMs, tokensIn };
+  const metrics = { tokensOut, latencyMs, tokensIn, refusalRate, hedgingRate, codeLength };
   
   for (const [name, snapshot] of Object.entries(metrics)) {
+    if (!snapshot) continue;
     if (Math.abs(snapshot.zScore) > Z_THRESHOLD || snapshot.outOfControl) {
       driftingMetrics.push(name);
     }
@@ -173,6 +271,7 @@ export async function computeBehavioralFingerprint(modelId: number): Promise<Beh
   if (driftDetected) {
     const details = driftingMetrics.map(m => {
       const snap = metrics[m as keyof typeof metrics];
+      if (!snap) return m;
       return `${m}: ${snap.current} (baseline: ${snap.baseline7d}, z=${snap.zScore.toFixed(1)})`;
     }).join('; ');
     

@@ -4,8 +4,8 @@
  */
 
 import { db } from '../db';
-import { scores, models, change_points } from '../db/schema';
-import { eq, desc, asc, and, gte, sql } from 'drizzle-orm';
+import { scores, models, change_points, runs, tasks } from '../db/schema';
+import { eq, desc, asc, and, gte, sql, inArray } from 'drizzle-orm';
 import { calculateConfidenceInterval, calculateStdDev, mannWhitneyU, welchTTest } from './statistical-tests';
 
 // ============================================================================
@@ -715,6 +715,143 @@ export async function getChangePointHistory(modelId: number, limit: number = 10)
 // ============================================================================
 // BATCH OPERATIONS
 // ============================================================================
+
+// A2: Task families for per-capability drift detection
+const TASK_FAMILIES: Record<string, string[]> = {
+  math:       ['py/factorial', 'py/fibonacci', 'py/prime_check', 'py/optimize_fibonacci'],
+  strings:    ['py/is_palindrome', 'py/reverse_string', 'py/regex_match'],
+  graphs:     ['py/binary_search', 'py/dijkstra', 'py/topological_sort'],
+  dp_complex: ['py/word_break', 'py/lru_cache', 'py/mini_interpreter'],
+  debug_data: ['py/debug_sort', 'py/merge_intervals'],
+};
+
+export interface CapabilityDriftResult {
+  family: string;
+  slugs: string[];
+  currentPassRate: number;   // avg pass rate last 7d (0-100)
+  baselinePassRate: number;  // avg pass rate days 8-28
+  delta: number;             // current - baseline (negative = degraded)
+  isDrifting: boolean;
+  significance: number;      // Mann-Whitney effect size or CI ratio
+}
+
+/**
+ * A2: Per-capability drift detection.
+ * Groups tasks by family and computes daily pass rates from raw runs,
+ * then applies Mann-Whitney sliding-window detection on the time series.
+ * Surfaces regressions hidden by the aggregate stupidScore.
+ */
+export async function detectCapabilityDrift(modelId: number): Promise<CapabilityDriftResult[]> {
+  const windowStart = new Date(Date.now() - 28 * 24 * 60 * 60 * 1000).toISOString();
+  const results: CapabilityDriftResult[] = [];
+
+  for (const [family, slugs] of Object.entries(TASK_FAMILIES)) {
+    // Resolve task IDs for this family
+    const familyTasks = await db
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(inArray(tasks.slug, slugs));
+
+    if (familyTasks.length === 0) continue;
+    const taskIds = familyTasks.map(t => t.id);
+
+    // Daily pass rate: avg of runs.passed (0 or 1) × 100 for this model+family
+    const dailyRows = await db
+      .select({
+        day: sql<string>`date(${runs.ts})`,
+        passRate: sql<number>`avg(CASE WHEN ${runs.passed} = 1 THEN 100.0 ELSE 0.0 END)`,
+        nRuns: sql<number>`count(*)`,
+      })
+      .from(runs)
+      .where(
+        and(
+          eq(runs.modelId, modelId),
+          inArray(runs.taskId as any, taskIds),
+          gte(runs.ts, windowStart)
+        )
+      )
+      .groupBy(sql`date(${runs.ts})`)
+      .orderBy(sql`date(${runs.ts})`);
+
+    if (dailyRows.length < 4) continue; // not enough daily points
+
+    const series = dailyRows.map(r => r.passRate);
+    const cutoff = Math.max(1, series.length - 7); // last 7 data-days vs earlier
+
+    const recent = series.slice(cutoff);
+    const baseline = series.slice(0, cutoff);
+
+    if (baseline.length < 3 || recent.length < 2) continue;
+
+    const recentAvg = recent.reduce((a, b) => a + b, 0) / recent.length;
+    const baselineAvg = baseline.reduce((a, b) => a + b, 0) / baseline.length;
+    const delta = recentAvg - baselineAvg;
+
+    // Mann-Whitney on recent vs baseline
+    const mwResult = mannWhitneyU(
+      baseline.map(v => Math.round(v)),
+      recent.map(v => Math.round(v))
+    );
+
+    const ciBaseline = calculateConfidenceInterval(baseline.map(Math.round));
+    const ciRecent = calculateConfidenceInterval(recent.map(Math.round));
+    const ciOverlap = !(ciBaseline.lower > ciRecent.upper || ciRecent.lower > ciBaseline.upper);
+
+    const isDrifting = (mwResult.significant && Math.abs(delta) > 8) ||
+                       (!ciOverlap && Math.abs(delta) > 12);
+    const significance = mwResult.significant
+      ? Math.abs(mwResult.effectSize)
+      : Math.abs(delta) / Math.max(1, ciBaseline.upper - ciBaseline.lower);
+
+    results.push({
+      family,
+      slugs,
+      currentPassRate: Math.round(recentAvg * 10) / 10,
+      baselinePassRate: Math.round(baselineAvg * 10) / 10,
+      delta: Math.round(delta * 10) / 10,
+      isDrifting,
+      significance: Math.round(significance * 100) / 100,
+    });
+  }
+
+  return results;
+}
+
+/**
+ * A2: Run capability drift for all whitelisted models, log findings.
+ * Intended as a nightly job — runs once per night after benchmarks complete.
+ */
+export async function detectAllCapabilityDrift(): Promise<void> {
+  const allModels = await db.select().from(models).where(sql`show_in_rankings = 1`);
+  let driftCount = 0;
+
+  for (const model of allModels) {
+    try {
+      const results = await detectCapabilityDrift(model.id);
+      const drifting = results.filter(r => r.isDrifting);
+
+      if (drifting.length > 0) {
+        driftCount += drifting.length;
+        for (const r of drifting) {
+          const dir = r.delta < 0 ? '📉' : '📈';
+          console.log(
+            `${dir} Capability drift [${model.name}/${r.family}]: ` +
+            `${r.baselinePassRate}% → ${r.currentPassRate}% (Δ${r.delta > 0 ? '+' : ''}${r.delta}%, ` +
+            `sig=${r.significance.toFixed(2)})`
+          );
+        }
+      }
+    } catch (err) {
+      console.error(`❌ Capability drift failed for ${model.name}:`, err);
+    }
+  }
+
+  if (driftCount > 0) {
+    console.log(`⚠️  Capability drift: ${driftCount} family/model combinations drifting`);
+  } else {
+    console.log(`✅ Capability drift: all families stable`);
+  }
+}
 
 /**
  * Compute drift signatures for all active models
