@@ -84,7 +84,7 @@ async function checkProviderHealth(provider: string, adapter: any): Promise<Heal
         testModel = 'glm-5.1'; // GLM-5.1 (GA April 2026, replaces deprecated glm-4.6)
         break;
       case 'kimi':
-        testModel = 'kimi-k2.6'; // Latest Kimi K2.6 model (April 2026)
+        testModel = 'kimi-k2.7-code'; // Latest Kimi K2.7 Code (Jun 2026; k2.5/k2.6 retired)
         break;
       default:
         // Fallback to listModels for unknown providers

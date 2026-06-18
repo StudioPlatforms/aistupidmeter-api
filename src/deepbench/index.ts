@@ -316,7 +316,8 @@ const MODEL_COSTS = {
   'kimi-k2-0905-preview': { input: 0.30, output: 1.50 },
   'kimi-latest': { input: 0.30, output: 1.50 },
   'kimi-thinking-preview': { input: 0.30, output: 1.50 },
-  // Current models (K2.5/K2.6 — whitelisted, thinking mode with reasoning_content)
+  // Current model (K2.7 Code — whitelisted, forced thinking mode with reasoning_content)
+  'kimi-k2.7-code': { input: 0.30, output: 1.50 },
   'kimi-k2.5': { input: 0.30, output: 1.50 },
   'kimi-k2.6': { input: 0.30, output: 1.50 },
   

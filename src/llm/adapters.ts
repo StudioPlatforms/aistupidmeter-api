@@ -75,7 +75,10 @@ export function isDeepSeekModel(modelName: string): boolean {
 
 // Helper: check if Kimi model uses thinking (chain-of-thought) mode.
 export function isKimiThinkingModel(modelName: string): boolean {
-  return /^kimi-k2\.[56]/.test(modelName);
+  // K2.5, K2.6 and K2.7(-code) all run in forced thinking mode and require a
+  // fixed temperature of 1.0 (the API rejects other values). kimi-k2.7-code in
+  // particular cannot disable thinking. Keep this in sync when new K2.x land.
+  return /^kimi-k2\.[567]/.test(modelName);
 }
 
 // Helper: check if model is any Kimi model
@@ -1165,10 +1168,9 @@ export class KimiAdapter implements LLMAdapter {
         .map((m: any) => m.id)
         .filter((id: string) => /^kimi/.test(id));
     } catch {
-      // Fallback to current recommended models (K2.5/K2.6 are latest as of May 2026)
+      // Fallback to current recommended model (K2.7 Code is latest as of Jun 2026)
       return [
-        'kimi-k2.5',
-        'kimi-k2.6'
+        'kimi-k2.7-code'
       ];
     }
   }

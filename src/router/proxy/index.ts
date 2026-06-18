@@ -214,6 +214,7 @@ function estimateCost(provider: string, model: string, tokensIn: number, tokensO
       // REMOVED: deepseek-chat, deepseek-reasoner — hard retire July 24, 2026
     },
     'kimi': {
+      'kimi-k2.7-code': { input: 0.0003, output: 0.0015 },
       'kimi-k2.5': { input: 0.0003, output: 0.0015 },
       'kimi-k2.6': { input: 0.0003, output: 0.0015 },
     }

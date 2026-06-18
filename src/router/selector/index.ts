@@ -67,7 +67,8 @@ const MODEL_COSTS = {
   'deepseek-v4-pro': { input: 0.000003625, output: 0.00087 },
   // REMOVED: deepseek-chat, deepseek-reasoner — hard retire July 24, 2026
   
-  // Kimi
+  // Kimi (K2.7 Code is current flagship; k2.5/k2.6 retired from benchmarking)
+  'kimi-k2.7-code': { input: 0.0003, output: 0.0015 },
   'kimi-k2.5': { input: 0.0003, output: 0.0015 },
   'kimi-k2.6': { input: 0.0003, output: 0.0015 },
   
@@ -95,7 +96,7 @@ const TOOL_CALLING_MODELS = new Set([
   // DeepSeek (removed deprecated aliases)
   'deepseek-v4-flash', 'deepseek-v4-pro',
   // Kimi
-  'kimi-k2.5', 'kimi-k2.6',
+  'kimi-k2.7-code', 'kimi-k2.5', 'kimi-k2.6',
   // GLM — GLM-5.1 supports tool calling with thinking mode (interleaved thinking)
   'glm-5.1', 'glm-5', 'glm-4.7', 'glm-4.6'
 ]);
